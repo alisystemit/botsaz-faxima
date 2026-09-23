@@ -465,6 +465,23 @@ function checktelegramip()
     }
     return false;
 }
+/** secret کرون میرزا — با templates/mirza/cron/_guard.php یکسان است */
+function mirzaCronSecret()
+{
+    global $APIKEY;
+    $token = (isset($APIKEY) && is_string($APIKEY)) ? $APIKEY : '';
+    return $token !== '' ? hash('sha256', $token . '_mirza_cron_secret') : '';
+}
+
+/** آدرس کامل اسکریپت کرون میرزا همراه secret (برای crontab / نمایش به ادمین) */
+function mirzaCronUrl($script)
+{
+    global $domainhosts;
+    $url = 'https://' . $domainhosts . '/cron/' . ltrim((string)$script, '/');
+    $secret = mirzaCronSecret();
+    return $secret !== '' ? $url . '?secret=' . $secret : $url;
+}
+
 function generateAuthStr($length = 10)
 {
     $characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';

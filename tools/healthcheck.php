@@ -202,3 +202,6 @@ if (isset($argv[1]) && $argv[1] === '--json') {
         'healthy' => empty($errors),
     ], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
 }
+
+// کد خروج: 0 = سالم، 1 = خطا (برای CI / اسکریپت‌ها)
+exit(empty($errors) ? 0 : 1);

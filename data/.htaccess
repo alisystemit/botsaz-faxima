@@ -1,1 +1,2 @@
-Deny from all
+# دسترسی مستقیم به دیتابیس/لاگ مدیریتی ممنوع (Apache 2.4)
+Require all denied

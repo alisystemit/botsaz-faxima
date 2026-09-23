@@ -980,6 +980,13 @@ function replaceCronJobsMatchingStatus($pattern, $newCommands)
     return ['status' => $verifyOk ? 'success' : 'error', 'user' => $cronUser];
 }
 
+function faximaCronSecret()
+{
+    global $APIKEY;
+    $token = (isset($APIKEY) && is_string($APIKEY)) ? $APIKEY : '';
+    return $token !== '' ? hash('sha256', $token . '_faoxima_cron_secret') : '';
+}
+
 function rxActivecronPattern($domainhosts)
 {
     $projectHost = trim((string) preg_replace('#^https?://#i', '', $domainhosts), '/');
@@ -999,8 +1006,9 @@ function activecronStatus()
         return ['status' => 'error', 'user' => null];
     }
 
+    $rxCronSecret = function_exists('faximaCronSecret') ? faximaCronSecret() : '';
     $cronCommands = [
-        "*/1 * * * * curl -s https://$domainhosts/cron/cron.php >/dev/null 2>&1",
+        "*/1 * * * * curl -s https://$domainhosts/cron/cron.php" . ($rxCronSecret !== '' ? '?secret=' . $rxCronSecret : '') . " >/dev/null 2>&1",
     ];
 
     return replaceCronJobsMatchingStatus(rxActivecronPattern($domainhosts), $cronCommands);

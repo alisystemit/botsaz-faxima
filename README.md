@@ -8,15 +8,22 @@
 ```
 bot.php               → وبهوک ربات اصلی (ربات‌ساز)
 config.php            → تنظیمات (از روی config.example.php)
-src/BotApi.php        → wrapper تلگرام
+.htaccess             → مسدودسازی دسترسی مستقیم به tools/ src/ templates/ data/ و README
+src/BotApi.php        → wrapper تلگرام (params سازگار با urlencoded)
 src/Store.php         → دیتابیس مدیریتی SQLite (کاربران + ربات‌ها)؛ اگر sqlite نبود خودکار MySQL
-src/Manager.php       → کپی قالب، ساخت دیتابیس، پچ کانفیگ، ست وبهوک
+src/Manager.php       → کپی قالب، ساخت دیتابیس، پچ کانفیگ، ست وبهوک، رمزگشایی توکن فرزند
+src/Migrator.php      → مایگریشن schema دیتابیس مدیریتی
+src/Logger.php        → لاگ فایلی روی data/logs
 templates/faxima/     → سورس واقعی فاکسیما (https://github.com/Mmd-Amir/Faoxima — فروش VPN، ریفکتور میرزا)
 templates/mirza/      → سورس واقعی میرزا (https://github.com/NewMreza/botmirzapanel — فروش VPN مرزبان)
-bots/<slug>/          → ربات‌های ساخته‌شده
+bots/<slug>/          → ربات‌های ساخته‌شده (کرون با secret محافظت می‌شود)
 tools/install.php     → نصب اولیه
+tools/install.sh      → نصب اتوماتیک روی لینوکس (config را بازنویسی نمی‌کند)
 tools/set_webhook.php → ست وبهوک ربات اصلی
 tools/selftest.php    → تست عملکردی
+tools/healthcheck.php → بررسی پوشه ↔ رکورد ↔ دیتابیس ↔ وبهوک (exit code برای CI)
+tools/dryrun.php      → ساخت خشک بدون تلگرام (exit code برای CI)
+tools/cron_dispatcher.php → اجرای کرون همه ربات‌ها از یک خط crontab
 ```
 
 ## نصب (لوکال لاراگون)
@@ -63,7 +70,7 @@ C:\laragon\bin\php\php-8.1.10-Win32-vs16-x64\php.exe tools/install.php
 
 - هر دو سورس رسماً PHP 8.2+ می‌خواهند؛ لوکال لاراگون 8.1 است (سینتکس روی 8.1 بدون خطاست؛ روی هاست با 8.2 مشکلی نیست).
 - `base_url` باید **https عمومی** باشد تا ست وبهوک و اجرای `table.php` کار کند (روی لوکال: ngrok).
-- فاکسیما علاوه بر ربات، مینی‌اپ و پنل وب دارد که روی همان پوشه سرو می‌شوند؛ کرون‌جاب‌هایش (`cron/`) را در هاست تنظیم کن.
+- فاکسیما علاوه بر ربات، مینی‌اپ و پنل وب دارد که روی همان پوشه سرو می‌شوند؛ کرون‌جاب‌هایش (`cron/`) را در هاست تنظیم کن (در پنل ربات، خط `curl` آماده با `secret` را کپی کن).
 
 ## کرون ربات‌های فرزند (مهم)
 
@@ -80,9 +87,11 @@ C:\laragon\bin\php\php-8.1.10-Win32-vs16-x64\php.exe tools/install.php
 ```
 */5 * * * * php /path/to/bots/bot_slug/cron/cron.php
 ```
+فقط از **CLI** اجرا کن؛ فراخوانی HTTP این اسکریپت‌ها نیاز به `?secret=` دارد (گارد `cron/_guard.php`).
 
 ### دکمه راه‌اندازی کرون
 در پنل ربات‌ساز، دستور `/cron` یا «⏰ کرون» را بزن تا خط کرون را ببینید.
+اگر کرون را از پنل ربات فرزند ثبت کنی، خط `curl` شامل `?secret=` مناسب همان ربات است.
 
 ## تست و سلامت‌رسانی
 
@@ -92,6 +101,4 @@ php tools/healthcheck.php       # بررسی پوشه ↔ رکورد ↔ دیت�
 php tools/dryrun.php faxima test  # ساخت خشک (بدون تلگرام)
 ```
 
-## نکته MySQL در هاست اشتراکی
-
-اگر یوزر دسترسی `CREATE DATABASE` نداشت، `fallback_db_name` را در `config.php` به یک دیتابیس موجود ست کن تا جدول‌ها با پیشوند داخل همان دیتابیس ساخته شوند.
+> یوزر MySQL باید دسترسی `CREATE DATABASE` داشته باشد؛ اگر نداشته باشد ساخت ربات با خطا متوقف می‌شود.

@@ -13,6 +13,25 @@ if (function_exists('putenv') && !preg_match('/(^|,)\s*putenv\s*(,|$)/', strtolo
     @putenv('TZ=Asia/Tehran');
 }
 
+// ===== گارد ورود وب (قبل از قفل و هر کار دیگر) =====
+// CLI (cron_dispatcher / crontab با php) مجاز است؛ HTTP فقط با secret مشتق از توکن ربات.
+if (php_sapi_name() !== 'cli') {
+    $rxGuardCfg = dirname(__DIR__) . '/config.php';
+    $rxGuardToken = '';
+    if (is_readable($rxGuardCfg)) {
+        $rxGuardRaw = (string) @file_get_contents($rxGuardCfg);
+        if (preg_match('/\$APIKEY\s*=\s*[\'"]([^\'"]*)[\'"]/', $rxGuardRaw, $rxGuardM)) {
+            $rxGuardToken = $rxGuardM[1];
+        }
+    }
+    $rxGuardSecret = $rxGuardToken !== '' ? hash('sha256', $rxGuardToken . '_faxima_cron_secret') : '';
+    $rxGuardProvided = isset($_GET['secret']) && is_string($_GET['secret']) ? $_GET['secret'] : '';
+    if ($rxGuardSecret === '' || $rxGuardProvided === '' || !hash_equals($rxGuardSecret, $rxGuardProvided)) {
+        http_response_code(403);
+        exit('Forbidden');
+    }
+}
+
 
 $lockFile = __DIR__ . '/cron.lock';
 $lockHandle = @fopen($lockFile, 'c');

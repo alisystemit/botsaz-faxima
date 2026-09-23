@@ -19,7 +19,12 @@ require_once $root.'/src/Store.php';
 $store = new Store($cfg['manager_db'], $cfg);
 echo "manager DB OK (driver: {$store->getDriver()})\n";
 
-// محافظت از پوشه data و کانفیگ ربات‌ها
-file_put_contents($root.'/data/.htaccess', "Deny from all\n");
-file_put_contents($root.'/bots/.htaccess', "Order Deny,Allow\n<Files \"config.php\">\nDeny from all\n</Files>\n");
+// محافظت از پوشه data (Apache 2.4 — سینتکس قدیمی Deny from all فقط با mod_access_compat کار می‌کند)
+file_put_contents($root.'/data/.htaccess', "Require all denied\n");
+
+// نکته: bots/.htaccess دستی نوشته نمی‌شود چون باید index.php / table.php / cron/ را
+// برای وبهوک ربات‌های فرزند باز بگذارد (فایل .htaccess این پوشه در مخزن نگه‌داری می‌شود).
+if (!file_exists($root.'/bots/.htaccess')) {
+    echo "⚠️  bots/.htaccess پیدا نشد — از نسخه موجود در مخزن کپی کن.\n";
+}
 echo "done.\n";

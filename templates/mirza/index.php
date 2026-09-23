@@ -144,11 +144,12 @@ foreach ($datatxtbot as $item) {
     }
 }
 if (function_exists('shell_exec') && is_callable('shell_exec')) {
-    $existingCronCommands = shell_exec('crontab -l');
-    $phpFilePath = "https://$domainhosts/cron/sendmessage.php";
-    $cronCommand = "*/1 * * * * curl $phpFilePath";
-    if (strpos($existingCronCommands, $cronCommand) === false) {
-        $command = "(crontab -l ; echo '$cronCommand') | crontab -";
+    // secret کرون همراه کرون‌لاین ثبت می‌شود تا cron/_guard.php اجازه اجرا بدهد
+    $cronUrl = mirzaCronUrl('sendmessage.php');
+    $existingCronCommands = (string)shell_exec('crontab -l 2>/dev/null');
+    $cronCommand = "*/1 * * * * curl " . escapeshellarg($cronUrl);
+    if (strpos($existingCronCommands, $cronUrl) === false) {
+        $command = "(crontab -l 2>/dev/null; echo " . escapeshellarg($cronCommand) . ") | crontab -";
         shell_exec($command);
     }
 }

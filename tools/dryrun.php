@@ -10,7 +10,7 @@ require_once __DIR__ . '/../src/Logger.php';
 
 $cfgFile = __DIR__ . '/../config.php';
 if (!file_exists($cfgFile)) {
-    echo "❌ config.php not found. Run: php tools/install.sh\n";
+    echo "❌ config.php not found. Run: php tools/install.php\n";
     exit(1);
 }
 $cfg = require $cfgFile;
@@ -56,8 +56,10 @@ foreach ($requiredFiles[$type] as $f) {
         $missing[] = $f;
     }
 }
+$failed = false;
 if (!empty($missing)) {
-    echo "   ⚠️  Missing files: " . implode(', ', $missing) . "\n";
+    echo "   ❌ Missing files: " . implode(', ', $missing) . "\n";
+    $failed = true;
 } else {
     echo "   All required files present ✓\n";
 }
@@ -77,7 +79,8 @@ $botDir = Manager::childBotsDir() . '/' . $slug;
 
 echo "   [5a] کپی قالب... ";
 try {
-    Manager::copyDir($tplDir, $botDir);
+    // مثل buildBot واقعی: پوشه‌های حجیم/غیرضروری کپی نمی‌شوند (ولی vendor لازم است)
+    Manager::copyDir($tplDir, $botDir, ['docker/', 'docker-compose.yml', '.env.example', 'vpnbot/', 'install.sh', 'images.jpeg', 'installer/']);
     echo "OK\n";
 } catch (Exception $e) {
     echo "FAILED: " . $e->getMessage() . "\n";
@@ -114,18 +117,21 @@ foreach ($placeholders as $ph) {
     }
 }
 if (!empty($leftover)) {
-    echo "⚠️  Unreplaced placeholders: " . implode(', ', $leftover) . "\n";
+    echo "❌ Unreplaced placeholders: " . implode(', ', $leftover) . "\n";
+    $failed = true;
 } else {
     echo "All placeholders replaced ✓\n";
 }
 
 echo "   [5d] بررسی syntax کانفیگ... ";
-$phpBin = $cfg['php_bin'] ?? 'php';
-        $lintResult = @shell_exec("\"{$phpBin}\" -l {$botDir}/config.php 2>&1");
+$phpBin = trim((string)($cfg['php_bin'] ?? ''));
+if ($phpBin === '' || !is_file($phpBin)) $phpBin = defined('PHP_BINARY') && PHP_BINARY !== '' ? PHP_BINARY : 'php';
+$lintResult = @shell_exec("\"{$phpBin}\" -l \"{$botDir}/config.php\" 2>&1") ?? '';
 if (str_contains($lintResult, 'No syntax errors')) {
     echo "OK\n";
 } else {
     echo "FAILED: {$lintResult}\n";
+    $failed = true;
 }
 
 // ===== پاکسازی =====
@@ -135,17 +141,19 @@ echo "   Test directory cleaned ✓\n";
 
 // ===== نتیجه =====
 echo "\n=========================================\n";
+if ($failed) {
+    echo "  ❌ Dry run FAILED — مشکلات بالا را برطرف کن.\n";
+    echo "=========================================\n";
+    exit(1);
+}
 echo "  ✅ Dry run completed successfully!\n";
 echo "  Bot '{$slug}' can be safely created.\n";
 echo "=========================================\n";
 
 // ===== بررسی فایل‌های اضافی =====
-echo "\nفایل‌های اضافی که کپی نمی‌شوند:\n";
-$extraDirs = ['docker/', 'docker-compose.yml', '.env.example', 'vpnbot/', 'install.sh', 'composer.json'];
-$extraFiles = ['images.jpeg', 'default_help.json', 'install.sh'];
-echo "  (These files are NOT part of the bot's operation and should be excluded from copying)\n";
-echo "\n💡 برای حذف فایل‌های اضافی در buildBot از Manager::copyDir استفاده شده:\n";
-echo "   قالب‌ها باید فقط فایل‌های ضروری را داشته باشند.\n";
+echo "\nفایل‌هایی که در ساخت واقعی کپی نمی‌شوند (مثل buildBot):\n";
+echo "  docker/, docker-compose.yml, .env.example, vpnbot/, install.sh, images.jpeg, installer/\n";
+echo "  توجه: vendor/ حتماً کپی می‌شود (بدون آن ربات فرزند کار نمی‌کند).\n";
 
 echo "\nنکته: برای اجرای واقعی بدون dry-run:\n";
 echo "  php tools/dryrun.php {$type} ACTUAL_NAME\n";

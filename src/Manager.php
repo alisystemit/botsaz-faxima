@@ -59,19 +59,11 @@ class Manager
         $dsn = "mysql:host={$host};port={$port};charset=utf8mb4";
         $pdo = new PDO($dsn, $user, $pass, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
 
-        try {
-            $pdo->exec("CREATE DATABASE IF NOT EXISTS `{$dbName}` CHARACTER SET utf8mb4 COLLATE utf8mb4_persian_ci");
-            if ($schemaFile !== null) self::importSql($pdo, $dbName, $schemaFile, '');
-            return [$dbName, ''];
-        } catch (Exception $e) {
-            // fallback: هاست اشتراکی بدون دسترسی ساخت دیتابیس → جدول‌های پیشونددار در دیتابیس مشترک
-            // (فقط برای قالب‌های schemaمحور مثل فاکسیما؛ میرزا نام جدول ثابت می‌خواهد و fallback ندارد)
-            if (empty($cfg['fallback_db_name']) || $schemaFile === null) throw $e;
-            $shared = $cfg['fallback_db_name'];
-            $tp = $prefix . $safeFolder . '_' . $rand . '_';
-            self::importSql($pdo, $shared, $schemaFile, $tp);
-            return [$shared, $tp];
-        }
+        // نکته: مسیر «fallback به دیتابیس مشترک» حذف شد — همیشه دیتابیس جدا ساخته می‌شود؛
+        // اگر CREATE DATABASE موفق نشد استثنا بالا می‌رود و ساخت ربات متوقف می‌شود.
+        $pdo->exec("CREATE DATABASE IF NOT EXISTS `{$dbName}` CHARACTER SET utf8mb4 COLLATE utf8mb4_persian_ci");
+        if ($schemaFile !== null) self::importSql($pdo, $dbName, $schemaFile, '');
+        return [$dbName, ''];
     }
 
     private static function importSql(PDO $pdo, string $db, string $file, string $tablePrefix): void
@@ -155,11 +147,16 @@ class Manager
         ];
         $new = str_replace(array_keys($replacements), array_values($replacements), $raw, $count);
         if ($count === 0) throw new Exception("placeholderهای config میرزا پیدا نشد (نسخه ناسازگار؟)");
-        // هاست دیتابیس میرزا هاردکد localhost است؛ با هاست واقعی جایگزین می‌کنیم
+        // هاست دیتابیس میرزا هاردکد localhost است؛ با هاست/پورت واقعی جایگزین می‌کنیم.
+        // پورت صریحاً به‌عنوان آرگومان پنجم mysqli_connect داده می‌شود («host:port» داخل آرگومان host
+        // رسمی/پشتیبانی‌شده نیست و روی بعضی استک‌ها نادیده گرفته می‌شود).
         $dbHost = $cfg['db_host'];
-        $dbPort = $cfg['db_port'] ?? 3306;
-        $dbHostStr = $dbHost . ($dbPort != 3306 ? ":{$dbPort}" : '');
-        $new = str_replace('mysqli_connect("localhost"', 'mysqli_connect("' . $dbHostStr . '"', $new);
+        $dbPort = (int)($cfg['db_port'] ?? 3306);
+        $new = str_replace(
+            'mysqli_connect("localhost", $usernamedb, $passworddb, $dbname)',
+            'mysqli_connect("' . $dbHost . '", $usernamedb, $passworddb, $dbname, ' . $dbPort . ')',
+            $new
+        );
         // ===== فیکس: DSN مجزا برای PDO =====
         $new = str_replace('mysql:host=localhost;', 'mysql:host=' . $dbHost . ';port=' . $dbPort . ';', $new);
         if (file_put_contents($file, $new) === false) throw new Exception("خطا در نوشتن config.php میرزا");

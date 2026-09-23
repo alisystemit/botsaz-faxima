@@ -145,7 +145,7 @@ function childPdo(array $cfg, array $bot): ?PDO {
     } catch (Exception $e) { return null; }
 }
 
-// ===== fallback_db_name: childUserTable با پیشوند =====
+// ===== جدول کاربران ربات فرزند (با پیشوند احتمالی db_table_prefix) =====
 function childUserTable(array $bot): array {
     $prefix = $bot['db_table_prefix'] ?? '';
     $table = $prefix . 'user';
@@ -192,10 +192,9 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
     }
 
     // ===== عمق لینک عمیق =====
-    // فقط یک پیام خوش‌آمد بده؛ ادامه‌ی پردازش همان /start است (پیام دوم ارسال نمی‌شود)
+    // فقط لاگ می‌زنیم؛ متن لینک به پیام خوش‌آمد /start الحاق می‌شود تا کاربر یک پیام ببیند نه دو
     if ($deepLink !== null) {
         Logger::getInstance()->info('deep_link', "User {$uid} deep link: {$deepLink}");
-        BotApi::send($TOKEN, $chatId, "🔗 لینک شما: <code>" . htmlspecialchars($deepLink) . "</code>\n\nخوش آمدید!");
     }
 
     $step = $user['step'];
@@ -217,8 +216,11 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
             ['command' => 'help', 'description' => 'ℹ️ راهنما'],
         ]);
         $role = $admin ? "مدیر 👑" : "کاربر مجاز ✅";
+        $deepNote = $deepLink !== null
+            ? "🔗 لینک شما: <code>" . htmlspecialchars($deepLink) . "</code>\n\n"
+            : '';
         BotApi::send($TOKEN, $chatId,
-            "👋 سلام! به <b>ربات‌ساز</b> خوش آمدی.\nنقش شما: {$role}\n\nبا دکمه «🤖 ساخت ربات جدید» در چند ثانیه ربات فاکسیما یا میرزا بساز.\nفقط توکن ربات + آیدی ادمین + یک نام لازم است.",
+            $deepNote . "👋 سلام! به <b>ربات‌ساز</b> خوش آمدی.\nنقش شما: {$role}\n\nبا دکمه «🤖 ساخت ربات جدید» در چند ثانیه ربات فاکسیما یا میرزا بساز.\nفقط توکن ربات + آیدی ادمین + یک نام لازم است.",
             ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
         return;
     }
@@ -229,6 +231,12 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
         case '/help':   $text = 'ℹ️ راهنما'; break;
         case '/stats':  $text = $admin ? '📊 آمار' : 'ℹ️ راهنما'; break;
         case '/cron':   $text = $admin ? '⏰ کرون' : 'ℹ️ راهنما'; break;
+    }
+
+    // دکمه «📋 درخواست‌های جدید» شمارنده پویا دارد: «📋 درخواست‌های جدید (N)»
+    if ($admin && str_starts_with($text, '📋 درخواست‌های جدید')) {
+        sendPendingRequests($store, $TOKEN, $chatId);
+        return;
     }
 
     switch ($text) {
@@ -579,7 +587,8 @@ function buildBot(array $cfg, Store $store, string $TOKEN, int $owner, string $t
                 $serverPdo->exec("DROP DATABASE IF EXISTS `{$dbName}`");
             } catch (Exception $dbErr) { error_log("Rollback DB: " . $dbErr->getMessage()); }
         }
-        if ($dirCreated && is_dir($botDir)) {
+        // پوشه را همیشه تمیز کن (حتی اگر کپی ناقص مانده باشد)
+        if (is_dir($botDir)) {
             try { Manager::removeDir($botDir); } catch (Exception $dirErr) { error_log("Rollback DIR: " . $dirErr->getMessage()); }
         }
         throw new Exception("ساخت ناموفق: " . $e->getMessage() . " — منابع آزاد شدند.");

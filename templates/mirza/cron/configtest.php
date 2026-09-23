@@ -1,4 +1,5 @@
 <?php
+require_once __DIR__ . '/_guard.php';
 date_default_timezone_set('Asia/Tehran');
 require_once '../config.php';
 require_once '../botapi.php';

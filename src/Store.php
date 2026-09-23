@@ -384,13 +384,6 @@ class Store
     }
 
     // ---- build quota ----
-    public function getBuildCount(int $userId): int
-    {
-        $st = $this->pdo->prepare("SELECT build_count FROM users WHERE user_id = ?");
-        $st->execute([$userId]);
-        return (int)($st->fetchColumn() ?? 0);
-    }
-
     public function incrementBuildCount(int $userId): void
     {
         $st = $this->pdo->prepare("UPDATE users SET build_count = build_count + 1 WHERE user_id = ?");

@@ -74,26 +74,52 @@ read -p "    DB Password: " DB_PASS
 read -p "    DB Prefix [botsaz_]: " DB_PREFIX
 DB_PREFIX=${DB_PREFIX:-botsaz_}
 
-# ۶) ساخت config.php
+# اعتبارسنجی پورت (escape مقادیر دیگر را PHP با var_export انجام می‌دهد؛ نیازی به escape دستی نیست)
+if ! [[ "$DB_PORT" =~ ^[0-9]+$ ]]; then DB_PORT=3306; fi
+SECRET_KEY=$($PHP_BIN -r 'echo bin2hex(random_bytes(16));')
+
+# ۶) ساخت config.php (بدون بازنویسی کانفیگ موجود)
+# مقادیر از طریق env به PHP داده می‌شوند و با var_export نوشته می‌شوند تا کاراکترهای
+# خاص مثل $ ' \ " در توکن/پسورد باعث خرابی یا تزریق در کانفیگ نشود.
 echo ""
-echo "[✓] ساخت config.php..."
-cat > "$ROOT_DIR/config.php" << CONFIG_EOF
-<?php
-return [
-    'main_token' => '$MAIN_TOKEN',
-    'super_admins' => [$SUPER_ADMIN],
-    'base_url' => '$BASE_URL',
-    'db_host' => '$DB_HOST',
-    'db_port' => $DB_PORT,
-    'db_user' => '$DB_USER',
-    'db_pass' => '$DB_PASS',
-    'db_prefix' => '$DB_PREFIX',
-    'fallback_db_name' => '',
-    'manager_db' => __DIR__ . '/data/botsaz.sqlite',
-    'secret_key' => 'change-this-to-a-random-string',
-];
-CONFIG_EOF
-echo "   config.php ساخته شد ✓"
+if [ -f "$ROOT_DIR/config.php" ]; then
+    echo "[⚠️] config.php از قبل وجود دارد — بازنویسی نشد. برای تغییر، دستی ویرایش کن."
+else
+    echo "[✓] ساخت config.php..."
+    CFG_OUT="$ROOT_DIR/config.php" \
+    MAIN_TOKEN="$MAIN_TOKEN" \
+    SUPER_ADMIN="$SUPER_ADMIN" \
+    BASE_URL="$BASE_URL" \
+    DB_HOST="$DB_HOST" \
+    DB_PORT="$DB_PORT" \
+    DB_USER="$DB_USER" \
+    DB_PASS="$DB_PASS" \
+    DB_PREFIX="$DB_PREFIX" \
+    CFG_PHP_BIN="$PHP_BIN" \
+    SECRET_KEY="$SECRET_KEY" \
+    "$PHP_BIN" -r '
+$cfg = array(
+    "main_token" => (string) getenv("MAIN_TOKEN"),
+    "super_admins" => array((int) getenv("SUPER_ADMIN")),
+    "base_url" => (string) getenv("BASE_URL"),
+    "db_host" => (string) getenv("DB_HOST"),
+    "db_port" => (int) getenv("DB_PORT"),
+    "db_user" => (string) getenv("DB_USER"),
+    "db_pass" => (string) getenv("DB_PASS"),
+    "db_prefix" => (string) getenv("DB_PREFIX"),
+    "manager_db" => null,
+    "php_bin" => (string) getenv("CFG_PHP_BIN"),
+    "secret_key" => (string) getenv("SECRET_KEY"),
+);
+$out = "<?php\nreturn " . var_export($cfg, true) . ";\n";
+$out = str_replace("\x27manager_db\x27 => NULL,", "\x27manager_db\x27 => __DIR__ . \x27/data/botsaz.sqlite\x27,", $out);
+if (file_put_contents((string) getenv("CFG_OUT"), $out) === false) {
+    fwrite(STDERR, "config.php write failed\n");
+    exit(1);
+}
+'
+    echo "   config.php ساخته شد ✓"
+fi
 
 # ۷) اجرای نصب اولیه
 echo ""

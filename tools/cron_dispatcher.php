@@ -87,8 +87,8 @@ foreach ($activeBots as $bot) {
         foreach ($cronFiles as $cronFile) {
             $fileName = basename($cronFile);
 
-            // رد کردن فایل‌های غیررسمی
-            if (in_array($fileName, ['index.php', 'cron.php', '.htaccess'])) continue;
+            // رد کردن فایل‌های غیررسمی و فایل‌های کمکی (مثل _guard.php)
+            if (in_array($fileName, ['index.php', 'cron.php', '.htaccess']) || str_starts_with($fileName, '_')) continue;
 
             $cmd = cronCmd($cfg, $cronFile, ['BOT_TOKEN' => $plainToken, 'BOT_FOLDER' => $bot['folder']]);
             runAsync($cmd, $isWindows);

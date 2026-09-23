@@ -629,6 +629,7 @@ if (!function_exists('rxBuildMiniAppInstructionText')) {
                 $cronReasonText = "⚠️ تنظیم خودکار کرون‌جاب با خطا مواجه شد.";
             }
 
+            $rxManualCronQuery = (function_exists('faximaCronSecret') && faximaCronSecret() !== '') ? '?secret=' . faximaCronSecret() : '';
             $cronSectionText = <<<HTML
 ➖➖➖➖➖➖➖➖➖➖➖➖
 {$cronReasonText}
@@ -640,7 +641,7 @@ if (!function_exists('rxBuildMiniAppInstructionText')) {
 فقط <b>یک کرون</b> کافی است — بقیه فرآیندها به‌صورت خودکار از همین کرون اجرا می‌شوند:
 
 <b>⏱ هر ۱ دقیقه یک بار</b>
-<code>curl -s https://{$domainhostsEscaped}/cron/cron.php &gt;/dev/null 2&gt;&amp;1</code>
+<code>curl -s https://{$domainhostsEscaped}/cron/cron.php{$rxManualCronQuery} &gt;/dev/null 2&gt;&amp;1</code>
 HTML;
         }
 
