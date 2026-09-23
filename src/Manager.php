@@ -15,7 +15,7 @@ class Manager
         return substr($s, 0, 40);
     }
 
-    public static function copyDir(string $src, string $dst): void
+    public static function copyDir(string $src, string $dst, array $exclude = []): void
     {
         if (!is_dir($src)) throw new Exception("قالب پیدا نشد: $src");
         @mkdir($dst, 0777, true);
@@ -24,7 +24,11 @@ class Manager
             RecursiveIteratorIterator::SELF_FIRST
         );
         foreach ($it as $f) {
-            $target = $dst . DIRECTORY_SEPARATOR . $it->getSubPathName();
+            $relPath = $it->getSubPathName();
+            foreach ($exclude as $ex) {
+                if ($relPath === $ex || str_starts_with($relPath, $ex . '/')) continue 2;
+            }
+            $target = $dst . DIRECTORY_SEPARATOR . $relPath;
             if ($f->isDir()) @mkdir($target, 0777, true);
             else copy($f->getPathname(), $target);
         }
@@ -160,6 +164,17 @@ class Manager
         if (file_put_contents($file, $new) === false) throw new Exception("خطا در نوشتن config.php میرزا");
     }
 
+    /** رمزگشایی توکن ذخیره‌شده ربات فرزند (سازگار با توکن‌های ساده قدیمی) */
+    public static function decryptChildToken(string $stored, string $key): string
+    {
+        if ($stored === '') return '';
+        $data = base64_decode($stored, true);
+        if ($data === false || strlen($data) <= 16) return $stored;
+        $d = openssl_decrypt(substr($data, 16), 'AES-256-CBC', hash('sha256', $key), 0, substr($data, 0, 16));
+        if (is_string($d) && preg_match('/^\d+:[\w\-]{20,}$/', $d)) return $d;
+        return $stored;
+    }
+
     /** اجرای table.php از طریق HTTP (ساخت جدول‌ها) — مثل نصب‌کننده‌های رسمی */
     public static function triggerTable(string $tableUrl): bool
     {
@@ -239,26 +254,4 @@ class Manager
         }
     }
 
-    // ===== کپی قالب با فیلتر =====
-    public static function copyDir(string $src, string $dst, array $exclude = []): void
-    {
-        if (!is_dir($src)) throw new Exception("قالب پیدا نشد: $src");
-        @mkdir($dst, 0777, true);
-        $it = new RecursiveIteratorIterator(
-            new RecursiveDirectoryIterator($src, RecursiveDirectoryIterator::SKIP_DOTS),
-            RecursiveIteratorIterator::SELF_FIRST
-        );
-        foreach ($it as $f) {
-            $target = $dst . DIRECTORY_SEPARATOR . $it->getSubPathName();
-            // بررسی exclude
-            $relPath = $it->getSubPathName();
-            foreach ($exclude as $ex) {
-                if ($relPath === $ex || str_starts_with($relPath, $ex . '/')) {
-                    continue 2;
-                }
-            }
-            if ($f->isDir()) @mkdir($target, 0777, true);
-            else copy($f->getPathname(), $target);
-        }
     }
-}

@@ -112,6 +112,11 @@ class BotApi
         return self::call($token, 'getMe');
     }
 
+    public static function getWebhookInfo(string $token): array
+    {
+        return self::call($token, 'getWebhookInfo');
+    }
+
     public static function setWebhook(string $token, string $url, ?string $secretToken = null): array
     {
         $p = ['url' => $url, 'drop_pending_updates' => true];

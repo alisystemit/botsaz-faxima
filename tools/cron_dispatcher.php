@@ -34,23 +34,28 @@ foreach ($activeBots as $bot) {
         }
 
         $type = $bot['type'];
-        $cronFile = Manager::templateDir($type) . '/cron/';
+        // کرون‌های هر ربات از پوشه خود همان ربات اجرا می‌شوند (نه قالب)
+        $cronDir = $botDir . '/cron/';
 
-        if (!is_dir($cronFile)) {
-            // میرزا cron از ربات خودش اجرا می‌شود
+        if (!is_dir($cronDir)) {
+            // کرون ندارد
             $log->debug('cron', "No cron directory for {$type}: {$bot['folder']}");
             continue;
         }
 
+        // توکن ذخیره‌شده رمزنگاری است؛ برای اسکریپت فرزند رمزگشایی کن
+        $plainToken = Manager::decryptChildToken($bot['token'] ?? '', $cfg['secret_key'] ?? 'change-this-to-a-random-string');
+
         // اجرای هر فایل کرون
-        $cronFiles = glob($cronFile . '*.php');
+        $cronFiles = glob($cronDir . '*.php');
         foreach ($cronFiles as $cronFile) {
             $fileName = basename($cronFile);
 
             // رد کردن فایل‌های غیررسمی
             if (in_array($fileName, ['index.php', 'cron.php', '.htaccess'])) continue;
 
-            $cmd = "\"{$cfg['php_bin'] ?? 'php'}\" \"{$cronFile}\" \"{$bot['token']}\" \"{$bot['folder']}\"";
+            $phpBin = $cfg['php_bin'] ?? 'php';
+            $cmd = "\"{$phpBin}\" \"{$cronFile}\" \"{$plainToken}\" \"{$bot['folder']}\"";
             exec($cmd . ' > /dev/null 2>&1 &');
 
             $log->debug('cron', "Executed {$fileName} for {$bot['folder']}");
@@ -59,7 +64,8 @@ foreach ($activeBots as $bot) {
         // برای فاکسیما: cron/cron.php با php CLI اجرا می‌شود
         $faximaCron = Manager::childBotsDir() . '/' . $bot['folder'] . '/cron/cron.php';
         if (file_exists($faximaCron)) {
-            $cmd = "\"{$cfg['php_bin'] ?? 'php'}\" \"{$faximaCron}\"";
+            $phpBin = $cfg['php_bin'] ?? 'php';
+            $cmd = "\"{$phpBin}\" \"{$faximaCron}\"";
             exec($cmd . ' > /dev/null 2>&1 &');
             $log->debug('cron', "Executed faxima cron.php for {$bot['folder']}");
         }

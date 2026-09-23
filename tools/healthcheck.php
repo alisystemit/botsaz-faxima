@@ -78,11 +78,12 @@ foreach ($dbBots as $bot) {
 
     // بررسی وبهوک
     if ($bot['status'] === 'active') {
-        $webhookCheck = BotApi::getMe($bot['token']);
-        if (!empty($webhookCheck['ok'])) {
-            $ok[] = "Bot {$bot['folder']}: webhook active";
+        $tok = Manager::decryptChildToken($bot['token'] ?? '', $cfg['secret_key'] ?? 'change-this-to-a-random-string');
+        $wh = BotApi::getWebhookInfo($tok);
+        if (!empty($wh['ok']) && !empty($wh['result']['url'])) {
+            $ok[] = "Bot {$bot['folder']}: webhook active (" . $wh['result']['url'] . ")";
         } else {
-            $errors[] = "Bot {$bot['folder']}: webhook failed - " . ($webhookCheck['description'] ?? 'unknown');
+            $errors[] = "Bot {$bot['folder']}: webhook missing - " . ($wh['description'] ?? 'no url set');
         }
     }
 }
@@ -162,7 +163,7 @@ $ok[] = "Extra files check completed";
 
 // ===== ۱۲. بررسی کرون =====
 echo "[12] بررسی تنظیمات کرون...\n";
-$cronLine = "*/5 * * * * php " . __DIR__ . "/../tools/cron_dispatcher.php";
+$cronLine = "*/5 * * * * php " . __DIR__ . "/cron_dispatcher.php";
 $ok[] = "Cron line: {$cronLine}";
 $ok[] = "Add this line to your crontab: crontab -e";
 

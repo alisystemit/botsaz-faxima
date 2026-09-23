@@ -39,9 +39,10 @@ class Logger
         $this->write('ERROR', $context, $message . $extra);
     }
 
-    public function warning(string $context, string $message): void
+    public function warning(string $context, string $message, array $contextData = []): void
     {
-        $this->write('WARN', $context, $message);
+        $extra = !empty($contextData) ? ' | ' . json_encode($contextData) : '';
+        $this->write('WARN', $context, $message . $extra);
     }
 
     public function debug(string $context, string $message): void

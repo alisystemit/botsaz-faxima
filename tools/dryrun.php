@@ -120,7 +120,8 @@ if (!empty($leftover)) {
 }
 
 echo "   [5d] بررسی syntax کانفیگ... ";
-$lintResult = @shell_exec("\"{$cfg['php_bin'] ?? 'php'}\" -l {$botDir}/config.php 2>&1");
+$phpBin = $cfg['php_bin'] ?? 'php';
+        $lintResult = @shell_exec("\"{$phpBin}\" -l {$botDir}/config.php 2>&1");
 if (str_contains($lintResult, 'No syntax errors')) {
     echo "OK\n";
 } else {

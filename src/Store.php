@@ -3,6 +3,8 @@
 // اگر pdo_sqlite فعال باشد از فایل SQLite استفاده می‌شود،
 // وگرنه خودکار به MySQL (دیتابیس manager) سوییچ می‌کند تا روی لاراگون بدون تنظیم کار کند.
 
+require_once __DIR__ . '/Migrator.php';
+
 class Store
 {
     private PDO $pdo;
@@ -77,10 +79,12 @@ class Store
             update_id INTEGER PRIMARY KEY,
             processed_at TEXT DEFAULT (datetime('now'))
         )");
-        $this->pdo->exec("CREATE TABLE IF NOT EXISTS processed_updates (
-            update_id INTEGER PRIMARY KEY,
-            processed_at TEXT DEFAULT (datetime('now'))
-        )");
+        // ارتقای دیتابیس‌های قدیمی (ساخته‌شده قبل از ستون build_count)
+        $cols = array_column($this->pdo->query("PRAGMA table_info(users)")->fetchAll(PDO::FETCH_ASSOC), 'name');
+        if (!in_array('build_count', $cols, true)) {
+            $this->pdo->exec("ALTER TABLE users ADD COLUMN build_count INTEGER DEFAULT 0");
+        }
+        $this->initSchemaVersions();
     }
 
     private function initMysql(): void
@@ -126,11 +130,12 @@ class Store
             update_id BIGINT PRIMARY KEY,
             processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-        $this->pdo->exec("CREATE TABLE IF NOT EXISTS processed_updates (
-            update_id BIGINT PRIMARY KEY,
-            processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            INDEX idx_processed (update_id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+        // ارتقای دیتابیس‌های قدیمی
+        $st = $this->pdo->query("SHOW COLUMNS FROM users LIKE 'build_count'");
+        if ($st->fetch() === false) {
+            $this->pdo->exec("ALTER TABLE users ADD COLUMN build_count INT DEFAULT 0");
+        }
+        $this->initSchemaVersions();
     }
 
     // ---- users ----
@@ -190,8 +195,17 @@ class Store
 
     public function markUpdateProcessed(int $updateId): void
     {
-        $st = $this->pdo->prepare("INSERT OR REPLACE INTO processed_updates (update_id) VALUES (?)");
+        if ($this->driver === 'mysql') {
+            $st = $this->pdo->prepare("INSERT INTO processed_updates (update_id) VALUES (?) ON DUPLICATE KEY UPDATE update_id = update_id");
+        } else {
+            $st = $this->pdo->prepare("INSERT OR REPLACE INTO processed_updates (update_id) VALUES (?)");
+        }
         $st->execute([$updateId]);
+    }
+
+    private function nowSql(): string
+    {
+        return $this->driver === 'mysql' ? 'NOW()' : "datetime('now')";
     }
 
     public function allowedIds(): array
@@ -296,18 +310,45 @@ class Store
         return $st->fetch(PDO::FETCH_ASSOC) ?: null;
     }
 
+    public function getPendingRequestById(int $id): ?array
+    {
+        $st = $this->pdo->prepare("SELECT * FROM pending_requests WHERE id = ? AND status = 'pending'");
+        $st->execute([$id]);
+        return $st->fetch(PDO::FETCH_ASSOC) ?: null;
+    }
+
     public function approveRequest(int $requestId): bool
     {
-        $st = $this->pdo->prepare("UPDATE pending_requests SET status = 'approved', handled_at = datetime('now') WHERE id = ? AND status = 'pending'");
+        $st = $this->pdo->prepare("UPDATE pending_requests SET status = 'approved', handled_at = {$this->nowSql()} WHERE id = ? AND status = 'pending'");
         $st->execute([$requestId]);
         return $st->rowCount() > 0;
     }
 
     public function declineRequest(int $requestId): bool
     {
-        $st = $this->pdo->prepare("UPDATE pending_requests SET status = 'declined', handled_at = datetime('now') WHERE id = ? AND status = 'pending'");
+        $st = $this->pdo->prepare("UPDATE pending_requests SET status = 'declined', handled_at = {$this->nowSql()} WHERE id = ? AND status = 'pending'");
         $st->execute([$requestId]);
         return $st->rowCount() > 0;
+    }
+
+    /** درخواست تأییدشده و هنوز استفاده‌نشده (برای ادامه ساخت ربات) */
+    public function getApprovedRequestByUser(int $userId): ?array
+    {
+        $st = $this->pdo->prepare("SELECT * FROM pending_requests WHERE user_id = ? AND status = 'approved' ORDER BY created_at DESC LIMIT 1");
+        $st->execute([$userId]);
+        return $st->fetch(PDO::FETCH_ASSOC) ?: null;
+    }
+
+    public function hasApprovedRequest(int $userId): bool
+    {
+        return $this->getApprovedRequestByUser($userId) !== null;
+    }
+
+    /** بعد از ساخت موفق ربات: درخواست تأییدشده مصرف شود تا دوباره استفاده نشود */
+    public function markRequestUsed(int $requestId): void
+    {
+        $st = $this->pdo->prepare("UPDATE pending_requests SET status = 'used', handled_at = {$this->nowSql()} WHERE id = ? AND status = 'approved'");
+        $st->execute([$requestId]);
     }
 
     public function hasBot(int $userId): bool
@@ -341,17 +382,22 @@ class Store
         $st->execute([$userId]);
     }
 
-    // ---- update processed ----
-    public function isUpdateProcessed(int $updateId): bool
+    // ---- schema versions ----
+    public function initSchemaVersions(): void
     {
-        $st = $this->pdo->prepare("SELECT 1 FROM processed_updates WHERE update_id = ?");
-        $st->execute([$updateId]);
-        return $st->fetch() !== false;
+        if ($this->driver === 'sqlite') {
+            $this->pdo->exec("CREATE TABLE IF NOT EXISTS schema_versions (id INTEGER PRIMARY KEY AUTOINCREMENT, version INTEGER NOT NULL, applied_at TEXT DEFAULT (datetime('now')))");
+        } else {
+            $this->pdo->exec("CREATE TABLE IF NOT EXISTS schema_versions (id INT AUTO_INCREMENT PRIMARY KEY, version INT NOT NULL, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)");
+        }
+        // Run migrations
+        try {
+            $migrator = new Migrator($this->pdo, $this->driver);
+            $migrator->migrate();
+        } catch (Exception $e) {
+            // Migration failure is non-fatal
+        }
     }
 
-    public function markUpdateProcessed(int $updateId): void
-    {
-        $st = $this->pdo->prepare("INSERT OR REPLACE INTO processed_updates (update_id) VALUES (?)");
-        $st->execute([$updateId]);
-    }
+    public function getPdo(): PDO { return $this->pdo; }
 }

@@ -1,6 +1,7 @@
 /config.php
 /data/*.sqlite
 /data/*.sqlite-journal
+/data/logs/
 /bots/*/
 /bots/*/config.php
 /bots/*/states/
