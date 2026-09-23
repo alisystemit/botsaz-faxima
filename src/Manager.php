@@ -147,6 +147,7 @@ class Manager
             '{DATABASE_NAME}' => $dbName,
             '{DATABASE_USERNAME}' => $cfg['db_user'],
             '{DATABASE_PASSOWRD}' => $cfg['db_pass'],
+            '{DATABASE_PASSWORD}' => $cfg['db_pass'],
             '{BOT_TOKEN}' => $token,
             '{ADMIN_#ID}' => (string)$adminId,
             '{DOMAIN.COM/PATH/BOT}' => $domainPath,

@@ -440,22 +440,30 @@ function sanitizeUserName($string)
 }
 function checktelegramip()
 {
-
+    // بازه‌های رسمی IPv4 تلگرام (بروزرسانی: https://core.telegram.org/bots/webhooks#ip-range-discovery)
     $telegram_ip_ranges = [
-        ['lower' => '149.154.160.0', 'upper' => '149.154.175.255'],
-        ['lower' => '91.108.4.0', 'upper' => '91.108.7.255']
+        ['lower' => '149.154.160.0', 'upper' => '149.154.175.255'], // 149.154.160.0/20
+        ['lower' => '91.108.4.0',   'upper' => '91.108.7.255'],    // 91.108.4.0/22
+        ['lower' => '91.108.8.0',   'upper' => '91.108.11.255'],   // 91.108.8.0/22
+        ['lower' => '91.108.12.0',  'upper' => '91.108.15.255'],   // 91.108.12.0/22
+        ['lower' => '91.108.16.0',  'upper' => '91.108.19.255'],   // 91.108.16.0/22
+        ['lower' => '91.108.20.0',  'upper' => '91.108.23.255'],   // 91.108.20.0/22
+        ['lower' => '91.108.56.0',  'upper' => '91.108.59.255'],   // 91.108.56.0/22
+        ['lower' => '185.76.151.0', 'upper' => '185.76.151.255'],  // 185.76.151.0/24
     ];
-    $ip_dec = (float) sprintf("%u", ip2long($_SERVER['REMOTE_ADDR']));
-    $ok = false;
-    foreach ($telegram_ip_ranges as $telegram_ip_range)
-        if (!$ok) {
-            $lower_dec = (float) sprintf("%u", ip2long($telegram_ip_range['lower']));
-            $upper_dec = (float) sprintf("%u", ip2long($telegram_ip_range['upper']));
-            if ($ip_dec >= $lower_dec and $ip_dec <= $upper_dec)
-                $ok = true;
+    $remote = $_SERVER['REMOTE_ADDR'] ?? '';
+    if ($remote === '' || filter_var($remote, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) === false) {
+        return false;
+    }
+    $ip_dec = (float) sprintf("%u", ip2long($remote));
+    foreach ($telegram_ip_ranges as $telegram_ip_range) {
+        $lower_dec = (float) sprintf("%u", ip2long($telegram_ip_range['lower']));
+        $upper_dec = (float) sprintf("%u", ip2long($telegram_ip_range['upper']));
+        if ($ip_dec >= $lower_dec && $ip_dec <= $upper_dec) {
+            return true;
         }
-    return $ok;
-
+    }
+    return false;
 }
 function generateAuthStr($length = 10)
 {

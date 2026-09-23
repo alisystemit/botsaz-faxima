@@ -17,6 +17,42 @@ $cfg = require $cfgFile;
 $store = new Store($cfg['manager_db'], $cfg);
 $log = Logger::getInstance();
 
+$isWindows = strtoupper(substr(PHP_OS, 0, 3)) === 'WIN';
+
+/** مسیر باینری PHP — از config، وگرنه خود همین PHP که الان دارد اجرا می‌شود */
+function phpBin(array $cfg): string
+{
+    $b = trim((string)($cfg['php_bin'] ?? ''));
+    if ($b !== '' && (is_file($b) || strpos($b, DIRECTORY_SEPARATOR) !== false || strpos($b, '/') !== false)) return $b;
+    return defined('PHP_BINARY') && PHP_BINARY !== '' ? PHP_BINARY : 'php';
+}
+
+/** ساخت خط فرمان اجرای اسکریپت کرون؛ توکن از طریق env (نه argv) */
+function cronCmd(array $cfg, string $script, array $env = []): string
+{
+    $cmd = '"' . phpBin($cfg) . '" "' . $script . '"';
+    foreach ($env as $k => $v) {
+        // ویندوز: set K=V && … — لینوکس: K='V' …
+        if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+            $cmd = 'set "' . $k . '=' . $v . '" && ' . $cmd;
+        } else {
+            $cmd = escapeshellarg($k) . '=' . escapeshellarg($v) . ' ' . $cmd;
+        }
+    }
+    return $cmd;
+}
+
+/** اجرای غیرهمزمان بدون وابستگی به /dev/null (لینوکس) یا start (ویندوز) */
+function runAsync(string $cmd, bool $isWindows): void
+{
+    if ($isWindows) {
+        // start /B بدون معطلی، خروجی را هم دور می‌ریزد
+        exec('start /B "" ' . $cmd . ' > NUL 2>&1');
+    } else {
+        exec($cmd . ' > /dev/null 2>&1 &');
+    }
+}
+
 $log->info('cron', 'Cron dispatcher started');
 
 // ===== بررسی تمام ربات‌های فعال =====
@@ -46,7 +82,7 @@ foreach ($activeBots as $bot) {
         // توکن ذخیره‌شده رمزنگاری است؛ برای اسکریپت فرزند رمزگشایی کن
         $plainToken = Manager::decryptChildToken($bot['token'] ?? '', $cfg['secret_key'] ?? 'change-this-to-a-random-string');
 
-        // اجرای هر فایل کرون
+        // اجرای هر فایل کرون (توکن از طریق env داده می‌شود، نه argv — در لوگ/ps لو نمی‌رود)
         $cronFiles = glob($cronDir . '*.php');
         foreach ($cronFiles as $cronFile) {
             $fileName = basename($cronFile);
@@ -54,9 +90,8 @@ foreach ($activeBots as $bot) {
             // رد کردن فایل‌های غیررسمی
             if (in_array($fileName, ['index.php', 'cron.php', '.htaccess'])) continue;
 
-            $phpBin = $cfg['php_bin'] ?? 'php';
-            $cmd = "\"{$phpBin}\" \"{$cronFile}\" \"{$plainToken}\" \"{$bot['folder']}\"";
-            exec($cmd . ' > /dev/null 2>&1 &');
+            $cmd = cronCmd($cfg, $cronFile, ['BOT_TOKEN' => $plainToken, 'BOT_FOLDER' => $bot['folder']]);
+            runAsync($cmd, $isWindows);
 
             $log->debug('cron', "Executed {$fileName} for {$bot['folder']}");
         }
@@ -64,9 +99,8 @@ foreach ($activeBots as $bot) {
         // برای فاکسیما: cron/cron.php با php CLI اجرا می‌شود
         $faximaCron = Manager::childBotsDir() . '/' . $bot['folder'] . '/cron/cron.php';
         if (file_exists($faximaCron)) {
-            $phpBin = $cfg['php_bin'] ?? 'php';
-            $cmd = "\"{$phpBin}\" \"{$faximaCron}\"";
-            exec($cmd . ' > /dev/null 2>&1 &');
+            $cmd = cronCmd($cfg, $faximaCron, ['BOT_FOLDER' => $bot['folder']]);
+            runAsync($cmd, $isWindows);
             $log->debug('cron', "Executed faxima cron.php for {$bot['folder']}");
         }
 
@@ -77,6 +111,14 @@ foreach ($activeBots as $bot) {
 
 // ===== پاکسازی ربات‌های مرده =====
 cleanupDeadBots($store, $log);
+
+// ===== پاکسازی قدیمی‌ترین رد update_id های پردازش‌شده (جلوگیری از رشد بی‌انتها) =====
+try {
+    $store->pruneProcessedUpdates(5000);
+    $log->debug('cron', 'processed_updates pruned');
+} catch (Exception $e) {
+    $log->warning('cron', 'prune failed: ' . $e->getMessage());
+}
 
 $log->info('cron', 'Cron dispatcher finished');
 

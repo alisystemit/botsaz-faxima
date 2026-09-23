@@ -147,7 +147,9 @@ class Store
         if (!$u) {
             $st = $this->pdo->prepare("INSERT INTO users (user_id, first_name, username) VALUES (?,?,?)");
             $st->execute([$uid, $first, $username]);
-            return $this->user($uid);
+            $st = $this->pdo->prepare("SELECT * FROM users WHERE user_id=?");
+            $st->execute([$uid]);
+            return $st->fetch(PDO::FETCH_ASSOC) ?: ['user_id' => $uid, 'first_name' => $first, 'username' => $username, 'is_admin' => 0, 'is_allowed' => 0, 'step' => 'idle', 'temp' => '{}', 'build_count' => 0, 'created_at' => ''];
         }
         if (($first && $u['first_name'] !== $first) || ($username && $u['username'] !== $username)) {
             $st = $this->pdo->prepare("UPDATE users SET first_name=?, username=? WHERE user_id=?");
@@ -196,11 +198,24 @@ class Store
     public function markUpdateProcessed(int $updateId): void
     {
         if ($this->driver === 'mysql') {
-            $st = $this->pdo->prepare("INSERT INTO processed_updates (update_id) VALUES (?) ON DUPLICATE KEY UPDATE update_id = update_id");
+            $st = $this->pdo->prepare("INSERT INTO processed_updates (update_id) VALUES (?) ON DUPLICATE KEY UPDATE update_id = update_id, processed_at = NOW()");
         } else {
             $st = $this->pdo->prepare("INSERT OR REPLACE INTO processed_updates (update_id) VALUES (?)");
         }
         $st->execute([$updateId]);
+    }
+
+    /** نگه‌داشتن حداکثر $keep رد update قدیمی — جدول processed_updates را بی‌انتها نگه نمی‌دارد */
+    public function pruneProcessedUpdates(int $keep = 5000): int
+    {
+        $keep = max(1, $keep);
+        if ($this->driver === 'mysql') {
+            $st = $this->pdo->prepare("DELETE FROM processed_updates WHERE update_id NOT IN (SELECT update_id FROM (SELECT update_id FROM processed_updates ORDER BY update_id DESC LIMIT {$keep}) t)");
+        } else {
+            $st = $this->pdo->prepare("DELETE FROM processed_updates WHERE update_id NOT IN (SELECT update_id FROM processed_updates ORDER BY update_id DESC LIMIT {$keep})");
+        }
+        $st->execute();
+        return $st->rowCount();
     }
 
     private function nowSql(): string
@@ -396,6 +411,7 @@ class Store
             $migrator->migrate();
         } catch (Exception $e) {
             // Migration failure is non-fatal
+            error_log('Migration failed: ' . $e->getMessage());
         }
     }
 

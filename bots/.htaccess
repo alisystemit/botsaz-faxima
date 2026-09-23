@@ -1,4 +1,19 @@
-Require all denied
-<Files "config.php">
+# bots/ — child bots live here (public/webhook entrypoints must stay reachable).
+# Deny everything sensitive, allow the real entrypoints.
+
+# Never expose child config / state / backups / logs / dumps
+<FilesMatch "(^\.|config\.php$|\.log$|\.sqlite$|\.sql$|\.bak$|\.env$)">
     Require all denied
-</Files>
+</FilesMatch>
+
+# Child secret/state directories
+<IfModule mod_authz_core.c>
+    <Directory "states">
+        Require all denied
+    </Directory>
+    <Directory "backups">
+        Require all denied
+    </Directory>
+</IfModule>
+
+# Allowed on purpose: index.php / table.php / cron/*.php (child webhooks + cron endpoints)

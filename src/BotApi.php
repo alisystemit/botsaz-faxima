@@ -27,6 +27,17 @@ class BotApi
         $attempt = 0;
         $lastErr = '';
 
+        // ===== نرمال‌سازی پارامترها برای Content-Type: x-www-form-urlencoded =====
+        // آرایه‌ها → JSON (مثل commands)، بولین → 'true'/'false'، null حذف می‌شود.
+        $flat = [];
+        foreach ($params as $k => $v) {
+            if ($v === null) continue;
+            if (is_array($v)) $flat[$k] = json_encode($v, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            elseif (is_bool($v)) $flat[$k] = $v ? 'true' : 'false';
+            else $flat[$k] = $v;
+        }
+        $body = http_build_query($flat, '', '&');
+
         while ($attempt <= self::$maxRetries) {
             if ($attempt > 0) {
                 $delay = self::$baseDelay * (2 ** ($attempt - 1));
@@ -37,7 +48,7 @@ class BotApi
             $opts = [
                 CURLOPT_RETURNTRANSFER => true,
                 CURLOPT_POST => true,
-                CURLOPT_POSTFIELDS => $params,
+                CURLOPT_POSTFIELDS => $body,
                 CURLOPT_TIMEOUT => 30,
                 CURLOPT_CONNECTTIMEOUT => 15,
                 CURLOPT_HTTPHEADER => ['Content-Type: application/x-www-form-urlencoded'],

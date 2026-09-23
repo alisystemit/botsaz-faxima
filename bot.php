@@ -35,9 +35,8 @@ $store = new Store($cfg['manager_db'], $cfg);
 // ===== پردازش غیرهمزمان =====
 @set_time_limit(0);
 @ignore_user_abort(true);
-if (function_exists('fastcgi_finish_request')) fastcgi_finish_request();
 
-// ===== احراز هویت وبهوک =====
+// ===== احراز هویت وبهوک (قبل از هر پردازش/خروج زودهنگام) =====
 $secret = Manager::faximaWebhookSecret($TOKEN);
 if ($secret !== '') {
     $provided = $_SERVER['HTTP_X_TELEGRAM_BOT_API_SECRET_TOKEN'] ?? '';
@@ -48,26 +47,18 @@ if ($secret !== '') {
     }
 }
 
+// از اینجا به بعد پاسخ امن است؛ اتصال را آزاد کن تا تلگرام timeout نگیرد
+if (function_exists('fastcgi_finish_request')) fastcgi_finish_request();
+
 // ===== Dedup با update_id =====
 $update = json_decode(file_get_contents('php://input'), true) ?: [];
 if (!$update) { echo json_encode(['ok'=>true]); exit; }
 
-// ===== ست دستورات ربات (فقط وقتی آپدیت واقعی آمد) =====
-BotApi::setMyCommands($TOKEN, [
-    ['command' => 'start', 'description' => '🏠 منوی اصلی'],
-    ['command' => 'mybots', 'description' => '📦 ربات‌های من'],
-    ['command' => 'stats', 'description' => '📊 آمار ربات‌ساز'],
-    ['command' => 'cron', 'description' => '⏰ راه‌اندازی کرون'],
-    ['command' => 'help', 'description' => 'ℹ️ راهنما'],
-]);
-
 $updateId = $update['update_id'] ?? null;
-if ($updateId !== null) {
-    if ($store->isUpdateProcessed($updateId)) {
-        echo json_encode(['ok'=>true,'duplicate'=>true]); exit;
-    }
-    $store->markUpdateProcessed($updateId);
+if ($updateId !== null && $store->isUpdateProcessed($updateId)) {
+    echo json_encode(['ok'=>true,'duplicate'=>true]); exit;
 }
+// «علامت‌گذاری بعد از پردازش موفق» — اگر وسط کار خطا بود، تلگرام دوباره می‌فرستد
 
 // ===== عمق لینک عمیق /start <param> =====
 $deepLinkParam = null;
@@ -79,10 +70,12 @@ $msg  = $update['message'] ?? $update['channel_post'] ?? null;
 $cb   = $update['callback_query'] ?? null;
 
 if ($cb) {
+    if (!isset($cb['message'])) { if ($updateId !== null) $store->markUpdateProcessed($updateId); echo json_encode(['ok'=>true]); exit; }
     $from = $cb['from'];
     $uid = (int)$from['id'];
     $user = $store->user($uid, $from['first_name'] ?? '', $from['username'] ?? '');
     handleCallback($cfg, $store, $TOKEN, $SUPERS, $user, $cb);
+    if ($updateId !== null) $store->markUpdateProcessed($updateId);
     echo json_encode(['ok'=>true]); exit;
 }
 
@@ -90,10 +83,11 @@ if ($msg) {
     // ===== فقط چت خصوصی =====
     $chatType = $msg['chat']['type'] ?? 'private';
     if ($chatType !== 'private') {
+        if ($updateId !== null) $store->markUpdateProcessed($updateId);
         echo json_encode(['ok'=>true]); exit;
     }
     $from = $msg['from'] ?? null;
-    if (!$from) { echo json_encode(['ok'=>true]); exit; }
+    if (!$from) { if ($updateId !== null) $store->markUpdateProcessed($updateId); echo json_encode(['ok'=>true]); exit; }
     $uid = (int)$from['id'];
     $user = $store->user($uid, $from['first_name'] ?? '', $from['username'] ?? '');
     $text = trim($msg['text'] ?? '');
@@ -101,16 +95,12 @@ if ($msg) {
 
     // ===== ورودی غیرمتنی =====
     if ($text === '' && !isset($msg['text'])) {
+        if ($updateId !== null) $store->markUpdateProcessed($updateId);
         echo json_encode(['ok'=>true]); exit;
     }
 
-    // ===== سقف ساخت: هر کاربر فقط یک ربات فعال =====
-    if ($text === '🤖 ساخت ربات جدید' && $store->hasBot($uid)) {
-        BotApi::send($TOKEN, $chatId, "⛔️ شما قبلاً ربات دارید. هر کاربر فقط می‌تواند یک ربات بسازد.");
-        return;
-    }
-
     handleMessage($cfg, $store, $TOKEN, $SUPERS, $user, $chatId, $text, $msg, $deepLinkParam);
+    if ($updateId !== null) $store->markUpdateProcessed($updateId);
     echo json_encode(['ok'=>true]); exit;
 }
 
@@ -128,8 +118,9 @@ function mainMenu(array $u, array $supers, Store $store = null): string {
         return BotApi::kb([
             [['text' => '🤖 ساخت ربات جدید'], ['text' => '📦 ربات‌های من']],
             [['text' => '📊 آمار'], ['text' => '📣 همگانی']],
-            [['text' => '👥 کاربران مجاز'], ['text' => "📋 درخواست‌های جدید{$pendingText}"]],
-            [['text' => '📋 همه ربات‌ها'], ['text' => 'ℹ️ راهنما']],
+            [['text' => '⏰ کرون'], ['text' => '👥 کاربران مجاز']],
+            [['text' => "📋 درخواست‌های جدید{$pendingText}"], ['text' => '📋 همه ربات‌ها']],
+            [['text' => 'ℹ️ راهنما']],
         ]);
     }
     return BotApi::kb([
@@ -201,26 +192,43 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
     }
 
     // ===== عمق لینک عمیق =====
+    // فقط یک پیام خوش‌آمد بده؛ ادامه‌ی پردازش همان /start است (پیام دوم ارسال نمی‌شود)
     if ($deepLink !== null) {
         Logger::getInstance()->info('deep_link', "User {$uid} deep link: {$deepLink}");
-        BotApi::send($TOKEN, $chatId, "🔗 لینک شما: <code>{$deepLink}</code>\n\nخوش آمدید!");
+        BotApi::send($TOKEN, $chatId, "🔗 لینک شما: <code>" . htmlspecialchars($deepLink) . "</code>\n\nخوش آمدید!");
     }
 
     $step = $user['step'];
     $temp = json_decode($user['temp'] ?? '{}', true) ?: [];
 
-    if ($step !== 'idle') {
+    if ($step !== 'idle' && $deepLink === null) {
         handleStep($cfg, $store, $TOKEN, $SUPERS, $user, $chatId, $text, $msg, $step, $temp);
         return;
     }
 
-    if ($text === '/start' || $text === '🏠 منو' || $text === '❌ انصراف') {
+    if ($text === '/start' || str_starts_with($text, '/start ') || $text === '🏠 منو' || $text === '❌ انصراف') {
         $store->clearStep($uid);
+        // ===== ست دستورات ربات (فقط هنگام /start — نه هر آپدیت) =====
+        BotApi::setMyCommands($TOKEN, [
+            ['command' => 'start', 'description' => '🏠 منوی اصلی'],
+            ['command' => 'mybots', 'description' => '📦 ربات‌های من'],
+            ['command' => 'stats', 'description' => '📊 آمار ربات‌ساز'],
+            ['command' => 'cron', 'description' => '⏰ راه‌اندازی کرون'],
+            ['command' => 'help', 'description' => 'ℹ️ راهنما'],
+        ]);
         $role = $admin ? "مدیر 👑" : "کاربر مجاز ✅";
         BotApi::send($TOKEN, $chatId,
             "👋 سلام! به <b>ربات‌ساز</b> خوش آمدی.\nنقش شما: {$role}\n\nبا دکمه «🤖 ساخت ربات جدید» در چند ثانیه ربات فاکسیما یا میرزا بساز.\nفقط توکن ربات + آیدی ادمین + یک نام لازم است.",
             ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
         return;
+    }
+
+    // ===== هندلرهای دستور (نام‌های مستعار منو) =====
+    switch ($text) {
+        case '/mybots': $text = '📦 ربات‌های من'; break;
+        case '/help':   $text = 'ℹ️ راهنما'; break;
+        case '/stats':  $text = $admin ? '📊 آمار' : 'ℹ️ راهنما'; break;
+        case '/cron':   $text = $admin ? '⏰ کرون' : 'ℹ️ راهنما'; break;
     }
 
     switch ($text) {
@@ -274,6 +282,11 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
     }
 
     if ($admin) {
+        // دکمهٔ کیبورد «📋 درخواست‌های جدید (N)» — شمارش داخل متن است، پس starts_with
+        if (str_starts_with($text, '📋 درخواست‌های جدید')) {
+            sendPendingRequests($store, $TOKEN, $chatId);
+            return;
+        }
         switch ($text) {
             case '📊 آمار':
                 $bots = $store->allBots();
@@ -373,6 +386,9 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
             }
             BotApi::send($TOKEN, $chatId, "⏳ در حال ساخت ربات <b>{$slug}</b> ...");
             $type = $temp['type'] ?? 'faxima';
+            if (!in_array($type, ['faxima', 'mirza'], true)) {
+                $type = 'faxima';
+            }
             try {
                 // ===== پردازش غیرهمزمان =====
                 @set_time_limit(0);
@@ -481,7 +497,7 @@ function buildBot(array $cfg, Store $store, string $TOKEN, int $owner, string $t
     $dirCreated = false;
 
     try {
-        Manager::copyDir($tplDir, $botDir, ['docker/', 'docker-compose.yml', '.env.example', 'vpnbot/', 'install.sh', 'images.jpeg', 'installer/']);
+        Manager::copyDir($tplDir, $botDir, ['docker/', 'docker-compose.yml', '.env.example', 'vpnbot/', 'install.sh', 'images.jpeg', 'composer.json', 'composer.lock', 'vendor/', 'installer/']);
         $dirCreated = true;
 
         if ($type === 'mirza') {
@@ -494,7 +510,7 @@ function buildBot(array $cfg, Store $store, string $TOKEN, int $owner, string $t
             Manager::removeDir($botDir . '/installer');
 
             // ===== پاکسازی فایل‌های اضافی =====
-            Manager::cleanupExtraFiles($botDir, ['docker/', 'docker-compose.yml', '.env.example', 'vpnbot/', 'install.sh', 'images.jpeg', 'installer/']);
+            Manager::cleanupExtraFiles($botDir, ['docker/', 'docker-compose.yml', '.env.example', 'vpnbot/', 'install.sh', 'images.jpeg', 'composer.json', 'composer.lock', 'vendor/', 'installer/']);
 
             $webhook = Manager::webhookUrl($cfg, $slug, 'mirza');
             $set = BotApi::setWebhook($plainToken, $webhook);
@@ -509,14 +525,14 @@ function buildBot(array $cfg, Store $store, string $TOKEN, int $owner, string $t
                 'owner_id' => $owner, 'type' => 'mirza', 'folder' => $slug,
                 'token' => $encToken, 'bot_username' => $temp['bot_username'] ?? '',
                 'bot_id' => $temp['bot_id'] ?? 0, 'admin_id' => (int)($temp['admin_id'] ?? $owner),
-                'db_name' => $dbName, 'db_table_prefix' => '', 'webhook_url' => $webhook . $webhookNote,
+                'db_name' => $dbName, 'db_table_prefix' => '', 'webhook_url' => $webhook,
                 'status' => 'active',
             ]);
             $store->incrementBuildCount($owner);
             $approved = $store->getApprovedRequestByUser($owner);
             if ($approved) $store->markRequestUsed((int)$approved['id']);
 
-            $msg = "🎉 <b>ربات میرزا آماده شد!</b>\n🤖 @{$temp['bot_username']}\n📁 پوشه: <code>{$slug}</code>\n🗄 دیتابیس: <code>{$dbName}</code>\n🔗 وبهوک: ست شد ✅\n🗂 جدول‌ها: " . ($tableOk ? '✅' : '⚠️ دستی بازش کن');
+            $msg = "🎉 <b>ربات میرزا آماده شد!</b>\n🤖 @{$temp['bot_username']}\n📁 پوشه: <code>{$slug}</code>\n🗄 دیتابیس: <code>{$dbName}</code>\n🔗 وبهوک: " . ($webhookNote !== '' ? '⚠️ خطا' : 'ست شد ✅') . "\n🗂 جدول‌ها: " . ($tableOk ? '✅' : '⚠️ دستی بازش کن');
             return ['bot_username' => $temp['bot_username'] ?? '', 'db' => $dbName, 'custom_message' => $msg];
         }
 
@@ -530,7 +546,7 @@ function buildBot(array $cfg, Store $store, string $TOKEN, int $owner, string $t
         Manager::removeDir($botDir . '/installer');
 
         // ===== پاکسازی فایل‌های اضافی =====
-        Manager::cleanupExtraFiles($botDir, ['docker/', 'docker-compose.yml', '.env.example', 'vpnbot/', 'install.sh', 'images.jpeg', 'installer/']);
+        Manager::cleanupExtraFiles($botDir, ['docker/', 'docker-compose.yml', '.env.example', 'vpnbot/', 'install.sh', 'images.jpeg', 'composer.json', 'composer.lock', 'vendor/', 'installer/']);
 
         $webhook = Manager::webhookUrl($cfg, $slug, 'faxima');
         $secret = Manager::faximaWebhookSecret($plainToken);
@@ -545,14 +561,14 @@ function buildBot(array $cfg, Store $store, string $TOKEN, int $owner, string $t
             'owner_id' => $owner, 'type' => 'faxima', 'folder' => $slug,
             'token' => $encToken, 'bot_username' => $temp['bot_username'] ?? '',
             'bot_id' => $temp['bot_id'] ?? 0, 'admin_id' => (int)($temp['admin_id'] ?? $owner),
-            'db_name' => $dbName, 'db_table_prefix' => '', 'webhook_url' => $webhook . $webhookNote,
+            'db_name' => $dbName, 'db_table_prefix' => '', 'webhook_url' => $webhook,
             'status' => 'active',
         ]);
         $store->incrementBuildCount($owner);
         $approved = $store->getApprovedRequestByUser($owner);
         if ($approved) $store->markRequestUsed((int)$approved['id']);
 
-        $msg = "🎉 <b>ربات فاکسیما آماده شد!</b>\n🤖 @{$temp['bot_username']}\n📁 پوشه: <code>{$slug}</code>\n🗄 دیتابیس: <code>{$dbName}</code>\n🔗 وبهوک: ست شد ✅\n🗂 جدول‌ها: " . ($tableOk ? '✅' : '⚠️ دستی بازش کن');
+        $msg = "🎉 <b>ربات فاکسیما آماده شد!</b>\n🤖 @{$temp['bot_username']}\n📁 پوشه: <code>{$slug}</code>\n🗄 دیتابیس: <code>{$dbName}</code>\n🔗 وبهوک: " . ($webhookNote !== '' ? '⚠️ خطا' : 'ست شد ✅') . "\n🗂 جدول‌ها: " . ($tableOk ? '✅' : '⚠️ دستی بازش کن') . $webhookNote;
         return ['bot_username' => $temp['bot_username'] ?? '', 'db' => $dbName, 'custom_message' => $msg];
     } catch (Exception $e) {
         // ===== ROLLBACK =====
@@ -596,6 +612,20 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
         $type = substr($data, 7);
         $names = Manager::validTypes();
         if (!isset($names[$type])) return;
+        // ===== بازبینی مجدد سقف و مجوز (همان چک‌های handleMessage) =====
+        if ($store->hasBot($uid)) {
+            BotApi::send($TOKEN, $chatId, "⛔️ شما قبلاً ربات دارید. هر کاربر فقط می‌تواند یک ربات بسازد.");
+            return;
+        }
+        if (!$admin && !$store->hasApprovedRequest($uid)) {
+            if ($store->hasPendingRequest($uid)) {
+                BotApi::send($TOKEN, $chatId, "⏳ درخواست شما در انتظار تأیید ادمین است.");
+            } else {
+                $store->addPendingRequest($uid, 'bot');
+                BotApi::send($TOKEN, $chatId, "📝 درخواست شما ثبت شد.\nلطفاً منتظر تأیید ادمین بمانید.");
+            }
+            return;
+        }
         $store->setStep($uid, 'await_bot_token', ['type' => $type]);
         BotApi::send($TOKEN, $chatId, "توکن ربات <b>{$names[$type]}</b> را بفرست.\nبرای انصراف: ❌ انصراف",
             ['reply_markup' => BotApi::kb([[['text'=>'❌ انصراف']]])]);
@@ -666,20 +696,26 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
 
     if ($data === 'users:requests') {
         if (!$admin) { BotApi::send($TOKEN, $chatId, "⛔️ فقط ادمین."); return; }
-        $requests = $store->getPendingRequests();
-        if (!$requests) { BotApi::send($TOKEN, $chatId, "✅ هیچ درخواستی نیست."); return; }
-        BotApi::send($TOKEN, $chatId, "📋 <b>درخواست‌ها</b> (" . count($requests) . "):");
-        foreach (array_slice($requests, 0, 10) as $r) {
-            $name = htmlspecialchars($r['first_name'] ?? 'نامشخص');
-            $username = $r['username'] ? "@" . htmlspecialchars($r['username']) : '';
-            BotApi::send($TOKEN, $chatId,
-                "👤 <b>{$name}</b> {$username} (ID: <code>{$r['user_id']}</code>)",
-                ['reply_markup' => BotApi::ikb([
-                    [['text' => '✅ تأیید', 'callback_data' => "act:approve:{$r['id']}"], ['text' => '❌ رد', 'callback_data' => "act:decline:{$r['id']}"]],
-                ])]);
-            usleep(100000);
-        }
+        sendPendingRequests($store, $TOKEN, $chatId);
         return;
+    }
+}
+
+/** نمایش لیست درخواست‌های در انتظار تأیید — مشترک بین callback و دکمهٔ کیبورد */
+function sendPendingRequests(Store $store, string $TOKEN, $chatId): void
+{
+    $requests = $store->getPendingRequests();
+    if (!$requests) { BotApi::send($TOKEN, $chatId, "✅ هیچ درخواستی نیست."); return; }
+    BotApi::send($TOKEN, $chatId, "📋 <b>درخواست‌ها</b> (" . count($requests) . "):");
+    foreach (array_slice($requests, 0, 10) as $r) {
+        $name = htmlspecialchars($r['first_name'] ?? 'نامشخص');
+        $username = $r['username'] ? "@" . htmlspecialchars($r['username']) : '';
+        BotApi::send($TOKEN, $chatId,
+            "👤 <b>{$name}</b> {$username} (ID: <code>{$r['user_id']}</code>)",
+            ['reply_markup' => BotApi::ikb([
+                [['text' => '✅ تأیید', 'callback_data' => "act:approve:{$r['id']}"], ['text' => '❌ رد', 'callback_data' => "act:decline:{$r['id']}"]],
+            ])]);
+        usleep(100000);
     }
 }
 

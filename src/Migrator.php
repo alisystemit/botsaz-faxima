@@ -22,6 +22,10 @@ class Migrator
         $results = [];
         $currentVersion = $this->getCurrentVersion();
 
+        if ($currentVersion >= self::SCHEMA_VERSION) {
+            return $results; // به‌روز است — هیچ INSERT اضافه‌ای نزن
+        }
+
         if ($currentVersion < 1) {
             $results['v1'] = 'processed_updates table created';
         }
