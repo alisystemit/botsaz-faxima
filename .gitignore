@@ -1,0 +1,9 @@
+/config.php
+/data/*.sqlite
+/data/*.sqlite-journal
+/bots/*/
+/bots/*/config.php
+/bots/*/states/
+/templates/*/states/
+/.env
+/*.log
