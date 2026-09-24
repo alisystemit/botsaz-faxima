@@ -19,6 +19,31 @@ class BotApi
     }
 
     /**
+     * لاگ شکست API — هرگز توکن/URL را در پیام نمی‌آورد.
+     *
+     * چرا لازم بود: قبلاً call() موقع شکست فقط آرایهٔ ok:false برمی‌گرداند و
+     * بیشتر فراخواننده‌ها (نزدیک به ۶۷ مورد sendMessage در bot.php) نتیجه را
+     * نمی‌خواندند؛ یعنی هر خطای تلگرام بی‌صدا گم می‌شد و هیچ لاگی ثبت نمی‌شد.
+     *
+     * dedupe داخلی: همان خطا در یک درخواست فقط یک‌بار نوشته می‌شود تا لاگ سیل نشود.
+     * (staticها در PHP به‌ازای هر request ریست می‌شوند؛ پس بین درخواست‌ها اثری ندارد.)
+     */
+    private static function logFail(string $method, string $detail): void
+    {
+        if (!class_exists('Logger')) return;
+        static $seen = [];
+        if (count($seen) >= 50) return;              // سقف ساده برای یک درخواست
+        $key = $method . '|' . $detail;
+        if (isset($seen[$key])) return;
+        $seen[$key] = true;
+        try {
+            Logger::getInstance()->error('telegram', "{$method} failed: {$detail}");
+        } catch (Throwable $e) {
+            // لاگ هرگز نباید خودش باعث شکست درخواست شود
+        }
+    }
+
+    /**
      * اصلی‌ترین درخواست API — با retry و backoff
      */
     public static function call(string $token, string $method, array $params = []): array
@@ -102,8 +127,13 @@ class BotApi
                 continue;
             }
 
+            // جدی/برگشت‌ناپذیر: لاگ کن تا دلیل «جواب ندادن ربات» در data/logs/ دیده شود
+            self::logFail($method, 'error_code=' . ($j['error_code'] ?? '-') . ' — ' . $description);
             return $j;
         }
+
+        // همهٔ retryها تمام شد (خطای شبکه/JSON نامعتبر/429) — اینجا هم لاگ کن
+        self::logFail($method, 'Max retries exceeded — ' . $lastErr);
 
         // description (همان کلیدی که فراخواننده‌ها می‌خوانند)؛ error برای سازگاری قدیمی حفظ می‌شود
         return ['ok' => false, 'description' => 'Max retries exceeded: ' . $lastErr, 'error' => 'Max retries exceeded: ' . $lastErr];
@@ -145,23 +175,35 @@ class BotApi
 
     public static function send(string $token, $chatId, string $text, array $extra = []): array
     {
-        return self::call($token, 'sendMessage', array_merge([
+        $r = self::call($token, 'sendMessage', array_merge([
             'chat_id' => $chatId,
             'text' => $text,
             'parse_mode' => 'HTML',
         ], $extra));
+        // قبلاً خیلی از فراخواننده‌ها نتیجه را نمی‌خواندند ⇒ پیام ارسال‌نشده بی‌صدا گم می‌شد
+        if (!is_array($r) || empty($r['ok'])) {
+            self::logFail('sendMessage', 'chat=' . $chatId . ' — ' . (($r['description'] ?? '') ?: 'no response'));
+        }
+        return $r;
     }
 
     public static function answerCb(string $token, string $cbId, string $text = ''): void
     {
-        self::call($token, 'answerCallbackQuery', ['callback_query_id' => $cbId, 'text' => $text]);
+        $r = self::call($token, 'answerCallbackQuery', ['callback_query_id' => $cbId, 'text' => $text]);
+        // خروجی void بود و نتیجه دور ریخته می‌شد ⇒ شکست کاملاً نامرئی
+        if (!is_array($r) || empty($r['ok'])) {
+            self::logFail('answerCallbackQuery', (($r['description'] ?? '') ?: 'no response'));
+        }
     }
 
     public static function edit(string $token, $chatId, $msgId, string $text, array $extra = []): void
     {
-        self::call($token, 'editMessageText', array_merge([
+        $r = self::call($token, 'editMessageText', array_merge([
             'chat_id' => $chatId, 'message_id' => $msgId, 'text' => $text, 'parse_mode' => 'HTML',
         ], $extra));
+        if (!is_array($r) || empty($r['ok'])) {
+            self::logFail('editMessageText', 'chat=' . $chatId . ' — ' . (($r['description'] ?? '') ?: 'no response'));
+        }
     }
 
     public static function setMyCommands(string $token, array $commands): array

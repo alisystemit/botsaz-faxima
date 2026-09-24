@@ -39,8 +39,21 @@ if (!empty($cfg['main_token']) && $cfg['main_token'] !== 'PUT_MAIN_BOT_TOKEN_HER
 }
 if (!empty($cfg['super_admins']) && count($cfg['super_admins']) > 0) {
     $ok[] = 'config.php: super_admins set';
+    // مقدار نمونهٔ config.example.php ⇒ عملاً هیچ ادمین واقعی‌ای شناخته نمی‌شود،
+    // ولی قبلاً همین «set» گزارش می‌شد و چک‌لیست سبز دروغ می‌گفت.
+    if (in_array(123456789, array_map('intval', $cfg['super_admins']), true)) {
+        $warnings[] = 'config.php: super_admins still contains the example value 123456789 - replace it with YOUR real numeric Telegram ID';
+    }
 } else {
     $errors[] = 'config.php: super_admins not set!';
+}
+// قبلاً هیچ چکی برای secret_key نبود — کلید خالی/پیش‌فرض/تقلبی کار می‌کند ولی بین همه
+// مشترک است و رمزگذاری توکن فرزندان را بی‌اثر می‌کند. هر دو شکل را می‌گیرد:
+// هم مقدار دقیق Manager::DEFAULT_SECRET_KEY، هم هر مقداری که هنوز «change-this...» باشد.
+$sk = trim((string)($cfg['secret_key'] ?? ''));
+$skDefault = Manager::DEFAULT_SECRET_KEY;   // Manager.php بالا require شده است
+if ($sk === '' || $sk === $skDefault || stripos($sk, 'change-this') === 0) {
+    $warnings[] = 'config.php: secret_key is empty/default/placeholder - generate a random one BEFORE building bots';
 }
 if (!empty($cfg['base_url']) && $cfg['base_url'] !== 'http://botsaz-faxima.test') {
     $ok[] = 'config.php: base_url set';
@@ -197,6 +210,32 @@ echo "[12] بررسی تنظیمات کرون...\n";
 $cronLine = "*/5 * * * * php " . __DIR__ . "/cron_dispatcher.php";
 $ok[] = "Cron line: {$cronLine}";
 $ok[] = "Add this line to your crontab: crontab -e";
+
+// ===== ۱۳. بررسی زندهٔ توکن با getMe =====
+// بدون این چک، توکن باطل/placeholder فقط با خطای 404 مبهم خودش را نشان می‌داد.
+echo "[13] بررسی زندهٔ توکن (getMe)...\n";
+$liveToken = (string)($cfg['main_token'] ?? '');
+if ($liveToken === '' || $liveToken === 'PUT_MAIN_BOT_TOKEN_HERE') {
+    $errors[] = 'getMe skipped: main_token is empty/placeholder (set a real token from @BotFather)';
+} elseif (!function_exists('curl_init')) {
+    $warnings[] = 'getMe skipped: curl not available';
+} else {
+    try {
+        $me = BotApi::getMe($liveToken);
+        if (!empty($me['ok'])) {
+            $ok[] = 'Telegram getMe OK: @' . ($me['result']['username'] ?? '?');
+        } else {
+            $code = (int)($me['error_code'] ?? 0);
+            if ($code === 404) {
+                $errors[] = 'getMe 404: token is invalid or revoked - request a fresh /token from @BotFather';
+            } else {
+                $errors[] = 'getMe failed: ' . ($me['description'] ?? 'unknown');
+            }
+        }
+    } catch (Throwable $e) {
+        $warnings[] = 'getMe skipped (network error): ' . $e->getMessage();
+    }
+}
 
 // ===== نتیجه‌گیری =====
 echo "\n=========================================\n";

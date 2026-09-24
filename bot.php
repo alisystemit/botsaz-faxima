@@ -14,6 +14,35 @@ $cfg  = require $cfgFile;
 $TOKEN = $cfg['main_token'];
 $SUPERS = $cfg['super_admins'] ?? [];
 
+// ===== گاردهای پیکربندی (فقط لاگ — هیچ رفتاری را عوض نمی‌کنند) =====
+// هدف: به‌جای سکوت، دلیل «کار نکردن ربات» واضح در data/logs/ نوشته شود.
+// برای اینکه هر درخواست لاگ را پر نکند، هر بار فقط هر ۱۰ دقیقه یک‌بار ثبت می‌شود.
+$cfgWarnFile = __DIR__ . '/data/config_warn.lock';   // توسط .gitignore (/data/*.lock) نادیده گرفته می‌شود
+$cfgWarnBlocked = false;
+if (is_file($cfgWarnFile)) {
+    $cfgLastWarn = (int)@file_get_contents($cfgWarnFile);
+    if ($cfgLastWarn > 0 && (time() - $cfgLastWarn) < 600) $cfgWarnBlocked = true;
+}
+if (!$cfgWarnBlocked) {
+    $cfgProblems = [];
+    if ($TOKEN === '' || $TOKEN === 'PUT_MAIN_BOT_TOKEN_HERE') {
+        $cfgProblems[] = 'main_token خالی یا هنوز placeholder است — تلگرام هرگز آپدیتی نمی‌فرستد؛ توکن واقعی @BotFather را در config.php بگذار';
+    } elseif (!preg_match('/^\d{5,}:[A-Za-z0-9_-]{20,}$/', (string)$TOKEN)) {
+        $cfgProblems[] = 'main_token فرمت استاندارد تلگرام (number:token) را ندارد — getMe احتمالاً 404 می‌دهد';
+    }
+    $cfgBase = (string)($cfg['base_url'] ?? '');
+    if ($cfgBase !== '' && stripos($cfgBase, 'https://') !== 0) {
+        $cfgProblems[] = "base_url ({$cfgBase}) عمومی و https نیست — تلگرام setWebhook را رد می‌کند";
+    }
+    if (count($SUPERS) === 0) {
+        $cfgProblems[] = 'super_admins خالی است — هیچ ادمینی شناخته نمی‌شود';
+    }
+    if (count($cfgProblems) > 0) {
+        @file_put_contents($cfgWarnFile, (string)time());
+        Logger::getInstance()->error('config', implode(' | ', $cfgProblems));
+    }
+}
+
 // ===== رمزنگاری =====
 // منبع واحد secret_key → Manager::secretKey (همه‌جا یک مقدار)
 $secretKey = Manager::secretKey($cfg);
@@ -190,7 +219,10 @@ function childToken(array $bot): string {
     try {
         $d = decryptToken($t, $key);
         if (is_string($d) && preg_match('/^\d+:[\w\-]{20,}$/', $d)) return $d;
-    } catch (Throwable $e) {}
+    } catch (Throwable $e) {
+        // لاگ کن تا خرابی رمزگشایی توکن فرزند بی‌صدا گم نشود
+        Logger::getInstance()->warning('childToken', 'decrypt failed: ' . $e->getMessage());
+    }
     return $t;
 }
 
@@ -655,8 +687,14 @@ function buildBot(array $cfg, Store $store, string $TOKEN, int $owner, string $t
         // وگرنه پوشه/دیتابیس/وبهوک نیمه‌کاره می‌ماند.
         // ۱) وبهوک ثبت‌شده روی تلگرام باید برداشته شود تا ربات حذف‌شده دیگر پینگ نگیرد
         if (!empty($webhookSet) && $plainToken !== '') {
-            try { BotApi::deleteWebhook($plainToken); }
-            catch (Exception $whErr) { error_log("Rollback webhook: " . $whErr->getMessage()); }
+            try {
+                $whR = BotApi::deleteWebhook($plainToken);
+                // نتیجه قبلاً دور ریخته می‌شد؛ حالا شکست rollback هم دیده می‌شود
+                if (!is_array($whR) || empty($whR['ok'])) {
+                    error_log("Rollback webhook FAILED: " . (($whR['description'] ?? '') ?: 'no response'));
+                }
+            }
+            catch (Throwable $whErr) { error_log("Rollback webhook: " . $whErr->getMessage()); }
         }
         // ۲) دیتابیس ساخته‌شده حذف شود
         if ($dbCreated && $dbName !== '') {
@@ -664,12 +702,12 @@ function buildBot(array $cfg, Store $store, string $TOKEN, int $owner, string $t
                 $port = $cfg['db_port'] ?? 3306;
                 $serverPdo = new PDO("mysql:host={$cfg['db_host']};port={$port};charset=utf8mb4", $cfg['db_user'], $cfg['db_pass'], [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
                 $serverPdo->exec("DROP DATABASE IF EXISTS `{$dbName}`");
-            } catch (Exception $dbErr) { error_log("Rollback DB: " . $dbErr->getMessage()); }
+            } catch (Throwable $dbErr) { error_log("Rollback DB: " . $dbErr->getMessage()); }
         }
         // ۳) فقط پوشه‌ای که «همین ساخت» ایجاد کرده پاک شود؛
         //    در صورت مسابقه، پوشهٔ ساخت برنده دست‌نخورده می‌ماند.
         if ($dirCreated && is_dir($botDir)) {
-            try { Manager::removeDir($botDir); } catch (Exception $dirErr) { error_log("Rollback DIR: " . $dirErr->getMessage()); }
+            try { Manager::removeDir($botDir); } catch (Throwable $dirErr) { error_log("Rollback DIR: " . $dirErr->getMessage()); }
         }
         throw new Exception("ساخت ناموفق: " . Manager::sanitizeDbError($e->getMessage()) . " — منابع آزاد شدند.");
     }
@@ -876,12 +914,20 @@ function botAction(array $cfg, Store $store, string $TOKEN, array $SUPERS, array
         case 'toggle': {
             $new = $bot['status'] === 'active' ? 'disabled' : 'active';
             $store->setBotStatus($bot['id'], $new);
-            if ($new === 'disabled') BotApi::deleteWebhook(childToken($bot));
-            else {
+            if ($new === 'disabled') {
+                $delR = BotApi::deleteWebhook(childToken($bot));
+                // قبلاً نتیجه دور ریخته می‌شد؛ وبهوک که برنداشته شود رباتِ غیرفعال همچنان پینگ می‌گیرد
+                if (!is_array($delR) || empty($delR['ok'])) {
+                    Logger::getInstance()->warning('toggle', "deleteWebhook برای {$bot['folder']} ناموفق: " . (($delR['description'] ?? '') ?: 'no response'));
+                }
+            } else {
                 $tok = childToken($bot);
                 $secret = $bot['type'] === 'faxima' ? Manager::faximaWebhookSecret($tok) : null;
                 $url = Manager::webhookUrl($cfg, $bot['folder'], $bot['type']);
-                BotApi::setWebhook($tok, $url, $secret);
+                $setR = BotApi::setWebhook($tok, $url, $secret);
+                if (!is_array($setR) || empty($setR['ok'])) {
+                    Logger::getInstance()->warning('toggle', "setWebhook برای {$bot['folder']} ناموفق: " . (($setR['description'] ?? '') ?: 'no response'));
+                }
             }
             $bot['status'] = $new;
             showBotPanel($cfg, $store, $TOKEN, $chatId, $msgId, $bot);
@@ -897,7 +943,11 @@ function botAction(array $cfg, Store $store, string $TOKEN, array $SUPERS, array
             return;
         }
         case 'delyes': {
-            BotApi::deleteWebhook(childToken($bot));
+            $delR = BotApi::deleteWebhook(childToken($bot));
+            // قبلاً نتیجه دور ریخته می‌شد؛ وبهوک باقی‌مانده بعد از حذف، پینگ بی‌جهت می‌فرستد
+            if (!is_array($delR) || empty($delR['ok'])) {
+                Logger::getInstance()->warning('delete', "deleteWebhook برای {$bot['folder']} ناموفق: " . (($delR['description'] ?? '') ?: 'no response'));
+            }
             $dir = Manager::childBotsDir() . '/' . $bot['folder'];
             // ===== بکاپ قبل از حذف =====
             $backupDir = dirname($dir) . '/backups/' . $bot['folder'] . '_' . time();
