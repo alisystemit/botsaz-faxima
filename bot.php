@@ -542,6 +542,10 @@ function buildBot(array $cfg, Store $store, string $TOKEN, int $owner, string $t
     $types = Manager::validTypes();
     if (!isset($types[$type])) throw new Exception("نوع ربات نامعتبر است");
 
+    // پیش‌بررسی نسخهٔ PHP — قبل از mkdir/دیتابیس تا هیچ منبعی ساخته نشود.
+    // بدون این، ربات «موفقیت‌آمیز» ساخته می‌شود ولی index.php و table.php اش 500 می‌دهند.
+    Manager::assertTemplatePhpCompatible($type);
+
     $tplDir = Manager::templateDir($type);
     $botDir = Manager::childBotsDir() . '/' . $slug;
 

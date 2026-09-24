@@ -35,6 +35,20 @@ if (!in_array($type, ['faxima', 'mirza'])) {
 }
 echo "   Type: {$type}\n";
 
+// نسخهٔ PHP باید به حداقل نیاز vendor خودِ قالب برسد — وگرنه ربات ساخته‌شده 500 می‌دهد.
+// (الان فاکسیما ≥ 8.2 است؛ خودِ فایل platform_check قالب مرجع سنجش است.)
+$minPhp = Manager::templateMinPhp($type);
+if ($minPhp !== null) {
+    $need = Manager::formatPhpVersionId($minPhp);
+    if (PHP_VERSION_ID < $minPhp) {
+        echo "❌ PHP version: running " . PHP_VERSION . ", template needs >= {$need}\n";
+        echo "   ربات فرزند (index.php و table.php) با این نسخه خطای 500 می‌دهد.\n";
+        echo "   ساخت متوقف شد تا ربات خراب تحویل داده نشود.\n";
+        exit(1);
+    }
+    echo "   PHP: " . PHP_VERSION . " (needs >= {$need}) OK\n";
+}
+
 // ===== بررسی قالب =====
 echo "[2] بررسی قالب...\n";
 $tplDir = Manager::templateDir($type);

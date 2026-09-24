@@ -199,6 +199,47 @@ class Manager
         return ['faxima' => 'فاکسیما (فروش VPN)', 'mirza' => 'میرزا (فروش VPN)'];
     }
 
+    /**
+     * حداقل نسخهٔ PHP که قالب به آن نیاز دارد — از روی vendor/composer/platform_check.php خودِ قالب.
+     *
+     * قالب‌ها vendor آماده و کامپایل‌شده دارند؛ Composer داخل آن فایل دقیقاً همان نسخه‌ای را
+     * ثبت می‌کند که وابستگی‌ها به آن نیاز دارند (الان: فاکسیما ≥ 8.2، میرزا ≥ 8.1).
+     * وقتی سرور پایین‌تر باشد، همان platform_check با trigger_error همهٔ endpoint های
+     * ربات فرزند (index.php و table.php) را 500 می‌کند — یعنی رباتی که «موفقیت‌آمیز» ساخته
+     * شده عملاً مرده است. مقدار null یعنی الزامی ثبت نشده و چیزی را نمی‌توان سنجید.
+     */
+    public static function templateMinPhp(string $type): ?int
+    {
+        $file = self::templateDir($type) . '/vendor/composer/platform_check.php';
+        if (!is_file($file)) return null;
+        $raw = @file_get_contents($file);
+        if ($raw === false) return null;
+        if (preg_match('/PHP_VERSION_ID\s*>=\s*(\d{5,6})/', $raw, $m)) return (int)$m[1];
+        return null;
+    }
+
+    /** نمایش مقدار PHP_VERSION_ID به شکل 8.2.0 */
+    public static function formatPhpVersionId(int $id): string
+    {
+        return intdiv($id, 10000) . '.' . intdiv($id % 10000, 100) . '.' . ($id % 100);
+    }
+
+    /**
+     * پیش از ساخت ربات — اگر PHP سرور به حداقل نیاز قالب نرسد، ساخت را متوقف می‌کند.
+     * عمداً قبل از mkdir/دیتابیس است: هیچ منبعی ایجاد نمی‌شود و rollback لازم نیست.
+     */
+    public static function assertTemplatePhpCompatible(string $type): void
+    {
+        $min = self::templateMinPhp($type);
+        if ($min === null || PHP_VERSION_ID >= $min) return;
+        $need = self::formatPhpVersionId($min);
+        throw new Exception(
+            "قالب «{$type}» به PHP {$need} یا بالاتر نیاز دارد ولی سرور شما PHP " . PHP_VERSION . " است. "
+            . "در این حالت همهٔ صفحه‌های ربات ساخته‌شده (index.php و table.php) خطای 500 می‌دهند و ربات کار نمی‌کند؛ "
+            . "برای همین ساخت متوقف شد تا ربات خراب تحویل داده نشود. نسخهٔ PHP را به {$need} یا بالاتر ارتقا دهید."
+        );
+    }
+
     /** فایل ورودی وبهوک هر قالب (هر دو سورس واقعی ورودی index.php دارند) */
     public static function entryFile(string $type): string
     {
