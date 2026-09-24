@@ -39,9 +39,7 @@ $stmt->execute();
             update("invoice","Status","end_of_time", "username",$resultss['username']);
                 }
             }
-            if($get_username_Check && !in_array($get_username_Check['status'],['active','on_hold'])){
-            update("invoice","status","disabled", "username",$resultss['username']);
-            }
+            // این بلوک غیرقابل‌دسترس بود: وضعیت در اینجا همیشه active یا on_hold است
         }
         }
     }

@@ -230,6 +230,15 @@ function DirectPayment($order_id)
         $stmt->bindParam(':username', $steppay[1], PDO::PARAM_STR);
         $stmt->execute();
         $get_invoice = $stmt->fetch(PDO::FETCH_ASSOC);
+        if ($get_invoice === false || strtolower($get_invoice['status'] ?? $get_invoice['Status'] ?? '') !== 'unpaid') {
+            // فاکتور پرداخت یافت نشد یا منقضی شده است
+            sendmessage($Balance_id['id'], "❌ فاکتور پرداخت یافت نشد یا منقضی شده است", $keyboard, 'HTML');
+            foreach ($admin_ids as $admin) {
+                sendmessage($admin, "❌ فاکتور پرداخت یافت نشد یا منقضی شده است", null, 'HTML');
+                step('home', $admin);
+            }
+            return false;
+        }
         $username_ac = $get_invoice['username'];
         $randomString = bin2hex(random_bytes(2));
         $marzban_list_get = select("marzban_panel", "*", "name_panel", $get_invoice['Service_location'], "select");
@@ -282,8 +291,7 @@ function DirectPayment($order_id)
         $Shoppinginfo = json_encode($Shoppinginfo);
         if ($marzban_list_get['type'] == "wgdashboard") {
             $textcreatuser = sprintf($textbotlang['users']['buy']['createservicewgbuy'], $dataoutput['username'], $get_invoice['name_product'], $marzban_list_get['name_panel'], $get_invoice['Service_time'], $get_invoice['Volume']);
-        }
-        if ($marzban_list_get['type'] == "mikrotik") {
+        } elseif ($marzban_list_get['type'] == "mikrotik") {
             $textcreatuser = sprintf($textbotlang['users']['buy']['createservice_mikrotik_buy'], $dataoutput['username'], $dataoutput['subscription_url'], $get_invoice['name_product'], $marzban_list_get['name_panel'], $get_invoice['Service_time'], $get_invoice['Volume']);
         } else {
             $textcreatuser = sprintf($textbotlang['users']['buy']['createservice'], $dataoutput['username'], $get_invoice['name_product'], $marzban_list_get['name_panel'], $get_invoice['Service_time'], $get_invoice['Volume'], $config, $output_config_link);
@@ -354,7 +362,7 @@ function DirectPayment($order_id)
             $result = ($SellDiscountlimit['price'] / 100) * $get_invoice['price_product'];
             $pricediscount = $get_invoice['price_product'] - $result;
             $text_report = sprintf($textbotlang['users']['Report']['discountused'], $Balance_id['username'], $Balance_id['id'], $partsdic[1]);
-            if (strlen($setting['Channel_Report']) > 0) {
+            if (strlen((string)$setting['Channel_Report']) > 0) {
                 telegram('sendmessage', [
                     'chat_id' => $setting['Channel_Report'],
                     'text' => $text_report,
@@ -364,7 +372,7 @@ function DirectPayment($order_id)
             $pricediscount = null;
         }
         $affiliatescommission = select("affiliates", "*", null, null, "select");
-        if ($affiliatescommission['status_commission'] == "oncommission" && ($Balance_id['affiliates'] !== null || $Balance_id['affiliates'] != 0)) {
+        if ($affiliatescommission['status_commission'] == "oncommission" && !empty($Balance_id['affiliates'])) {
             if ($pricediscount == null) {
                 $result = ($get_invoice['price_product'] * $affiliatescommission['affiliatespercentage']) / 100;
             } else {

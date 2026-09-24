@@ -228,7 +228,7 @@ if (floor($TimeLastMessage / 60) >= 1) {
     if (!in_array($from_id, $admin_ids)) {
         $addmessage = intval($user['message_count']) + 1;
         update("user", "message_count", $addmessage, "id", $from_id);
-        if ($user['message_count'] >= "35") {
+        if ($addmessage >= "35") {
             $User_Status = "block";
             update("user", "User_Status", $User_Status, "id", $from_id);
             update("user", "description_blocking", $textbotlang['users']['spamtext'], "id", $from_id);
@@ -302,7 +302,7 @@ if ($stmt->rowCount() != 0) {
         $timecurrent = time();
         if (ctype_digit($invoice['time_sell'])) {
             $timelast = $timecurrent - $invoice['time_sell'];
-            if ($timelast > 86400) {
+            if ($timelast > 2592000) { // حذف فاکتورهای پرداخت‌نشده قدیمی‌تر از ۳۰ روز
                 $stmt = $pdo->prepare("DELETE FROM invoice WHERE id_invoice = :id_invoice ");
                 $stmt->bindParam(':id_invoice', $invoice['id_invoice']);
                 $stmt->execute();
@@ -1560,11 +1560,11 @@ if ($text == $datatextbot['text_support'] || $text == "/support") {
     ]);
     foreach ($admin_ids as $id_admin) {
         if ($text) {
-            $textsendadmin = sprintf($textbotlang['users']['support']['GetMessageOfUser'], $from_id, $username, $text);
+            $textsendadmin = sprintf($textbotlang['users']['support']['GetMessageOfUser'], $from_id, $username, htmlspecialchars($text, ENT_QUOTES, 'UTF-8'));
             sendmessage($id_admin, $textsendadmin, $Response, 'HTML');
         }
         if ($photo) {
-            $textsendadmin = sprintf($textbotlang['users']['support']['GetMessageOfUser'], $from_id, $username, $caption);
+            $textsendadmin = sprintf($textbotlang['users']['support']['GetMessageOfUser'], $from_id, $username, htmlspecialchars($caption, ENT_QUOTES, 'UTF-8'));
             telegram('sendphoto', [
                 'chat_id' => $id_admin,
                 'photo' => $photoid,
@@ -2292,7 +2292,7 @@ if (preg_match('/Confirmpay_user_(\w+)_(\w+)/', $datain, $dataget)) {
         ]
     ]);
     $Processing_value = number_format($user['Processing_value']);
-    $textsendrasid = sprintf($textbotlang['users']['moeny']['cartresid'], $from_id, $randomString, $username, $Processing_value, $caption);
+    $textsendrasid = sprintf($textbotlang['users']['moeny']['cartresid'], $from_id, $randomString, $username, $Processing_value, htmlspecialchars($caption, ENT_QUOTES, 'UTF-8'));
     foreach ($admin_ids as $id_admin) {
         telegram('sendphoto', [
             'chat_id' => $id_admin,

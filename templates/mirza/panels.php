@@ -216,7 +216,7 @@ class ManagePanel
             } elseif ($UsernameData['expired']) {
                 $UsernameData['status'] = "expired";
             } elseif ($UsernameData['data_limit'] - $UsernameData['used_traffic'] <= 0) {
-                $UsernameData['status'] = "limtied";
+                $UsernameData['status'] = "limited";
             }
             $links_user = outputlink($UsernameData['subscription_url']);
             if (isBase64($links_user)) {

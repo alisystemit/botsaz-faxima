@@ -28,7 +28,6 @@ if ($text == $textbotlang['Admin']['Back-Adminment'] || $datain == "back_admin")
     $Check_filde = $connect->query("SHOW COLUMNS FROM channels LIKE 'Channel_lock'");
     if (mysqli_num_rows($Check_filde) == 1) {
         $connect->query("ALTER TABLE channels DROP COLUMN Channel_lock;");
-        $stmt->execute();
     }
     if ($channels_ch == 0) {
         $stmt = $pdo->prepare("INSERT INTO channels (link) VALUES (?)");
@@ -291,8 +290,10 @@ if ($text == $textbotlang['Admin']['keyboardadmin']['send_message']) {
         sendmessage($from_id, $textbotlang['Admin']['systemsms']['sendingmessage'], $Respuseronse, 'HTML');
     }
 } elseif ($datain == "cancel_sendmessage") {
-    unlink('cron/users.json');
-    unlink('cron/info');
+    if (is_file('cron/users.json'))
+        unlink('cron/users.json');
+    if (is_file('cron/info'))
+        unlink('cron/info');
     deletemessage($from_id, $message_id);
     sendmessage($from_id, $textbotlang['Admin']['systemsms']['canceledmessage'], null, 'HTML');
 } elseif ($text == $textbotlang['Admin']['systemsms']['forwardbulkbtn']) {
@@ -303,7 +304,7 @@ if ($text == $textbotlang['Admin']['keyboardadmin']['send_message']) {
     step('home', $from_id);
     $filename = 'user.txt';
     $stmt = $pdo->prepare("SELECT id FROM user");
-    $stmt->execute();
+    $result = $stmt->execute();
     if ($result) {
         $ids = array();
         while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
@@ -767,7 +768,9 @@ if (preg_match('/Confirm_pay_(\w+)/', $datain, $dataget)) {
         );
         return;
     }
-    DirectPayment($order_id);
+    if (DirectPayment($order_id) === false) {
+        return;
+    }
     $keyboard_accept = json_encode([
         'inline_keyboard' => [
             [
@@ -1720,6 +1723,7 @@ if ($text == $textbotlang['Admin']['affiliate']['giftstart']) {
 } elseif ($user['step'] == "getpricerequests") {
     if (!ctype_digit($text)) {
         sendmessage($from_id, $textbotlang['Admin']['invalidvalue'], null, 'HTML');
+        return;
     }
     $nameloc = select("invoice", "*", "username", $user['Processing_value'], "select");
     if ($nameloc['price_product'] < $text) {
@@ -1728,7 +1732,7 @@ if ($text == $textbotlang['Admin']['affiliate']['giftstart']) {
     }
     sendmessage($from_id, $textbotlang['users']['status']['acceptrequestnote'], $keyboardadmin, 'HTML');
     step("home", $from_id);
-    $marzban_list_get = mysqli_fetch_assoc(mysqli_query($connect, "SELECT * FROM marzban_panel WHERE name_panel = '{$nameloc['Service_location']}'"));
+    $marzban_list_get = mysqli_fetch_assoc(mysqli_query($connect, "SELECT * FROM marzban_panel WHERE name_panel = '" . mysqli_real_escape_string($connect, $nameloc['Service_location']) . "'"));
     $DataUserOut = $ManagePanel->DataUser($marzban_list_get['name_panel'], $user['Processing_value']);
     if (isset($DataUserOut['status'])) {
         $ManagePanel->RemoveUser($marzban_list_get['name_panel'], $user['Processing_value']);
@@ -1812,9 +1816,9 @@ if ($text == $textbotlang['Admin']['cron']['test']['disable']) {
     $currentCronJobs = (string)shell_exec("crontab -l 2>/dev/null");
     $jobToRemove = mirzaCronUrl('configtest.php');
     $newCronJobs = preg_replace('/' . preg_quote($jobToRemove, '/') . '/', '', $currentCronJobs);
-    file_put_contents('/tmp/crontab.txt', $newCronJobs);
-    shell_exec('crontab /tmp/crontab.txt');
-    unlink('/tmp/crontab.txt');
+    file_put_contents(sys_get_temp_dir() . '/crontab_' . md5(__DIR__) . '.txt', $newCronJobs);
+    shell_exec('crontab ' . sys_get_temp_dir() . '/crontab_' . md5(__DIR__) . '.txt');
+    unlink(sys_get_temp_dir() . '/crontab_' . md5(__DIR__) . '.txt');
 }
 if ($text == $textbotlang['Admin']['cron']['volume']['active']) {
     sendmessage($from_id, $textbotlang['Admin']['cron']['volume']['dec'], null, 'HTML');
@@ -1831,9 +1835,9 @@ if ($text == $textbotlang['Admin']['cron']['volume']['disable']) {
     $currentCronJobs = (string)shell_exec("crontab -l 2>/dev/null");
     $jobToRemove = mirzaCronUrl('cronvolume.php');
     $newCronJobs = preg_replace('/' . preg_quote($jobToRemove, '/') . '/', '', $currentCronJobs);
-    file_put_contents('/tmp/crontab.txt', $newCronJobs);
-    shell_exec('crontab /tmp/crontab.txt');
-    unlink('/tmp/crontab.txt');
+    file_put_contents(sys_get_temp_dir() . '/crontab_' . md5(__DIR__) . '.txt', $newCronJobs);
+    shell_exec('crontab ' . sys_get_temp_dir() . '/crontab_' . md5(__DIR__) . '.txt');
+    unlink(sys_get_temp_dir() . '/crontab_' . md5(__DIR__) . '.txt');
 }
 if ($text == $textbotlang['Admin']['cron']['time']['active']) {
     sendmessage($from_id, $textbotlang['Admin']['cron']['time']['dec'], null, 'HTML');
@@ -1850,9 +1854,9 @@ if ($text == $textbotlang['Admin']['cron']['time']['disable']) {
     $currentCronJobs = (string)shell_exec("crontab -l 2>/dev/null");
     $jobToRemove = mirzaCronUrl('cronday.php');
     $newCronJobs = preg_replace('/' . preg_quote($jobToRemove, '/') . '/', '', $currentCronJobs);
-    file_put_contents('/tmp/crontab.txt', $newCronJobs);
-    shell_exec('crontab /tmp/crontab.txt');
-    unlink('/tmp/crontab.txt');
+    file_put_contents(sys_get_temp_dir() . '/crontab_' . md5(__DIR__) . '.txt', $newCronJobs);
+    shell_exec('crontab ' . sys_get_temp_dir() . '/crontab_' . md5(__DIR__) . '.txt');
+    unlink(sys_get_temp_dir() . '/crontab_' . md5(__DIR__) . '.txt');
 }
 if ($text == $textbotlang['Admin']['cron']['remove']['active']) {
     sendmessage($from_id, $textbotlang['Admin']['cron']['remove']['dec'], null, 'HTML');
@@ -1869,9 +1873,9 @@ if ($text == $textbotlang['Admin']['cron']['remove']['disable']) {
     $currentCronJobs = (string)shell_exec("crontab -l 2>/dev/null");
     $jobToRemove = mirzaCronUrl('removeexpire.php');
     $newCronJobs = preg_replace('/' . preg_quote($jobToRemove, '/') . '/', '', $currentCronJobs);
-    file_put_contents('/tmp/crontab.txt', $newCronJobs);
-    shell_exec('crontab /tmp/crontab.txt');
-    unlink('/tmp/crontab.txt');
+    file_put_contents(sys_get_temp_dir() . '/crontab_' . md5(__DIR__) . '.txt', $newCronJobs);
+    shell_exec('crontab ' . sys_get_temp_dir() . '/crontab_' . md5(__DIR__) . '.txt');
+    unlink(sys_get_temp_dir() . '/crontab_' . md5(__DIR__) . '.txt');
 }
 if ($text == $textbotlang['Admin']['keyboardadmin']['user_search']) {
     sendmessage($from_id, $textbotlang['Admin']['ManageUser']['BlockUserId'], $backadmin, 'HTML');
@@ -2237,9 +2241,9 @@ if ($text == $textbotlang['users']['status']['manageService']) {
                 $currentCronJobs = (string)shell_exec("crontab -l 2>/dev/null");
                 $jobToRemove = mirzaCronUrl('croncard.php');
                 $newCronJobs = preg_replace('/' . preg_quote($jobToRemove, '/') . '/', '', $currentCronJobs);
-                file_put_contents('/tmp/crontab.txt', $newCronJobs);
-                shell_exec('crontab /tmp/crontab.txt');
-                unlink('/tmp/crontab.txt');
+                file_put_contents(sys_get_temp_dir() . '/crontab_' . md5(__DIR__) . '.txt', $newCronJobs);
+                shell_exec('crontab ' . sys_get_temp_dir() . '/crontab_' . md5(__DIR__) . '.txt');
+                unlink(sys_get_temp_dir() . '/crontab_' . md5(__DIR__) . '.txt');
             } else {
                 $existingCronCommands = (string)shell_exec('crontab -l 2>/dev/null');
                 $cronUrl = mirzaCronUrl('croncard.php');
@@ -2367,7 +2371,7 @@ if ($text == $textbotlang['users']['status']['manageService']) {
 } elseif (preg_match('/verifyun_(\w+)/', $datain, $dataget)) {
     $iduser = $dataget[1];
     $userunverify = select("user", "*", "id", $iduser, "select");
-    if ($userunblock['verify'] == "0") {
+    if ($userunverify['verify'] == "0") {
         sendmessage($from_id, $textbotlang['Admin']['ManageUser']['verifyed'], $backadmin, 'HTML');
         return;
     }
