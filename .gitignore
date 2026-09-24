@@ -3,6 +3,7 @@
 /data/*.sqlite-journal
 /data/*.sqlite-wal
 /data/*.sqlite-shm
+/data/*.lock
 /data/logs/
 /bots/*/
 /bots/*/config.php

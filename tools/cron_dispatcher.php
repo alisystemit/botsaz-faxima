@@ -57,12 +57,42 @@ function cronCmd(array $cfg, string $script, array $env = []): string
 /** اجرای غیرهمزمان بدون وابستگی به /dev/null (لینوکس) یا start (ویندوز) */
 function runAsync(string $cmd, bool $isWindows): void
 {
-    if ($isWindows) {
+    $line = $isWindows
         // start /B بدون معطلی، خروجی را هم دور می‌ریزد
-        exec('start /B "" ' . $cmd . ' > NUL 2>&1');
-    } else {
-        exec($cmd . ' > /dev/null 2>&1 &');
+        ? 'start /B "" ' . $cmd . ' > NUL 2>&1'
+        : $cmd . ' > /dev/null 2>&1 &';
+
+    // خیلی از هاست‌های اشتراکی exec/popen/shell_exec را در disable_functions می‌گذارند؛
+    // در آن حالت «فراخوانی» exec() خطای Call to undefined function می‌دهد که Error است،
+    // نه Exception — پس در catch (Exception) پایین‌تر گرفته نمی‌شد و کل دیسبچر با
+    // «اولین» رباتِ دارای کرون Fatal می‌شد؛ یعنی کرون هیچ رباتی اجرا نمی‌شد بی‌آنکه
+    // دلیلی در لاگ بیفتد. حالا اول runner موجود پیدا می‌شود؛ اگر هیچ‌کدام نبود فقط
+    // هشدار داده می‌شود تا ادمین به روش ۲ (کرون مستقیم هر ربات) برود.
+    static $runnerChecked = false;
+    static $runner = null;
+    if (!$runnerChecked) {
+        $runnerChecked = true;
+        foreach (['exec', 'popen', 'shell_exec'] as $fn) {
+            if (function_exists($fn)) { $runner = $fn; break; }
+        }
+        if ($runner === null) {
+            Logger::getInstance()->warning(
+                'cron',
+                'exec/popen/shell_exec همگی غیرفعال‌اند (disable_functions)؛ کرون فرزندان اجرا نشد. '
+                . 'از روش ۲ استفاده کن: */5 * * * * php <root>/bots/<slug>/cron/cron.php'
+            );
+            echo "⚠️  exec is disabled by this host — child crons were NOT dispatched (see data/logs).\n";
+        }
     }
+    if ($runner === null) return;
+
+    if ($runner === 'exec') { @exec($line); return; }
+    if ($runner === 'popen') {
+        $h = @popen($line, 'r');
+        if (is_resource($h)) @pclose($h);
+        return;
+    }
+    @shell_exec($line);
 }
 
 $log->info('cron', 'Cron dispatcher started');
@@ -116,7 +146,9 @@ foreach ($activeBots as $bot) {
             $log->debug('cron', "Executed faxima cron.php for {$bot['folder']}");
         }
 
-    } catch (Exception $e) {
+    } catch (Throwable $e) {
+        // Throwable نه Exception: خطای Error (مثل exec غیرفعال یا ارور بارگذاری کلاس)
+        // نباید ربات‌های بعدی در همین حلقه را از دست بدهد.
         $log->error('cron', "Error processing bot {$bot['folder']}: " . $e->getMessage());
     }
 }
@@ -128,7 +160,7 @@ cleanupDeadBots($store, $log);
 try {
     $store->pruneProcessedUpdates(5000);
     $log->debug('cron', 'processed_updates pruned');
-} catch (Exception $e) {
+} catch (Throwable $e) {
     $log->warning('cron', 'prune failed: ' . $e->getMessage());
 }
 

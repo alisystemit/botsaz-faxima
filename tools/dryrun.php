@@ -145,8 +145,14 @@ if (!empty($leftover)) {
 echo "   [5d] بررسی syntax کانفیگ... ";
 $phpBin = trim((string)($cfg['php_bin'] ?? ''));
 if ($phpBin === '' || !is_file($phpBin)) $phpBin = defined('PHP_BINARY') && PHP_BINARY !== '' ? PHP_BINARY : 'php';
-$lintResult = @shell_exec("\"{$phpBin}\" -l \"{$botDir}/config.php\" 2>&1") ?? '';
-if (str_contains($lintResult, 'No syntax errors')) {
+// shell_exec ممکن است در disable_functions باشد؛ آن‌وقت «فراخوانی»اش Error می‌دهد
+// (که @ هم ساکتش نمی‌کند) و کل dryrun را می‌کشد. در آن حالت lint را رد می‌کنیم.
+$lintResult = function_exists('shell_exec')
+    ? (@shell_exec("\"{$phpBin}\" -l \"{$botDir}/config.php\" 2>&1") ?? '')
+    : '';
+if ($lintResult === '' && !function_exists('shell_exec')) {
+    echo "SKIPPED (shell_exec disabled)\n";
+} elseif (str_contains($lintResult, 'No syntax errors')) {
     echo "OK\n";
 } else {
     echo "FAILED: {$lintResult}\n";

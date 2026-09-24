@@ -20,7 +20,12 @@ $store = new Store($cfg['manager_db'], $cfg);
 echo "manager DB OK (driver: {$store->getDriver()})\n";
 
 // محافظت از پوشه data (Apache 2.4 — سینتکس قدیمی Deny from all فقط با mod_access_compat کار می‌کند)
-file_put_contents($root.'/data/.htaccess', "Require all denied\n");
+// محتوا باید «دقیقاً» با نسخهٔ tracked در مخزن یکی باشد؛ قبلاً فقط «Require all denied» نوشته
+// می‌شد و کامنت فارسی حذف می‌شد؛ در نتیجه هر بار اجرای install.php فایل را dirty می‌کرد.
+file_put_contents(
+    $root.'/data/.htaccess',
+    "# دسترسی مستقیم به دیتابیس/لاگ مدیریتی ممنوع (Apache 2.4)\nRequire all denied\n"
+);
 
 // نکته: bots/.htaccess دستی نوشته نمی‌شود چون باید index.php / table.php / cron/ را
 // برای وبهوک ربات‌های فرزند باز بگذارد (فایل .htaccess این پوشه در مخزن نگه‌داری می‌شود).
