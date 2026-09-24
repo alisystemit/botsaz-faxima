@@ -14,7 +14,7 @@ class Store
     {
         if (in_array('sqlite', PDO::getAvailableDrivers(), true)) {
             $dir = dirname($sqlitePath);
-            if (!is_dir($dir)) mkdir($dir, 0777, true);
+            if (!is_dir($dir)) mkdir($dir, 0755, true);
             $this->pdo = new PDO('sqlite:' . $sqlitePath);
             $this->pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
             // ===== پایداری SQLite در برابر «database is locked» =====

@@ -124,6 +124,9 @@ function registerExceptionHandler(): void
             'line' => $e->getLine(),
             'trace' => $e->getTraceAsString(),
         ]);
+        // اگر خروجی هنوز فرستاده نشده، status واقعی را بگذار؛
+        // وگرنه وبهوک همیشه 200 می‌دهد و تلگرام آپدیتِ شکست‌خورده را دوباره نمی‌فرستد.
+        if (!headers_sent()) http_response_code(500);
     });
     set_error_handler(function ($severity, $message, $file, $line) {
         if (!(error_reporting() & $severity)) return;
@@ -133,6 +136,7 @@ function registerExceptionHandler(): void
         $error = error_get_last();
         if ($error && in_array($error['type'], [E_ERROR, E_CORE_ERROR, E_COMPILE_ERROR])) {
             Logger::getInstance()->error('fatal', $error['message'], ['file' => $error['file'], 'line' => $error['line']]);
+            if (!headers_sent()) http_response_code(500);
         }
     });
 }

@@ -17,6 +17,18 @@ $cfg = require $cfgFile;
 $store = new Store($cfg['manager_db'], $cfg);
 $log = Logger::getInstance();
 
+// ===== قفل اجرای همزمان =====
+// دو نوبت کرونِ همزمان (مثلاً اجرای دستی هنگام کرون سیستمی) نباید روی هم بنویسند/تکرار شوند.
+$dispatchLock = @fopen(dirname(__DIR__) . '/data/cron_dispatcher.lock', 'c');
+if ($dispatchLock !== false && !@flock($dispatchLock, LOCK_EX | LOCK_NB)) {
+    @fclose($dispatchLock);
+    $log->info('cron', 'Another cron_dispatcher instance is running — skipped');
+    echo "cron_dispatcher already running — skipped.\n";
+    exit(0);
+}
+// قفل تا پایان اجرا نگه داشته می‌شود (بسته‌شدن پروسه خودش آزادش می‌کند)؛
+// اگر قفل در دسترس نبود، بی‌قفل ادامه بده — بهتر از این است که کرون اصلاً اجرا نشود.
+
 $isWindows = strtoupper(substr(PHP_OS, 0, 3)) === 'WIN';
 
 /** مسیر باینری PHP — از config، وگرنه خود همین PHP که الان دارد اجرا می‌شود */

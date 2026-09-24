@@ -1,10 +1,11 @@
 # bots/ — child bots live here (public/webhook entrypoints must stay reachable).
 # Deny everything sensitive, allow the real entrypoints.
 
-# Never expose child config / state / backups / logs / dumps
+# Never expose child config / state / backups / logs / dumps / runtime queues
 # error_log$ → فایل‌های error_log بدون پسوند که table.php و برخی کرون‌ها می‌سازند
 # (قبلاً قابل دانلود بودند چون فقط \.log$ پوشش می‌داد)
-<FilesMatch "(^\.|config\.php$|error_log$|\.log$|\.sqlite$|\.sql$|\.bak$|\.env$)">
+# info/hash.txt/json/lock → صف‌های زمان‌اجرا (cron/users.json، cron/info، cron.lock، hash.txt)
+<FilesMatch "(^\.|config\.php$|error_log$|^hash\.txt$|^info$|\.log$|\.sqlite$|\.sql$|\.bak$|\.env$|\.json$|\.lock$)">
     Require all denied
 </FilesMatch>
 

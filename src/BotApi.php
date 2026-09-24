@@ -105,7 +105,8 @@ class BotApi
             return $j;
         }
 
-        return ['ok' => false, 'error' => 'Max retries exceeded: ' . $lastErr];
+        // description (همان کلیدی که فراخواننده‌ها می‌خوانند)؛ error برای سازگاری قدیمی حفظ می‌شود
+        return ['ok' => false, 'description' => 'Max retries exceeded: ' . $lastErr, 'error' => 'Max retries exceeded: ' . $lastErr];
     }
 
     private static function extractRetryAfter(string $response): int
@@ -130,7 +131,9 @@ class BotApi
 
     public static function setWebhook(string $token, string $url, ?string $secretToken = null): array
     {
-        $p = ['url' => $url, 'drop_pending_updates' => true];
+        // بدون drop_pending_updates: ست مجدد وبهوک (ترمیم/فعال‌سازی مجدد) نباید
+        // صف پیام‌های در انتظار کاربران را بریزد — قبلاً هر بار ست وبهوک همه را پاک می‌کرد.
+        $p = ['url' => $url];
         if ($secretToken !== null && $secretToken !== '') $p['secret_token'] = $secretToken;
         return self::call($token, 'setWebhook', $p);
     }

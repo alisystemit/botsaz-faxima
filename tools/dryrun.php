@@ -87,6 +87,8 @@ try {
     echo "OK\n";
 } catch (Exception $e) {
     echo "FAILED: " . $e->getMessage() . "\n";
+    // پاکسازی نسخهٔ نیمه‌کاره — وگرنه اجرای بعدی با همین نام «تکراری» می‌خورد
+    if (is_dir($botDir)) Manager::removeDir($botDir);
     exit(1);
 }
 

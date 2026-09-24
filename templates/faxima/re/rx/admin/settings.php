@@ -1400,8 +1400,8 @@ if ($datain == "settimecornremove" && $adminrulecheck['rule'] == "administrator"
                     CURLOPT_TIMEOUT => 20,
                     CURLOPT_CONNECTTIMEOUT => 10,
                     CURLOPT_FOLLOWLOCATION => true,
-                    CURLOPT_SSL_VERIFYPEER => false,
-                    CURLOPT_SSL_VERIFYHOST => false,
+                    CURLOPT_SSL_VERIFYPEER => true,
+                    CURLOPT_SSL_VERIFYHOST => 2,
                 ]);
                 $response = curl_exec($curlHandle);
                 if ($response === false) {

@@ -12,3 +12,5 @@ $url = $argv[1] ?? (rtrim($cfg['base_url'], '/') . '/bot.php');
 $secret = Manager::faximaWebhookSecret($cfg['main_token']);
 $res = BotApi::setWebhook($cfg['main_token'], $url, $secret);
 echo json_encode($res, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE) . "\n";
+// کد خروج برای install.sh: فقط زمانی 0 که API واقعاً ok:true برگرداند
+exit(empty($res['ok']) ? 1 : 0);

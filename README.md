@@ -165,8 +165,10 @@ bash tools/install.sh
 - هر دو سورس رسماً PHP 8.2+ می‌خواهند؛ لوکال لاراگون 8.1 است (سینتکس روی 8.1 بدون خطاست؛ روی هاست با 8.2 مشکلی نیست).
 - `base_url` باید **https عمومی** باشد تا ست وبهوک و اجرای `table.php` کار کند (روی لوکال: ngrok).
 - فاکسیما علاوه بر ربات، مینی‌اپ و پنل وب دارد که روی همان پوشه سرو می‌شوند؛ کرون‌جاب‌هایش (`cron/`) را در هاست تنظیم کن (در پنل ربات، خط `curl` آماده با `secret` را کپی کن).
-- `bots/.htaccess` فایل‌های `config.php` / `error_log` / `*.log` / `*.sql` / `*.sqlite` و پوشه‌های
-  `states/` ،`backups/` ،`logs/` را مسدود می‌کند؛ فقط `index.php` / `table.php` / `cron/*` باز می‌مانند.
+- `bots/.htaccess` فایل‌های `config.php` / `error_log` / `hash.txt` / `info` / `*.log` / `*.sql` /
+  `*.sqlite` / `*.json` / `*.lock` و پوشه‌های `states/` ،`backups/` ،`logs/` را مسدود می‌کند؛
+  فقط `index.php` / `table.php` / `cron/*` باز می‌مانند. (queueهای زمان‌اجرا مثل `cron/users.json`
+  و `cron/info` هم زیر این قاعده‌اند.)
 - پورت غیرپیش‌فرض MySQL مشکلی ندارد: `db_host` و `db_port` جدا نگه داشته می‌شوند
   (هاست هرگز به‌صورت `host:port` در `mysqli_connect` یا DSN نمی‌نشیند).
 - اگر `TELEGRAM_WEBHOOK_SECRET` در محیط سرور ست شده باشد، **هم** ربات‌ساز **هم** فاکسیما همان را
@@ -202,3 +204,21 @@ php tools/dryrun.php faxima test  # ساخت خشک (بدون تلگرام)
 ```
 
 > یوزر MySQL باید دسترسی `CREATE DATABASE` داشته باشد؛ اگر نداشته باشد ساخت ربات با خطا متوقف می‌شود.
+
+## حفاظت‌های `.htaccess` و پیکربندی وب‌سرور
+
+این پروژه بخش زیادی از حفاظتش را با `.htaccess` می‌دهد (مسدودسازی `templates/` ،`tools/` ،`src/` ،
+`data/` ،`.git/` و فایل‌های حساس). برای همین:
+
+- **Apache:** دستور `AllowOverride All` (یا دست‌کم `FileInfo AuthConfig Limit Indexes`) روی پوشهٔ
+  سایت لازم است؛ بدون آن همهٔ این مسدودسازی‌ها بی‌اثر می‌شود. روی لوکال لاراگون در
+  `conf/extra/httpd-vhosts.conf` یا همان vhost پیش‌فرض این دستور هست.
+- **nginx:** به `.htaccess` توجهی ندارد؛ باید همان قواعد را خودت در `server` تکرار کنی، مثلاً:
+  ```nginx
+  location ~ ^/(tools|src|templates|data|docs)/ { deny all; }
+  location ~ ^/config\.php$ { deny all; }
+  location ~ ^/\.(env|git) { deny all; }
+  ```
+  و داخل `bots/` هم فایل‌های `config.php` / `*.log` / `*.json` / `*.lock` را deny کنی.
+- `templates/.htaccess` با `Require all denied` کل درخت قالب‌ها را می‌بندد (rewrite ریشه به‌تنهایی
+  زیرپوشه‌هایی مثل `templates/faxima/{api,app,sub}` را نمی‌پوشاند — آنجا scopeِ rewrite عوض می‌شود).
