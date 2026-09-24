@@ -423,6 +423,13 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
                 BotApi::send($TOKEN, $chatId, "⛔️ این نام قبلا استفاده شده.");
                 return;
             }
+            // نام‌های رزرو: bots/backups (ریشهٔ بکاپ‌ها) و bots/states —
+            // ساخت ربات با این نام‌ها هم با بکاپ تداخل می‌کند و هم با قواعد مسدودسازی
+            // .htaccess (states/ و backups/) وبهوکش 403 می‌شود.
+            if (in_array($slug, ['backups', 'states'], true)) {
+                BotApi::send($TOKEN, $chatId, "⛔️ این نام رزرو شده است؛ نام دیگری بفرست.");
+                return;
+            }
             BotApi::send($TOKEN, $chatId, "⏳ در حال ساخت ربات <b>{$slug}</b> ...");
             $type = $temp['type'] ?? 'faxima';
             if (!in_array($type, ['faxima', 'mirza'], true)) {

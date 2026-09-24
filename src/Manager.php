@@ -57,7 +57,7 @@ class Manager
     public static function copyDir(string $src, string $dst, array $exclude = []): void
     {
         if (!is_dir($src)) throw new Exception("قالب پیدا نشد: $src");
-        @mkdir($dst, 0777, true);
+        @mkdir($dst, 0755, true);
         $it = new RecursiveIteratorIterator(
             new RecursiveDirectoryIterator($src, RecursiveDirectoryIterator::SKIP_DOTS),
             RecursiveIteratorIterator::SELF_FIRST
@@ -317,7 +317,8 @@ class Manager
             $tableUrl .= (strpos($tableUrl, '?') === false ? '?' : '&') . 'secret=' . rawurlencode($secret);
         }
         // تلاش اول: file_get_contents
-        $ctx = stream_context_create(['http' => ['timeout' => 60, 'ignore_errors' => true], 'ssl' => ['verify_peer' => false]]);
+        // تأیید TLS روشن: این آدرس همان base_url سایت خودمان است (همان گواهی که تلگرام برای وبهوک قبول دارد)
+        $ctx = stream_context_create(['http' => ['timeout' => 60, 'ignore_errors' => true], 'ssl' => ['verify_peer' => true, 'verify_peer_name' => true]]);
         $res = @file_get_contents($tableUrl, false, $ctx);
         if ($res !== false && isset($http_response_header[0])) {
             if (preg_match('{HTTP/\S*\s+(\d+)}', $http_response_header[0], $m)) {
@@ -332,8 +333,8 @@ class Manager
                 CURLOPT_RETURNTRANSFER => true,
                 CURLOPT_TIMEOUT => 60,
                 CURLOPT_CONNECTTIMEOUT => 15,
-                CURLOPT_SSL_VERIFYPEER => false,
-                CURLOPT_SSL_VERIFYHOST => 0,
+                CURLOPT_SSL_VERIFYPEER => true,
+                CURLOPT_SSL_VERIFYHOST => 2,
                 CURLOPT_HEADER => true,
                 CURLOPT_NOBODY => false,
             ]);

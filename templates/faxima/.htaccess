@@ -1,4 +1,4 @@
 Options -Indexes
-<FilesMatch "(?i)(^\.|^error_log$|^hash\.txt$|\.(zip|sql|log|env|bak|tmp|err|ya?ml|sh|ini|conf)$)">
+<FilesMatch "(?i)(^\.|^error_log$|^hash\.txt$|\.(zip|sql|log|env|bak|tmp|err|ya?ml|sh|ini|conf)$|\.json$|\.lock$)">
     Require all denied
 </FilesMatch>

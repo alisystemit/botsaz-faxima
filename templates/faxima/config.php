@@ -175,14 +175,14 @@ if (!function_exists('rx_cleanup_installer')) {
             @file_put_contents($indexFile, "<?php http_response_code(404); exit;\n");
         }
 
-        @chmod($rootDir, 0777);
-        @chmod($installerDir, 0777);
+        @chmod($rootDir, 0755);
+        @chmod($installerDir, 0755);
 
         $deleteRecursive = static function (string $dir) use (&$deleteRecursive): bool {
             if (!is_dir($dir)) {
                 return true;
             }
-            @chmod($dir, 0777);
+            @chmod($dir, 0755);
             $items = @scandir($dir);
             if ($items === false) {
                 return false;
@@ -198,7 +198,7 @@ if (!function_exists('rx_cleanup_installer')) {
                 if (function_exists('opcache_invalidate')) {
                     @opcache_invalidate($path, true);
                 }
-                @chmod($path, 0777);
+                @chmod($path, is_dir($path) && !is_link($path) ? 0755 : 0644);
 
                 if (is_dir($path) && !is_link($path)) {
                     if (!$deleteRecursive($path)) {
