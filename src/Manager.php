@@ -49,8 +49,10 @@ class Manager
      *  اگر schemaFile برابر null باشد فقط دیتابیس خالی ساخته می‌شود (مثل میرزا که table.php خودش جدول می‌سازد). */
     public static function createDatabase(array $cfg, string $folder, ?string $schemaFile): array
     {
-        $host = $cfg['db_host']; $port = $cfg['db_port'] ?? 3306;
-        $user = $cfg['db_user']; $pass = $cfg['db_pass'];
+        $host = $cfg['db_host'] ?? '127.0.0.1';
+        $port = $cfg['db_port'] ?? 3306;
+        $user = $cfg['db_user'] ?? 'root';
+        $pass = $cfg['db_pass'] ?? '';
         $prefix = $cfg['db_prefix'] ?? 'botsaz_';
         $rand = substr(strtolower(bin2hex(random_bytes(3))), 0, 6);
         $safeFolder = preg_replace('/[^a-z0-9_]/', '', strtolower(str_replace('-', '_', $folder)));
@@ -59,11 +61,18 @@ class Manager
         $dsn = "mysql:host={$host};port={$port};charset=utf8mb4";
         $pdo = new PDO($dsn, $user, $pass, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
 
-        // نکته: مسیر «fallback به دیتابیس مشترک» حذف شد — همیشه دیتابیس جدا ساخته می‌شود؛
-        // اگر CREATE DATABASE موفق نشد استثنا بالا می‌رود و ساخت ربات متوقف می‌شود.
-        $pdo->exec("CREATE DATABASE IF NOT EXISTS `{$dbName}` CHARACTER SET utf8mb4 COLLATE utf8mb4_persian_ci");
-        if ($schemaFile !== null) self::importSql($pdo, $dbName, $schemaFile, '');
-        return [$dbName, ''];
+        // تلاش اول: ساخت دیتابیس جداگانه
+        try {
+            $pdo->exec("CREATE DATABASE IF NOT EXISTS `{$dbName}` CHARACTER SET utf8mb4 COLLATE utf8mb4_persian_ci");
+            if ($schemaFile !== null) self::importSql($pdo, $dbName, $schemaFile, '');
+            return [$dbName, ''];
+        } catch (PDOException $e) {
+            throw new Exception(
+                "ساخت دیتابیس '{$dbName}' ناموفق (\"{$e->getMessage()}\") — "
+                . "لطفاً مطمئن شوید کاربر دیتابیس دسترسی CREATE DATABASE دارد. "
+                . "در هاست اشتراکی ممکن است نیاز به تغییر تنظیمات دیتابیس باشد."
+            );
+        }
     }
 
     private static function importSql(PDO $pdo, string $db, string $file, string $tablePrefix): void
@@ -150,15 +159,24 @@ class Manager
         // هاست دیتابیس میرزا هاردکد localhost است؛ با هاست/پورت واقعی جایگزین می‌کنیم.
         // پورت صریحاً به‌عنوان آرگومان پنجم mysqli_connect داده می‌شود («host:port» داخل آرگومان host
         // رسمی/پشتیبانی‌شده نیست و روی بعضی استک‌ها نادیده گرفته می‌شود).
-        $dbHost = $cfg['db_host'];
+        $dbHost = $cfg['db_host'] ?? 'localhost';
         $dbPort = (int)($cfg['db_port'] ?? 3306);
-        $new = str_replace(
-            'mysqli_connect("localhost", $usernamedb, $passworddb, $dbname)',
-            'mysqli_connect("' . $dbHost . '", $usernamedb, $passworddb, $dbname, ' . $dbPort . ')',
+        // استفاده از regex برای انعطاف‌پذیری بیشتر
+        $new = preg_replace(
+            '/mysqli_connect\s*\(\s*"localhost"\s*,\s*(\$[a-zA-Z_]+)\s*,\s*(\$[a-zA-Z_]+)\s*,\s*(\$[a-zA-Z_]+)\s*\)/',
+            'mysqli_connect("' . $dbHost . '", $1, $2, $3, ' . $dbPort . ')',
             $new
         );
-        // ===== فیکس: DSN مجزا برای PDO =====
-        $new = str_replace('mysql:host=localhost;', 'mysql:host=' . $dbHost . ';port=' . $dbPort . ';', $new);
+        // ===== فیکس: DSN مجزا برای PDO — regex برای انعطاف‌پذیری بیشتر =====
+        $new = preg_replace(
+            '/mysql:host=localhost(?:;|$)/',
+            'mysql:host=' . $dbHost . ';port=' . $dbPort . ';',
+            $new
+        );
+        // اگر regex جایگزین نشد، str_replace backup سعی کند
+        if ($new === $raw) {
+            $new = str_replace(['mysql:host=localhost;', 'localhost'], [$dbHost . ';port=' . $dbPort . ';', $dbHost], $new);
+        }
         if (file_put_contents($file, $new) === false) throw new Exception("خطا در نوشتن config.php میرزا");
     }
 
@@ -176,17 +194,33 @@ class Manager
     /** اجرای table.php از طریق HTTP (ساخت جدول‌ها) — مثل نصب‌کننده‌های رسمی */
     public static function triggerTable(string $tableUrl): bool
     {
+        // تلاش اول: file_get_contents
         $ctx = stream_context_create(['http' => ['timeout' => 60, 'ignore_errors' => true], 'ssl' => ['verify_peer' => false]]);
         $res = @file_get_contents($tableUrl, false, $ctx);
-        // ===== فیکس: بررسی کد HTTP واقعی =====
-        if ($res === false) return false;
-        if (isset($http_response_header[0])) {
+        if ($res !== false && isset($http_response_header[0])) {
             if (preg_match('{HTTP/\S*\s+(\d+)}', $http_response_header[0], $m)) {
-                $code = (int)$m[1];
-                return $code >= 200 && $code < 300;
+                return (int)$m[1] >= 200 && (int)$m[1] < 300;
             }
         }
-        return true;
+        if ($res !== false) return true;
+        // تلاش دوم: cURL fallback اگر file_get_contents غیرفعال باشد
+        if (function_exists('curl_init')) {
+            $ch = curl_init($tableUrl);
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_TIMEOUT => 60,
+                CURLOPT_CONNECTTIMEOUT => 15,
+                CURLOPT_SSL_VERIFYPEER => false,
+                CURLOPT_SSL_VERIFYHOST => 0,
+                CURLOPT_HEADER => true,
+                CURLOPT_NOBODY => false,
+            ]);
+            $out = curl_exec($ch);
+            $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+            return $code >= 200 && $code < 300;
+        }
+        return false;
     }
 
     /** اجرای table.php میرزا از طریق HTTP — نگهداشته برای سازگاری */

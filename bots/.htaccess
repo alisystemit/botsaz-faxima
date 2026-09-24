@@ -6,14 +6,13 @@
     Require all denied
 </FilesMatch>
 
-# Child secret/state directories
-<IfModule mod_authz_core.c>
-    <Directory "states">
-        Require all denied
-    </Directory>
-    <Directory "backups">
-        Require all denied
-    </Directory>
+# Deny state/backup dirs.
+# NOTE: Directory blocks are illegal inside .htaccess files (Apache returns 500
+# for every request under bots/), so mod_rewrite is used instead.
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule (^|/)states/ - [F,L]
+    RewriteRule (^|/)backups/ - [F,L]
 </IfModule>
 
 # Allowed on purpose: index.php / table.php / cron/*.php (child webhooks + cron endpoints)

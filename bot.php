@@ -200,7 +200,10 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
     $step = $user['step'];
     $temp = json_decode($user['temp'] ?? '{}', true) ?: [];
 
-    if ($step !== 'idle' && $deepLink === null) {
+    if ($deepLink !== null) {
+        $store->clearStep($uid);
+    }
+    if ($step !== 'idle') {
         handleStep($cfg, $store, $TOKEN, $SUPERS, $user, $chatId, $text, $msg, $step, $temp);
         return;
     }
@@ -342,7 +345,7 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
     $uid = (int)$user['user_id'];
     $admin = isAdmin($user, $SUPERS);
 
-    if ($text === '❌ انصراف' || $text === '/start') {
+    if ($text === '❌ انصراف' || $text === '/start' || str_starts_with($text, '/start ')) {
         $store->clearStep($uid);
         BotApi::send($TOKEN, $chatId, "انصراف داده شد. 🏠", ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
         return;
@@ -505,7 +508,8 @@ function buildBot(array $cfg, Store $store, string $TOKEN, int $owner, string $t
     $dirCreated = false;
 
     try {
-        Manager::copyDir($tplDir, $botDir, ['docker/', 'docker-compose.yml', '.env.example', 'vpnbot/', 'install.sh', 'images.jpeg', 'composer.json', 'composer.lock', 'vendor/', 'installer/']);
+        // توجه: vendor/ حتماً کپی می‌شود — هر دو سورس به vendor/autoload.php نیاز حیاتی دارند
+        Manager::copyDir($tplDir, $botDir, ['docker/', 'docker-compose.yml', '.env.example', 'vpnbot/', 'install.sh', 'images.jpeg', 'composer.json', 'composer.lock', 'installer/']);
         $dirCreated = true;
 
         if ($type === 'mirza') {
@@ -517,8 +521,8 @@ function buildBot(array $cfg, Store $store, string $TOKEN, int $owner, string $t
             Manager::patchMirzaConfig($botDir, $cfg, $dbName, $plainToken, (int)($temp['admin_id'] ?? $owner), $temp['bot_username'] ?? '', $domainPath);
             Manager::removeDir($botDir . '/installer');
 
-            // ===== پاکسازی فایل‌های اضافی =====
-            Manager::cleanupExtraFiles($botDir, ['docker/', 'docker-compose.yml', '.env.example', 'vpnbot/', 'install.sh', 'images.jpeg', 'composer.json', 'composer.lock', 'vendor/', 'installer/']);
+            // ===== پاکسازی فایل‌های اضافی (بدون دست‌زدن به vendor/) =====
+            Manager::cleanupExtraFiles($botDir, ['docker/', 'docker-compose.yml', '.env.example', 'vpnbot/', 'install.sh', 'images.jpeg', 'composer.json', 'composer.lock', 'installer/']);
 
             $webhook = Manager::webhookUrl($cfg, $slug, 'mirza');
             $set = BotApi::setWebhook($plainToken, $webhook);
@@ -553,8 +557,8 @@ function buildBot(array $cfg, Store $store, string $TOKEN, int $owner, string $t
         Manager::patchFaximaConfig($botDir, $cfg, $dbName, $plainToken, (int)($temp['admin_id'] ?? $owner), $temp['bot_username'] ?? '', $domainPath);
         Manager::removeDir($botDir . '/installer');
 
-        // ===== پاکسازی فایل‌های اضافی =====
-        Manager::cleanupExtraFiles($botDir, ['docker/', 'docker-compose.yml', '.env.example', 'vpnbot/', 'install.sh', 'images.jpeg', 'composer.json', 'composer.lock', 'vendor/', 'installer/']);
+        // ===== پاکسازی فایل‌های اضافی (بدون دست‌زدن به vendor/) =====
+        Manager::cleanupExtraFiles($botDir, ['docker/', 'docker-compose.yml', '.env.example', 'vpnbot/', 'install.sh', 'images.jpeg', 'composer.json', 'composer.lock', 'installer/']);
 
         $webhook = Manager::webhookUrl($cfg, $slug, 'faxima');
         $secret = Manager::faximaWebhookSecret($plainToken);
@@ -802,7 +806,7 @@ function botAction(array $cfg, Store $store, string $TOKEN, array $SUPERS, array
             $backedUp = false;
             if (is_dir($dir)) {
                 @mkdir($backupDir, 0755, true);
-                try { Manager::copyDir($dir, $backupDir . '/data'); $backedUp = true; }
+                try { Manager::copyDir($dir, $backupDir . '/data', ['config.php', '.htaccess']); $backedUp = true; }
                 catch (Exception $e) { Logger::getInstance()->error('delete', "Backup failed for {$bot['folder']}: " . $e->getMessage()); }
             }
             if (is_dir($dir)) {
