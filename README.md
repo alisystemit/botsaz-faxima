@@ -21,7 +21,7 @@ bash tools/install.sh
 git clone https://github.com/alisystemit/botsaz-faxima.git && cd botsaz-faxima && bash tools/install.sh
 ```
 
-اسکریپت همه‌چیز را قدم‌به‌قدم می‌پرسد (توکن @BotFather، آیدی سوپرادمین، آدرس دامنه، مشخصات MySQL) و نصب را کامل می‌کند. راهنمای کامل هر مرحله در بخش «نصب خودکار روی لینوکس» همین فایل (پایین‌تر) است. 📖 [مشاهده در گیت‌هاب](https://github.com/alisystemit/botsaz-faxima/blob/main/README.md)
+اسکریپت همه‌چیز را قدم‌به‌قدم می‌پرسد (توکن @BotFather، آیدی سوپرادمین، آدرس دامنه، مشخصات MySQL) و نصب را کامل می‌کند. راهنمای کامل هر مرحله در بخش «نصب خودکار روی لینوکس» همین فایل (پایین‌تر) است. اگر SSH نداری (هاست cPanel) یا روی ویندوز/لاراگن هستی، سراغ بخش **«نصب دستی — راهنمای کامل»** برو. 📖 [مشاهده در گیت‌هاب](https://github.com/alisystemit/botsaz-faxima/blob/main/README.md)
 
 ## ساختار
 
@@ -46,24 +46,185 @@ tools/dryrun.php      → ساخت خشک بدون تلگرام (exit code بر�
 tools/cron_dispatcher.php → اجرای کرون همه ربات‌ها از یک خط crontab
 ```
 
-## نصب (لوکال لاراگون)
+## نصب دستی — راهنمای کامل (هاست و لاراگون) 🛠️
 
-1. با PHP لاراگون:
-```powershell
-C:\laragon\bin\php\php-8.1.10-Win32-vs16-x64\php.exe tools/install.php
-```
-2. `config.php` را ویرایش کن:
-   - `main_token` توکن ربات‌ساز از @BotFather
-   - `super_admins` آیدی عددی خودت
-   - `base_url` آدرس عمومی پروژه (مهم برای وبهوک)
-   - `db_host/db_user/db_pass` یوزری با دسترسی `CREATE DATABASE`
-3. وبهوک را ست کن:
-```powershell
-...php.exe tools/set_webhook.php
-```
-4. در تلگرام `/start` بزن.
+این راهنما برای وقتی است که نمی‌خواهی/نمی‌توانی از `tools/install.sh` استفاده کنی (هاست اشتراکی cPanel، یا ویندوز/لاراگون). همهٔ مراحل را می‌توانی قدم‌به‌قدم دستی انجام بدهی.
 
-> روی لوکال، تلگرام به `http://localhost` دسترسی ندارد. برای تست وبهوک از ngrok یا هاست واقعی استفاده کن.
+> ⚠️ `tools/` ،`src/` ،`templates/` ،`data/` و `config.php` از طریق مرورگر **403** هستند (حفاظت `.htaccess`). یعنی `tools/install.php` را نباید با `https://domain/.../tools/install.php` باز کنی — باید از **ترمینال/SSH** اجرا شود.
+
+### گام ۰ — پیش‌نیازها
+
+| نیاز | هاست لینوکس (cPanel/VPS) | لاراگن (ویندوز) |
+| :--- | :--- | :--- |
+| PHP | **8.2+** برای ساخت «فاکسیما»؛ 8.1+ فقط «میرزا» | `Menu → PHP → Version` نسخهٔ 8.2+ (پیش‌فرض لاراگن 8.1 است) |
+| اکستنشن‌ها | `curl` `mbstring` `openssl` `json` `pdo_mysql` + `pdo_sqlite` (اختیاری) | همه با بستهٔ PHP نصب‌اند ✅ |
+| MySQL/MariaDB | یوزر با دسترسی **`CREATE DATABASE`** | `root` بدون پسورد روی `127.0.0.1:3306` ✅ |
+| دامنه + SSL | **https عمومی** (تلگرام وبهوک http قبول نمی‌کند) | ندارد → حتماً ngrok/cloudflared (گام ۶) |
+| سورس کامل | کل ریپو، به‌خصوص `templates/faxima` و `templates/mirza` | همین |
+
+```bash
+php -v                                              # نسخهٔ PHP
+php -m | grep -E 'curl|mbstring|pdo_mysql|openssl'   # اکستنشن‌ها
+```
+
+> **چرا PHP 8.2؟** قالب‌ها `vendor/` کامپایل‌شده دارند و `platform_check` خودشان نسخهٔ لازم را ثبت کرده (فاکسیما ≥ 8.2، میرزا ≥ 8.1). ربات‌ساز قبل از ساخت می‌سنجد و با پیام روشن متوقف می‌شود؛ اگر هم با اجبار بالاتر ببری، `index.php`/`table.php` ربات ساخته‌شده خطای **500** می‌دهند.
+
+### گام ۱ — دریافت سورس
+
+**هاست بدون SSH:** ZIP ریپو را از گیت‌هاب دانلود و در File Manager آپلود و Extract کن؛ مسیر پیشنهادی `public_html/botsaz-faxima`.
+
+**هاست با SSH:**
+```bash
+cd ~/public_html
+git clone https://github.com/alisystemit/botsaz-faxima.git
+```
+
+**لاراگن:** پوشه را در `C:\laragon\www\botsaz-faxima` بگذار (کپی مستقیم یا `git clone`).
+
+✅ چک کن این‌ها موجود باشند: `bot.php`، `templates/faxima/index.php`، `templates/mirza/index.php`، `bots/.htaccess`.
+> پوشه‌های `bots/` و `data/` و `data/.htaccess` در خود ریپو هستند؛ پس با آپلود ساخته می‌شوند.
+
+### گام ۲ — ساخت `config.php`
+
+`config.example.php` را کپی و به نام `config.php` ذخیره کن (در File Manager یا `cp`/`copy`)، بعد این کلیدها را پر کن:
+
+| کلید | چه بگذاری | نمونه |
+| :--- | :--- | :--- |
+| `main_token` | توکن ربات‌ساز از @BotFather | `123456:ABC-DEF...` |
+| `super_admins` | آرایهٔ آیدی عددی خودت از @userinfobot | `[987654321]` |
+| `base_url` | آدرس عمومی پروژه **بدون اسلش آخر** | `https://example.com/botsaz-faxima` |
+| `db_host` / `db_port` | **جدا** از هم؛ هرگز `host:port` در یک فیلد | `127.0.0.1` / `3306` |
+| `db_user` / `db_pass` | یوزری با `CREATE DATABASE` | — |
+| `db_prefix` | پیشوند نام دیتابیس‌های فرزند | `botsaz_` (هاست: ببین گام ۳) |
+| `php_bin` | اگر `php` در PATH نیست، مسیر کامل | `C:\laragon\bin\php\php-8.2.x\php.exe` |
+| `secret_key` | رشتهٔ تصادفی ۳۲+ کاراکتری | `php -r 'echo bin2hex(random_bytes(16));'` |
+
+> ⚠️ `secret_key` را **بعد از ساخت ربات‌ها عوض نکن**؛ توکن‌های رمزنگاری‌شده دیگر رمزگشایی نمی‌شوند.
+
+### گام ۳ — دیتابیس MySQL
+
+ربات‌ساز برای هر ربات فرزند یک دیتابیس جدا می‌سازد؛ پس یوزرت باید `CREATE DATABASE` داشته باشد.
+
+**VPS/سرور اختصاصی (root):**
+```sql
+CREATE USER 'botsaz'@'localhost' IDENTIFIED BY 'پسورد_قوی';
+GRANT ALL PRIVILEGES ON `botsaz_%`.* TO 'botsaz'@'localhost';
+FLUSH PRIVILEGES;
+```
+
+> 📌 **cPanel / هاست اشتراکی:** پنل cPanel معمولاً نام دیتابیس را با پیشوند نام کاربری‌ات می‌سازد و فقط روی `youruser_%` privilege می‌دهد. اگر `CREATE DATABASE botsaz_x` خطای **access denied** داد، در `config.php` بگذار:
+> ```php
+> 'db_prefix' => 'youruser_botsaz_',
+> ```
+> با همین پیشوند، هم دیتابیس فرزند و هم دیتابیس `manager` ساخته می‌شوند.
+
+### گام ۴ — نصب اولیه (`tools/install.php`)
+
+این ابزار پوشه‌ها را می‌سازد، `config.php` را (اگر نباشد) از روی example کپی می‌کند، دیتابیس مدیریتی را آماده می‌کند و `data/.htaccess` را می‌نویسد. **اجرای مجددش امن است** (config موجود بازنویسی نمی‌شود).
+
+**هاست با SSH / ترمینال cPanel:**
+```bash
+php tools/install.php
+```
+
+**لاراگن (PowerShell/CMD):**
+```powershell
+C:\laragon\bin\php\php-8.2.x\php.exe tools\install.php
+```
+
+**هاست بدون SSH — cPanel → Cron Jobs** (یک خط موقت بگذار، بعد حذفش کن):
+```
+* * * * * /usr/local/bin/php /home/USER/public_html/botsaz-faxima/tools/install.php >/dev/null 2>&1
+```
+> مسیر `php` را با `command -v php` پیدا کن؛ در cPanel معمولاً `/usr/local/bin/php` است.
+
+**کلاً بدون ترمینال:** پوشه‌ها و `data/.htaccess` با آپلود موجودند، `config.php` را در گام ۲ ساختی، و دیتابیس مدیریتی SQLite **خودکار** موقع اولین درخواست ساخته می‌شود — پس فقط همان `config.php` لازم است.
+
+### گام ۵ — پیکربندی وب‌سرور
+
+این پروژه بخش زیادی از حفاظتش را با `.htaccess` می‌دهد؛ پس باید فعال باشد:
+
+- **Apache:** روی پوشهٔ سایت `AllowOverride All` لازم است. لاراگن خودش برای هر پوشه در `www` یک vhost با `AllowOverride All` می‌سازد (اینجا `C:\laragon\etc\apache2\sites-enabled\auto.botsaz-faxima.test.conf`) و ردیف `hosts` را هم اضافه می‌کند. روی هاست اگر `.htaccess` اعمال نشد، از پشتیبانی بخواه `AllowOverride All` بگذارد.
+- **nginx:** قواعد `deny` را خودت تکرار کن (بخش «حفاظت‌های `.htaccess`» همین فایل).
+
+بدون `AllowOverride`، `tools/` ،`src/` ،`templates/` ،`data/` و `config.php` از وب قابل دانلود می‌شوند.
+
+### گام ۶ — ست وبهوک
+
+تلگرام فقط `https://` **عمومی** قبول دارد.
+
+**روش A — ترمینال (توصیه‌شده):**
+```bash
+php tools/set_webhook.php
+# یا با آدرس صریح:
+php tools/set_webhook.php https://example.com/botsaz-faxima/bot.php
+```
+خروجی `"ok": true` یعنی موفق (exit code هم 0/1 است).
+
+**روش B — بدون ترمینال:** secret وبهوک این است:
+```
+sha256( <main_token> + "_faoxima_webhook_secret" )
+```
+(اگر در محیط سرور `TELEGRAM_WEBHOOK_SECRET` ست شده، همان جایگزین می‌شود.) بعد در مرورگر:
+```
+https://api.telegram.org/bot<TOKEN>/setWebhook?url=<URL_ENCODED_BASE>/bot.php&secret_token=<SECRET>
+```
+✅ **تأیید:** `https://api.telegram.org/bot<TOKEN>/getWebhookInfo` → `url` پر باشد و `last_error_message` خالی.
+
+**لاراگن:** `http://botsaz-faxima.test` از اینترنت دیده نمی‌شود و https هم ندارد (فایل `httpd-ssl.conf` لاراگن فقط `Listen 443` و cipherها را دارد؛ نه `VirtualHost *:443` نه گواهی). پس حتماً تونل بزن:
+```powershell
+ngrok http 80
+# یا: cloudflared tunnel --url http://localhost:80
+```
+آدرس `https://xxxx.ngrok-free.app` را در `base_url` بگذار، `config.php` را ذخیره کن، بعد `tools/set_webhook.php` را اجرا کن.
+
+### گام ۷ — کرون
+
+بدون کرون، انقضا/حجم/گزارش کارت ربات‌های فرزند کار نمی‌کند.
+
+**هاست — cPanel → Cron Jobs یا `crontab -e`:**
+```
+*/5 * * * * /usr/local/bin/php /home/USER/public_html/botsaz-faxima/tools/cron_dispatcher.php >/dev/null 2>&1
+```
+
+**لاراگن/ویندوز — Task Scheduler (تست‌شده):**
+```powershell
+schtasks /Create /TN "botsaz-cron" /SC MINUTE /MO 5 /F /TR "C:\laragon\bin\php\php-8.2.x\php.exe C:\laragon\www\botsaz-faxima\tools\cron_dispatcher.php"
+schtasks /Query  /TN "botsaz-cron"     # وضعیت
+schtasks /Run    /TN "botsaz-cron"     # اجرای دستی
+schtasks /Delete /TN "botsaz-cron" /F  # حذف
+```
+> اگر مسیرها فاصله داشت، داخل `/TR` هر کدام را جداگانه داخل `"` بگذار.
+
+> ⚠️ بعضی هاست‌های اشتراکی `exec` را غیرفعال می‌کنند. `cron_dispatcher` در این حالت دیگر Fatal نمی‌گیرد و با هشدار `⚠️ exec is disabled by this host` رد می‌شود؛ آن‌وقت از **روش ۲** (کرون مستقیم هر ربات — بخش «کرون ربات‌های فرزند») استفاده کن.
+
+### گام ۸ — تست و تأیید نهایی
+
+```bash
+php tools/healthcheck.php      # exit 0 یعنی سالم
+php tools/selftest.php         # بدون تلگرام/MySQL
+php tools/dryrun.php mirza t1  # ساخت خشک (بدون تلگرام)
+```
+
+**بدون ترمینال** (`tools/` از HTTP 403 است):
+1. `getWebhookInfo` را بالا چک کن (url پر، `last_error_message` خالی).
+2. به ربات `/start` بزن — باید منوی 👑 بیاید.
+3. این آدرس‌ها در مرورگر باید **403** بدهند: `config.php` ،`src/Manager.php` ،`tools/selftest.php` ،`data/` و `/` (لیست پوشه؛ `Options -Indexes`).
+
+### عیب‌یابی نصب دستی
+
+| علامت | علت | راه‌حل |
+| :--- | :--- | :--- |
+| `config.php missing` (500) | `config.php` ساخته نشده | گام ۲ |
+| `main_token not set!` | توکن هنوز placeholder است | `main_token` واقعی بگذار |
+| `Access denied ... CREATE DATABASE` | نبود privilege یا پیشوند cPanel | گام ۳ — `GRANT` یا `db_prefix` |
+| وبهوک همیشه **403** | secret نادرست یا `TELEGRAM_WEBHOOK_SECRET` ناهماهنگ | دوبارهٔ گام ۶ (روش A/B) |
+| `setWebhook` خطای *not https* | `base_url` روی `http` است | دامنهٔ https یا ngrok |
+| ربات ساخته می‌شود ولی 500 | نسخهٔ PHP پایین‌تر از حداقل قالب | گام ۰ — ارتقا به 8.2+ |
+| `/` سایت 403 می‌دهد | طبیعی: `index.php` در ریشه نیست و `Options -Indexes` فعال است | — |
+| کرون اجرا نمی‌شود | نبود cron/Task یا `php_bin` نادرست | گام ۷ |
+| `⚠️ exec is disabled by this host` | هاست `exec` را بسته | کرون مستقیم هر ربات (روش ۲) |
+| ربات جواب نمی‌دهد ولی وبهوک ok است | خطا در ارسال تلگرام | `getWebhookInfo.last_error_message` + `data/logs/` |
 
 ## نصب خودکار روی لینوکس با `tools/install.sh`
 
