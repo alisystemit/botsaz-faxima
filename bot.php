@@ -488,9 +488,9 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
 
         case 'await_user_remove': {
             if (!preg_match('/^\d{5,}$/', $text)) { BotApi::send($TOKEN, $chatId, "آیدی عددی بفرست:"); return; }
-            $currentUser = $store->user((int)$text);
-            $currentIsAdmin = (int)$currentUser['is_admin'];
-            $store->setAllowed((int)$text, 0, $currentIsAdmin);
+            // is_admin هم صفر می‌شود؛ وگرنه حذف دسترسیِ یک ادمین بی‌اثر می‌ماند
+            // (canUse تا زمانی که is_admin=1 باشد true برمی‌گرداند)
+            $store->setAllowed((int)$text, 0, 0);
             $store->clearStep($uid);
             BotApi::send($TOKEN, $chatId, "✅ دسترسی کاربر <code>{$text}</code> حذف شد.", ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
             return;
@@ -547,7 +547,7 @@ function buildBot(array $cfg, Store $store, string $TOKEN, int $owner, string $t
     // mkdir در صورت وجود از قبل شکست می‌خورد؛ بنابراین دو ساخت همزمان با یک نام،
     // هرگز روی یک پوشه کار نمی‌کنند. قبلاً usleep+is_dir بود که مسابقه را فقط «کم‌احتمال» می‌کرد
     // و rollbackِ ساختِ دومی پوشهٔ اول را پاک می‌کرد.
-    if (!@mkdir($botDir, 0777, true)) {
+    if (!@mkdir($botDir, 0755, true)) {
         if (file_exists($botDir)) throw new Exception("⛔️ این نام قبلاً استفاده شده.");
         throw new Exception("ساخت پوشه «{$slug}» ممکن نشد — دسترسی فایل‌سیستم را بررسی کنید.");
     }
@@ -635,8 +635,10 @@ function buildBot(array $cfg, Store $store, string $TOKEN, int $owner, string $t
 
         $msg = "🎉 <b>ربات فاکسیما آماده شد!</b>\n🤖 @{$temp['bot_username']}\n📁 پوشه: <code>{$slug}</code>\n🗄 دیتابیس: <code>{$dbName}</code>\n🔗 وبهوک: " . ($webhookNote !== '' ? '⚠️ خطا' : 'ست شد ✅') . "\n🗂 جدول‌ها: " . ($tableOk ? '✅' : '⚠️ دستی بازش کن') . $webhookNote;
         return ['bot_username' => $temp['bot_username'] ?? '', 'db' => $dbName, 'custom_message' => $msg];
-    } catch (Exception $e) {
+    } catch (Throwable $e) {
         // ===== ROLLBACK =====
+        // Throwable (نه فقط Exception) تا TypeErrorها و خطاهای هسته هم rollback شوند؛
+        // وگرنه پوشه/دیتابیس/وبهوک نیمه‌کاره می‌ماند.
         // ۱) وبهوک ثبت‌شده روی تلگرام باید برداشته شود تا ربات حذف‌شده دیگر پینگ نگیرد
         if (!empty($webhookSet) && $plainToken !== '') {
             try { BotApi::deleteWebhook($plainToken); }
@@ -901,6 +903,8 @@ function botAction(array $cfg, Store $store, string $TOKEN, array $SUPERS, array
                 @rmdir($dir);
             }
             // ===== حذف کامل دیتابیس =====
+            // اگر DROP ناموفق شود نباید بی‌صدا رکورد حذف شود — دیتابیس یتیم و نامرئی می‌ماند.
+            $dbDropFailed = false;
             try {
                 if (!empty($bot['db_name'])) {
                     $host = $cfg['db_host']; $port = $cfg['db_port'] ?? 3306;
@@ -908,13 +912,17 @@ function botAction(array $cfg, Store $store, string $TOKEN, array $SUPERS, array
                     $serverPdo->exec("DROP DATABASE IF EXISTS `{$bot['db_name']}`");
                 }
             } catch (Exception $e) {
+                $dbDropFailed = true;
                 Logger::getInstance()->error('delete', "Failed to drop DB for {$bot['folder']}: " . $e->getMessage());
             }
             $store->deleteBot($bot['id']);
             // ===== جلوگیری از رشد بی‌انتهای bots/backups/ =====
             try { Manager::pruneBackups(dirname($dir) . '/backups', $bot['folder'], 5); }
             catch (Exception $e) { Logger::getInstance()->warning('delete', "Backup prune failed: " . $e->getMessage()); }
-            BotApi::edit($TOKEN, $chatId, $msgId, "🗑 ربات حذف شد." . ($backedUp ? "\n💾 بکاپ: <code>{$backupDir}</code>" : ""));
+            $dbNote = ($dbDropFailed && !empty($bot['db_name']))
+                ? "\n⚠️ حذف دیتابیس ناموفق بود — دستی حذفش کنید: <code>{$bot['db_name']}</code>"
+                : '';
+            BotApi::edit($TOKEN, $chatId, $msgId, "🗑 ربات حذف شد." . $dbNote . ($backedUp ? "\n💾 بکاپ: <code>{$backupDir}</code>" : ""));
             return;
         }
     }

@@ -76,7 +76,7 @@ class Manager
                 }
             }
             $target = $dst . DIRECTORY_SEPARATOR . $relPath;
-            if ($f->isDir()) @mkdir($target, 0777, true);
+            if ($f->isDir()) @mkdir($target, 0755, true);
             else copy($f->getPathname(), $target);
         }
     }
