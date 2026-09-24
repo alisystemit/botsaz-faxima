@@ -418,6 +418,14 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
                 BotApi::send($TOKEN, $chatId, "⛔️ لطفاً یک نام انگلیسی بفرستید.");
                 return;
             }
+            // فقط نامی که حداقل یک حرف/عدد لاتین داشته باشد قبول می‌شود.
+            // قبلاً slugify هر متنی (فارسی/ایموجی/دستور ادمین مثل «⏰ کرون») را بی‌صدا
+            // به نام تصادفی مثل bot-a1b2c3 تبدیل می‌کرد و ساخت همان لحظه شروع می‌شد؛
+            // کاربر هیچ شانسی برای اعتراض به نام نداشت.
+            if (!preg_match('/[A-Za-z0-9]/', $text)) {
+                BotApi::send($TOKEN, $chatId, "⛔️ لطفاً یک نام انگلیسی بفرستید (حروف و اعداد لاتین).");
+                return;
+            }
             $slug = Manager::slugify($text);
             if ($store->botByFolder($slug) || is_dir(Manager::childBotsDir() . '/' . $slug)) {
                 BotApi::send($TOKEN, $chatId, "⛔️ این نام قبلا استفاده شده.");
@@ -450,7 +458,9 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
                 // Throwable: خطاهای Error/TypeError هم باید به کاربر پیام بدهند نه اینکه
                 // استثناي uncaught ⇒ 500 ⇒ حلقهٔ retry تلگرام شوند.
                 Logger::getInstance()->error('build', "Build failed ({$slug}): " . $e->getMessage());
-                BotApi::send($TOKEN, $chatId, "❌ خطا در ساخت ربات: " . htmlspecialchars(Manager::sanitizeDbError($e->getMessage())) . "\nدوباره تلاش کن.");
+                // مرحله عمداً باقی می‌ماند تا کاربر بتواند همان‌جا نام دیگری بفرستد
+                // («دوباره تلاش کن» یعنی همین). انصراف با ❌ انصراف / 🏠 منو.
+                BotApi::send($TOKEN, $chatId, "❌ خطا در ساخت ربات: " . htmlspecialchars(Manager::sanitizeDbError($e->getMessage())) . "\nنام دیگری بفرست یا «❌ انصراف» بزن.", ['reply_markup' => BotApi::kb([[['text' => '❌ انصراف']]])]);
             }
             return;
         }
