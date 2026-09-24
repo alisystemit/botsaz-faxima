@@ -846,7 +846,16 @@ function faoxima_ms_status_label(string $s): array
                 <?php if ($tableMissing): ?>
                     <div class="alert alert-warning">
                         <?php echo icon('circle-exclamation', 'svg-icon'); ?>
-                        <span>جدول <code>manualsell</code> هنوز ساخته نشده است. یکبار <code>table.php</code> را در مرورگر باز کنید تا جدول‌ها ساخته شوند.</span>
+                        <span>جدول <code>manualsell</code> هنوز ساخته نشده است. یکبار این لینک را در مرورگر باز کنید تا جدول‌ها ساخته شوند:
+                            <?php
+                            $msTableToken = $GLOBALS['APIKEY'] ?? ($APIKEY ?? '');
+                            $msTableSecret = is_string($msTableToken) && $msTableToken !== ''
+                                ? hash('sha256', $msTableToken . '_faxima_table_secret')
+                                : '';
+                            $msTableHref = '/table.php' . ($msTableSecret !== '' ? '?secret=' . rawurlencode($msTableSecret) : '');
+                            ?>
+                            <a href="<?php echo htmlspecialchars($msTableHref, ENT_QUOTES); ?>" target="_blank" rel="noopener"><code>table.php</code></a>
+                        </span>
                     </div>
                 <?php endif; ?>
 

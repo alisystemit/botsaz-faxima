@@ -80,7 +80,7 @@ foreach ($activeBots as $bot) {
         }
 
         // توکن ذخیره‌شده رمزنگاری است؛ برای اسکریپت فرزند رمزگشایی کن
-        $plainToken = Manager::decryptChildToken($bot['token'] ?? '', $cfg['secret_key'] ?? 'change-this-to-a-random-string');
+        $plainToken = Manager::decryptChildToken($bot['token'] ?? '', Manager::secretKey($cfg));
 
         // اجرای هر فایل کرون (توکن از طریق env داده می‌شود، نه argv — در لوگ/ps لو نمی‌رود)
         $cronFiles = glob($cronDir . '*.php');

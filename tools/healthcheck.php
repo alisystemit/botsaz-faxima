@@ -15,6 +15,10 @@ if (!file_exists($cfgFile)) {
 }
 $cfg = require $cfgFile;
 
+// حالت CI: --json باید «فقط» JSON خروجی بدهد؛ متن انسان‌خوان در بافر جمع و دور ریخته می‌شود
+$jsonMode = isset($argv[1]) && $argv[1] === '--json';
+if ($jsonMode) ob_start();
+
 $store = new Store($cfg['manager_db'], $cfg);
 $log = Logger::getInstance();
 
@@ -78,7 +82,7 @@ foreach ($dbBots as $bot) {
 
     // بررسی وبهوک
     if ($bot['status'] === 'active') {
-        $tok = Manager::decryptChildToken($bot['token'] ?? '', $cfg['secret_key'] ?? 'change-this-to-a-random-string');
+        $tok = Manager::decryptChildToken($bot['token'] ?? '', Manager::secretKey($cfg));
         $wh = BotApi::getWebhookInfo($tok);
         if (!empty($wh['ok']) && !empty($wh['result']['url'])) {
             $ok[] = "Bot {$bot['folder']}: webhook active (" . $wh['result']['url'] . ")";
@@ -151,15 +155,42 @@ try {
     $errors[] = "MySQL connection failed: " . $e->getMessage();
 }
 
-// ===== ۱۱. بررسی فایل‌های اضافی =====
-echo "[11] بررسی فایل‌های اضافی در bot templates...\n";
-$extraFiles = ['docker/', 'docker-compose.yml', '.env.example', 'install.sh', 'vpnbot/', 'composer.json'];
-foreach ($extraFiles as $file) {
-    if (file_exists(__DIR__ . "/../templates/faxima/{$file}")) {
-        // این فایل‌ها جزو قالب اصلی هستند، فقط بررسی می‌شوند
+// ===== ۱۱. بررسی فایل‌های اضافی در کپی ساخته‌شدهٔ ربات‌ها =====
+// قبلاً کدی اجرا نمی‌شد (فقط پیام «check completed»). حالا واقعاً بررسی می‌کنیم
+// که استثناهای copyDir و cleanupExtraFiles در پوشهٔ هیچ رباتی نشت نکرده باشد.
+echo "[11] بررسی فایل‌های اضافی در کپی ربات‌ها...\n";
+$extraPaths = ['docker', 'docker-compose.yml', '.env.example', 'install.sh', 'vpnbot', 'composer.json', 'composer.lock', 'images.jpeg'];
+$leaked = 0;
+foreach ($dbBots as $bot) {
+    $botDir = Manager::childBotsDir() . '/' . $bot['folder'];
+    if (!is_dir($botDir)) continue;
+    foreach ($extraPaths as $p) {
+        if (file_exists($botDir . '/' . $p)) {
+            $errors[] = "Leaked excluded path '{$p}' in built bot {$bot['folder']}";
+            $leaked++;
+        }
+    }
+    // installer/ باید حذف شده باشد
+    if (is_dir($botDir . '/installer')) {
+        $errors[] = "installer/ not removed from built bot {$bot['folder']}";
+        $leaked++;
+    }
+    // هیچ config.php دیگری (حتی تو در تو) نباید در کپی مانده باشد
+    $rootConfig = realpath($botDir . '/config.php') ?: ($botDir . '/config.php');
+    $it = new RecursiveIteratorIterator(
+        new RecursiveDirectoryIterator($botDir, RecursiveDirectoryIterator::SKIP_DOTS),
+        RecursiveIteratorIterator::LEAVES_ONLY
+    );
+    foreach ($it as $f) {
+        if ($f->isDir() || $f->getFilename() !== 'config.php') continue;
+        if ($f->getPathname() === $rootConfig) continue;
+        $errors[] = "Nested config.php in built bot {$bot['folder']}: " . substr($f->getPathname(), strlen($botDir) + 1);
+        $leaked++;
     }
 }
-$ok[] = "Extra files check completed";
+if ($leaked === 0) {
+    $ok[] = "No excluded paths leaked into built bots (" . count($dbBots) . " checked)";
+}
 
 // ===== ۱۲. بررسی کرون =====
 echo "[12] بررسی تنظیمات کرون...\n";
@@ -193,14 +224,16 @@ if (empty($errors)) {
 }
 echo "=========================================\n";
 
-// خروجی JSON برای CI
-if (isset($argv[1]) && $argv[1] === '--json') {
-    echo json_encode([
+// خروجی JSON برای CI — در این حالت هیچ متن دیگری چاپ نمی‌شود
+if ($jsonMode) {
+    $payload = json_encode([
         'ok' => $ok,
         'warnings' => $warnings,
         'errors' => $errors,
         'healthy' => empty($errors),
-    ], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
+    ], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE) . "\n";
+    if (ob_get_level() > 0) ob_end_clean();
+    echo $payload;
 }
 
 // کد خروج: 0 = سالم، 1 = خطا (برای CI / اسکریپت‌ها)

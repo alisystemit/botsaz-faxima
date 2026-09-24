@@ -1374,8 +1374,14 @@ if ($datain == "settimecornremove" && $adminrulecheck['rule'] == "administrator"
 
     if (!empty($domainhosts)) {
         $normalizedHost = rtrim($domainhosts, '/');
-        $candidateUrls[] = "https://{$normalizedHost}/table.php";
-        $candidateUrls[] = "http://{$normalizedHost}/table.php";
+        // table.php فقط با secret پذیرفته می‌شود (گارد داخل خود table.php)
+        $rxTableToken = $GLOBALS['APIKEY'] ?? ($APIKEY ?? '');
+        $rxTableSecret = is_string($rxTableToken) && $rxTableToken !== ''
+            ? hash('sha256', $rxTableToken . '_faxima_table_secret')
+            : '';
+        $rxTableQuery = $rxTableSecret !== '' ? '?secret=' . rawurlencode($rxTableSecret) : '';
+        $candidateUrls[] = "https://{$normalizedHost}/table.php{$rxTableQuery}";
+        $candidateUrls[] = "http://{$normalizedHost}/table.php{$rxTableQuery}";
     }
 
     $attemptInstallerRequest = function (string $url) use (&$resetUrlUsed, &$reinstallSuccess, &$installerErrors) {
@@ -1463,7 +1469,14 @@ if ($datain == "settimecornremove" && $adminrulecheck['rule'] == "administrator"
         if (!empty($installerErrors)) {
             file_put_contents(REFACTORED_LEGACY_ROOT . '/resetbot_error.log', '[' . date('Y-m-d H:i:s') . "] INSTALL ERROR: " . implode(' | ', $installerErrors) . PHP_EOL, FILE_APPEND);
         }
-        $manualUrlHint = !empty($normalizedHost) ? "لطفاً لینک https://{$normalizedHost}/table.php را به صورت دستی باز کنید." : "لطفاً فایل table.php را به صورت دستی اجرا کنید.";
+        $rxTableTokenHint = $GLOBALS['APIKEY'] ?? ($APIKEY ?? '');
+        $rxTableSecretHint = is_string($rxTableTokenHint) && $rxTableTokenHint !== ''
+            ? hash('sha256', $rxTableTokenHint . '_faxima_table_secret')
+            : '';
+        $rxTableQueryHint = $rxTableSecretHint !== '' ? '?secret=' . rawurlencode($rxTableSecretHint) : '';
+        $manualUrlHint = !empty($normalizedHost)
+            ? "لطفاً لینک https://{$normalizedHost}/table.php{$rxTableQueryHint} را به صورت دستی باز کنید."
+            : "لطفاً فایل table.php را به صورت دستی اجرا کنید.";
         $warningText = "⚠️ جداول حذف شدند اما اجرای table.php انجام نشد. {$manualUrlHint}";
         Editmessagetext($from_id, $message_id, $warningText, null);
         nm_adminInstantReply($from_id, $warningText, null, 'HTML');
