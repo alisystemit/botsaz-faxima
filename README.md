@@ -3,6 +3,24 @@
 ربات تلگرامی مجزا که با چند دکمه، ربات **فاکسیما** یا **میرزا** می‌سازد:
 پوشه + دیتابیس MySQL جدا + کانفیگ + وبهوک — همه خودکار. فقط **توکن + آیدی ادمین + نام** از کاربر گرفته می‌شود.
 
+## نصب سریع (کپی و اجرا) ⚡
+
+روی سرور لینوکس (پیش‌نیاز: `git` و `PHP 8.1+` و MySQL)، این سه خط را کپی و اجرا کن:
+
+```bash
+git clone https://github.com/alisystemit/botsaz-faxima.git
+cd botsaz-faxima
+bash tools/install.sh
+```
+
+یا تک‌خطی:
+
+```bash
+git clone https://github.com/alisystemit/botsaz-faxima.git && cd botsaz-faxima && bash tools/install.sh
+```
+
+اسکریپت همه‌چیز را قدم‌به‌قدم می‌پرسد (توکن @BotFather، آیدی سوپرادمین، آدرس دامنه، مشخصات MySQL) و نصب را کامل می‌کند. راهنمای کامل هر مرحله در بخش «نصب خودکار روی لینوکس» همین فایل (پایین‌تر) است. 📖 [مشاهده در گیت‌هاب](https://github.com/alisystemit/botsaz-faxima/blob/main/README.md)
+
 ## ساختار
 
 ```
