@@ -45,18 +45,26 @@ $store = new Store($cfg['manager_db'], $cfg);
 @ignore_user_abort(true);
 
 // ===== احراز هویت وبهوک (قبل از هر پردازش/خروج زودهنگام) =====
+// توکنِ خالی یعنی پیکربندی خراب — وبهوک بدون احراز هویت هرگز باز نمی‌شود (fail-closed).
+// قبلاً secret خالی ⇒ شرط رد نمی‌شد ⇒ هر کسی می‌توانست update جعلی بفرستد.
 $secret = Manager::faximaWebhookSecret($TOKEN);
-if ($secret !== '') {
-    $provided = $_SERVER['HTTP_X_TELEGRAM_BOT_API_SECRET_TOKEN'] ?? '';
-    if (!hash_equals($secret, $provided)) {
-        http_response_code(403);
-        echo json_encode(['ok'=>false,'error'=>'Unauthorized']);
-        exit;
-    }
+if ($secret === '') {
+    Logger::getInstance()->error('webhook', 'Empty bot token/secret — webhook rejected (fail-closed)');
+    http_response_code(403);
+    echo json_encode(['ok'=>false,'error'=>'Unauthorized']);
+    exit;
+}
+$provided = $_SERVER['HTTP_X_TELEGRAM_BOT_API_SECRET_TOKEN'] ?? '';
+if (!hash_equals($secret, $provided)) {
+    http_response_code(403);
+    echo json_encode(['ok'=>false,'error'=>'Unauthorized']);
+    exit;
 }
 
-// از اینجا به بعد پاسخ امن است؛ اتصال را آزاد کن تا تلگرام timeout نگیرد
-if (function_exists('fastcgi_finish_request')) fastcgi_finish_request();
+// پاسخ فقط بعد از پردازش موفق ارسال می‌شود؛ عمداً fastcgi_finish_request زودهنگام نداریم:
+// اگر وسط کار استثنا رخ دهد status 500 برمی‌گردد و تلگرام همان آپدیت را دوباره می‌فرستد
+// (علامت‌گذاری update هم فقط بعد از موفقیت انجام می‌شود). قبلاً اتصال زود آزاد می‌شد و
+// خطاهای mid-flight با پاسخ 200 بی‌صدا گم می‌شدند.
 
 // ===== Dedup با update_id =====
 $update = json_decode(file_get_contents('php://input'), true) ?: [];
@@ -115,7 +123,8 @@ if ($msg) {
 echo json_encode(['ok'=>true]);
 
 // ================= helpers =================
-function isSuper(array $supers, int $uid): bool { return in_array($uid, $supers, true); }
+// رشته/عدد بودن مقدار config فرقی نکند — قبلاً in_array سخت‌گیرانه روی رشته‌های config هیچ‌وقت match نمی‌کرد
+function isSuper(array $supers, int $uid): bool { return in_array((string)$uid, array_map('strval', $supers), true); }
 function isAdmin(array $u, array $supers): bool { return isSuper($supers, (int)$u['user_id']) || (int)$u['is_admin'] === 1; }
 function canUse(array $u, array $supers): bool { return isAdmin($u, $supers) || (int)$u['is_allowed'] === 1; }
 
@@ -191,10 +200,11 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
     $uid = (int)$user['user_id'];
     $admin = isAdmin($user, $SUPERS);
 
-    if (!canUse($user, $SUPERS)) {
-        BotApi::send($TOKEN, $chatId, "⛔️ شما دسترسی ندارید.\nآیدی شما: <code>{$uid}</code>\nاز ادمین بخواهید شما را مجاز کند.");
-        return;
-    }
+    // کاربر «مجاز» یا ادمین از قبل دسترسی دارد.
+    // کاربر غیرمجاز هم باید بتواند «🤖 ساخت ربات جدید» بزند تا درخواستش ثبت شود —
+    // طبق README: «کاربر ساخت ربات جدید می‌زند → درخواست ثبت می‌شود → تو تأیید می‌کنی».
+    // قبلاً اینجا deny می‌شد و کل زیرسیستم addPendingRequest/تأیید عملاً برای کاربران
+    // غیرمجاز غیرقابل‌دسترس بود. دستورات حساس داخل switch با $admin محافظت می‌شوند.
 
     $step = $user['step'];
     $temp = json_decode($user['temp'] ?? '{}', true) ?: [];
@@ -429,7 +439,9 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
                     ?? "🎉 <b>ربات آماده شد!</b>\n\n🤖 @{$result['bot_username']}\n📁 پوشه: <code>{$slug}</code>\n🗄 دیتابیس: <code>{$result['db']}</code>\n🔗 وبهوک: ست شد ✅";
                 BotApi::send($TOKEN, $chatId, $doneMsg,
                     ['reply_markup' => mainMenu($store->user($uid), $SUPERS, $store)]);
-            } catch (Exception $e) {
+            } catch (Throwable $e) {
+                // Throwable: خطاهای Error/TypeError هم باید به کاربر پیام بدهند نه اینکه
+                // استثناي uncaught ⇒ 500 ⇒ حلقهٔ retry تلگرام شوند.
                 Logger::getInstance()->error('build', "Build failed ({$slug}): " . $e->getMessage());
                 BotApi::send($TOKEN, $chatId, "❌ خطا در ساخت ربات: " . htmlspecialchars(Manager::sanitizeDbError($e->getMessage())) . "\nدوباره تلاش کن.");
             }
@@ -651,7 +663,14 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
     BotApi::answerCb($TOKEN, $cb['id']);
 
     // ===== canUse چک =====
-    if (!canUse($user, $SUPERS)) {
+    // کاربری که درخواستش توسط ادمین تأیید شده باید بتواند ادامه دهد (newbot:…)
+    // و انصراف همیشه باید کار کند تا کاربر در مرحله گیر نکند.
+    if (!canUse($user, $SUPERS) && !$store->hasApprovedRequest($uid)) {
+        if ($data === 'cancel') {
+            $store->clearStep($uid);
+            BotApi::edit($TOKEN, $chatId, $msgId, "❌ انصراف داده شد.");
+            return;
+        }
         BotApi::send($TOKEN, $chatId, "⛔️ دسترسی ندارید.");
         return;
     }

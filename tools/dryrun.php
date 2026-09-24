@@ -77,10 +77,13 @@ echo "   Name '{$slug}' is available ✓\n";
 echo "[5] شبیه‌سازی ساخت ربات...\n";
 $botDir = Manager::childBotsDir() . '/' . $slug;
 
+// همان فهرست استثناهای buildBot — باید دقیقاً یکی باشد تا dry-run واقعی باشد
+$excludePaths = ['docker/', 'docker-compose.yml', '.env.example', 'vpnbot/', 'install.sh', 'images.jpeg', 'composer.json', 'composer.lock', 'installer/'];
+
 echo "   [5a] کپی قالب... ";
 try {
     // مثل buildBot واقعی: پوشه‌های حجیم/غیرضروری کپی نمی‌شوند (ولی vendor لازم است)
-    Manager::copyDir($tplDir, $botDir, ['docker/', 'docker-compose.yml', '.env.example', 'vpnbot/', 'install.sh', 'images.jpeg', 'installer/']);
+    Manager::copyDir($tplDir, $botDir, $excludePaths);
     echo "OK\n";
 } catch (Exception $e) {
     echo "FAILED: " . $e->getMessage() . "\n";
@@ -134,6 +137,20 @@ if (str_contains($lintResult, 'No syntax errors')) {
     $failed = true;
 }
 
+// ===== [5e] تأیید اینکه واقعاً هیچ فایل مستثنایی کپی نشده =====
+echo "   [5e] بررسی نشت فایل‌های مستثنی... ";
+$leaked = [];
+foreach ($excludePaths as $p) {
+    if (file_exists($botDir . '/' . $p)) $leaked[] = $p;
+}
+if (is_dir($botDir . '/installer')) $leaked[] = 'installer/';
+if ($leaked) {
+    echo "LEAKED: " . implode(', ', $leaked) . "\n";
+    $failed = true;
+} else {
+    echo "none ✓\n";
+}
+
 // ===== پاکسازی =====
 echo "[6] پاکسازی...\n";
 Manager::removeDir($botDir);
@@ -151,8 +168,9 @@ echo "  Bot '{$slug}' can be safely created.\n";
 echo "=========================================\n";
 
 // ===== بررسی فایل‌های اضافی =====
-echo "\nفایل‌هایی که در ساخت واقعی کپی نمی‌شوند (مثل buildBot):\n";
-echo "  docker/, docker-compose.yml, .env.example, vpnbot/, install.sh, images.jpeg, installer/\n";
+echo "\nفایل‌هایی که در ساخت واقعی کپی نمی‌شوند (بررسی‌شده در [5e]):\n";
+echo "  docker/, docker-compose.yml, .env.example, vpnbot/, install.sh, images.jpeg,\n";
+echo "  composer.json, composer.lock, installer/\n";
 echo "  توجه: vendor/ حتماً کپی می‌شود (بدون آن ربات فرزند کار نمی‌کند).\n";
 
 echo "\nنکته: برای اجرای واقعی بدون dry-run:\n";

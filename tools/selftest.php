@@ -19,11 +19,13 @@ foreach (['index.php', 'config.php', 'table.php', 'botapi.php'] as $f) {
     echo "faxima/$f: " . (file_exists(Manager::templateDir('faxima') . '/' . $f) ? 'OK' : 'MISSING') . "\n";
 }
 
-// شبیه‌سازی پچ config فاکسیما روی کپی موقت
+// شبیه‌سازی پچ config فاکسیما روی کپی موقت — عمداً با پورت غیرپیش‌فرض
+// تا تأیید شود host و port جدا می‌مانند (قبلاً «127.0.0.1:3307» داخل $dbhost می‌نشست و اتصال را می‌شکست)
 $tmp = sys_get_temp_dir() . '/botsaz_test_' . time();
 @mkdir($tmp . '/faxima', 0777, true);
 copy(Manager::templateDir('faxima') . '/config.php', $tmp . '/faxima/config.php');
-Manager::patchFaximaConfig($tmp . '/faxima', $cfg, 'botsaz_shop1_abc123', '123456:AAFakeToken', 999001, 'shoptestbot', 'example.com/botsaz-faxima/bots/shop1');
+$cfgPortTest = array_merge($cfg, ['db_host' => '127.0.0.1', 'db_port' => 3307]);
+Manager::patchFaximaConfig($tmp . '/faxima', $cfgPortTest, 'botsaz_shop1_abc123', '123456:AAFakeToken', 999001, 'shoptestbot', 'example.com/botsaz-faxima/bots/shop1');
 $patched = file_get_contents($tmp . '/faxima/config.php');
 $checks = [
     "dbname' => botsaz_shop1_abc123" => str_contains($patched, "\$dbname     = 'botsaz_shop1_abc123'") || str_contains($patched, "\$dbname = 'botsaz_shop1_abc123'"),
@@ -31,17 +33,24 @@ $checks = [
     'adminnumber' => str_contains($patched, '999001'),
     'domainhosts' => str_contains($patched, 'example.com/botsaz-faxima/bots/shop1'),
     'usernamebot' => str_contains($patched, 'shoptestbot'),
+    'dbhost بدون پورت' => str_contains($patched, "\$dbhost     = '127.0.0.1';"),
+    'dbport جدا' => str_contains($patched, "\$dbport     = '3307';"),
     'php lint' => (@token_get_all($patched) !== false),
 ];
 foreach ($checks as $k => $v) echo "faxima patch $k: " . ($v ? 'OK' : 'FAIL') . "\n";
 Manager::removeDir($tmp);
 
 // secret فاکسیما باید با lib/WebhookAuth.php خود سورس یکی باشد
+// (اگر سرور TELEGRAM_WEBHOOK_SECRET ست کرده باشد، هر دو همان override را برمی‌گردانند)
 require_once Manager::templateDir('faxima') . '/lib/WebhookAuth.php';
 $t = '123456:AAFakeTokenForTest1234567890123';
 $a = Manager::faximaWebhookSecret($t);
 $b = FaoximaWebhookAuth::secret($t);
-echo "faxima secret match: " . ($a === $b && strlen($a) === 64 ? 'OK' : 'FAIL') . "\n";
+$overrideActive = (getenv('TELEGRAM_WEBHOOK_SECRET') ?: '') !== '';
+$secretShapeOk = $overrideActive || strlen($a) === 64;
+echo "faxima secret match: " . ($a === $b && $secretShapeOk ? 'OK' : 'FAIL') . "\n";
+echo "faxima table secret: " . (strlen(Manager::faximaTableSecret($t)) === 64 ? 'OK' : 'FAIL') . "\n";
+echo "mirza table secret: " . (strlen(Manager::mirzaTableSecret($t)) === 64 ? 'OK' : 'FAIL') . "\n";
 
 // شبیه‌سازی پچ config میرزا
 $tmp2 = sys_get_temp_dir() . '/botsaz_test2_' . time();
@@ -68,5 +77,12 @@ $b = $store->botById($id);
 echo "bot type={$b['type']} folder={$b['folder']}\n";
 $store->deleteBot($id);
 echo "deleted OK, bots now=" . $store->countBots() . "\n";
+
+// ===== پاک‌سازی دادهٔ تست =====
+// قبلاً این ردیف با is_allowed=1 در دیتابیس واقعی می‌ماند (کاربر جعلی مجاز).
+// فقط ردیفی حذف می‌شود که دقیقاً همین اثرانگشت selftest را داشته باشد.
+$cleanup = $store->getPdo()->prepare("DELETE FROM users WHERE user_id = ? AND first_name = 'Test' AND username = 'tester'");
+$cleanup->execute([999001]);
+echo "test user cleanup: " . $cleanup->rowCount() . " row(s) removed\n";
 
 echo "ALL TESTS PASSED\n";
