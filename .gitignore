@@ -1,6 +1,8 @@
 /config.php
 /data/*.sqlite
 /data/*.sqlite-journal
+/data/*.sqlite-wal
+/data/*.sqlite-shm
 /data/logs/
 /bots/*/
 /bots/*/config.php

@@ -10,6 +10,8 @@ class Logger
 
     private static ?Logger $instance = null;
     private string $logFile;
+    /** فقط هر ۶۰ ثانیه یک‌بار — قبلاً به‌ازای هر خط لاگ یک glob انجام می‌شد */
+    private static int $lastRotateAt = 0;
 
     private function __construct()
     {
@@ -52,14 +54,16 @@ class Logger
 
     private function write(string $level, string $context, string $message): void
     {
-        $this->rotateLogs();
+        $this->rotateLogs(true);
         $time = date('Y-m-d H:i:s');
         $line = "[{$time}] [{$level}] [{$context}] {$message}\n";
         @file_put_contents($this->logFile, $line, FILE_APPEND | LOCK_EX);
     }
 
-    private function rotateLogs(): void
+    private function rotateLogs(bool $throttled = false): void
     {
+        if ($throttled && (time() - self::$lastRotateAt) < 60) return;
+        self::$lastRotateAt = time();
         if (!is_dir(self::LOG_DIR)) {
             @mkdir(self::LOG_DIR, 0755, true);
             return;

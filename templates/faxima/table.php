@@ -14,12 +14,34 @@ if (!defined('REFACTORED_LEGACY_ROOT')) {
 }
 @chdir(__DIR__);
 
+// ===== گارد دسترسی table.php =====
+// فراخوانی مستقیم از HTTP فقط با secret مجاز است؛ include داخلی (جریان بازنشانی پنل ادمین)
+// و اجرای CLI آزاد می‌مانند. تشخیص: هنگام فراخوانی مستقیم، SCRIPT_FILENAME همین فایل است.
+if (PHP_SAPI !== 'cli') {
+    $rxTableScript = isset($_SERVER['SCRIPT_FILENAME']) ? @realpath($_SERVER['SCRIPT_FILENAME']) : false;
+    if ($rxTableScript !== false && $rxTableScript === @realpath(__FILE__)) {
+        $rxTableCfgRaw = (string) @file_get_contents(__DIR__ . '/config.php');
+        $rxTableToken = '';
+        if (preg_match('/\$APIKEY\s*=\s*[\'"]([^\'"]*)[\'"]/', $rxTableCfgRaw, $rxTableM)) {
+            $rxTableToken = (string) $rxTableM[1];
+        }
+        $rxTableSecret = $rxTableToken !== '' ? hash('sha256', $rxTableToken . '_faxima_table_secret') : '';
+        $rxTableProvided = isset($_GET['secret']) && is_string($_GET['secret']) ? $_GET['secret'] : '';
+        if ($rxTableSecret === '' || $rxTableProvided === '' || !hash_equals($rxTableSecret, $rxTableProvided)) {
+            http_response_code(403);
+            exit('Forbidden');
+        }
+    }
+    unset($rxTableScript, $rxTableCfgRaw, $rxTableToken, $rxTableM, $rxTableSecret, $rxTableProvided);
+}
+
 require_once 'function.php';
 require_once 'config.php';
 require_once 'botapi.php';
 global $connect, $pdo;
 
 $rxDbHost = isset($dbhost) && $dbhost !== '' ? (string) $dbhost : '';
+$rxDbPort = isset($dbport) ? (int) $dbport : 0; // 0 = پورت پیش‌فرض
 $rxDbName = isset($dbname) && $dbname !== '' ? (string) $dbname : '';
 $rxDbUser = isset($usernamedb) && $usernamedb !== '' ? (string) $usernamedb : '';
 $rxDbPass = isset($passworddb) ? (string) $passworddb : '';
@@ -53,7 +75,9 @@ if ($rxDbPass === '') {
 if (!(isset($connect) && $connect instanceof mysqli)) {
     if ($rxDbName !== '' && $rxDbUser !== '') {
         try {
-            $rxMysqli = @new mysqli($rxDbHost, $rxDbUser, $rxDbPass, $rxDbName);
+            $rxMysqli = $rxDbPort > 0
+                ? @new mysqli($rxDbHost, $rxDbUser, $rxDbPass, $rxDbName, $rxDbPort)
+                : @new mysqli($rxDbHost, $rxDbUser, $rxDbPass, $rxDbName);
             if ($rxMysqli->connect_errno === 0) {
                 $rxMysqli->set_charset('utf8mb4');
                 $connect = $rxMysqli;
@@ -70,7 +94,7 @@ if (!(isset($pdo) && $pdo instanceof PDO)) {
     if ($rxDbName !== '' && $rxDbUser !== '') {
         try {
             $pdo = new PDO(
-                "mysql:host={$rxDbHost};dbname={$rxDbName};charset=utf8mb4",
+                "mysql:host={$rxDbHost}" . ($rxDbPort > 0 ? ";port={$rxDbPort}" : '') . ";dbname={$rxDbName};charset=utf8mb4",
                 $rxDbUser,
                 $rxDbPass,
                 [

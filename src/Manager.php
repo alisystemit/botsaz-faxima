@@ -10,9 +10,48 @@ class Manager
         $s = preg_replace('/[^a-z0-9]+/', '-', $s);
         $s = preg_replace('/-+/', '-', $s);
         $s = trim($s, '-');
-        if (strlen($s) < 3) $s = 'bot-' . substr($s . '-' . time(), -8);
+        // نام‌های خیلی کوتاه/غیرلاتین: به‌جای time() (که دو ورودی همزمان را یکسان می‌کند)
+        // از تصادفی بودن استفاده می‌شود تا برخورد تصادفی slug رخ ندهد.
+        if (strlen($s) < 3) {
+            $suffix = substr(bin2hex(random_bytes(4)), 0, 6);
+            $s = ($s !== '' ? $s . '-' : '') . $suffix;
+        }
         if (!preg_match('/^[a-z]/', $s)) $s = 'bot-' . $s;
-        return substr($s, 0, 40);
+        $s = substr($s, 0, 40);
+        $s = trim($s, '-');
+        if ($s === '' || strlen($s) < 3) $s = 'bot-' . substr(bin2hex(random_bytes(4)), 0, 6);
+        return $s;
+    }
+
+    /** کلید AES-256 از secret_key (۳۲ بایت خام به‌جای رشتهٔ hex بریده‌شده) */
+    public static function encryptionKey(string $key): string
+    {
+        return hash('sha256', $key, true);
+    }
+
+    /** کلید AES قدیمی — فقط برای رمزگشایی توکن‌های ساخته‌شده با نسخه‌های قبلی */
+    public static function legacyEncryptionKey(string $key): string
+    {
+        return hash('sha256', $key);
+    }
+
+    /** یک منبع واحد برای secret_key تا همه‌جا (bot.php / healthcheck / cron / tools) یکی باشند */
+    public const DEFAULT_SECRET_KEY = 'change-this-to-a-random-string';
+
+    public static function secretKey(?array $cfg): string
+    {
+        $k = trim((string)($cfg['secret_key'] ?? ''));
+        return $k !== '' ? $k : self::DEFAULT_SECRET_KEY;
+    }
+
+    /** پاک‌سازی پیام خطای دیتابیس پیش از نمایش به کاربر (پیام کامل در error_log می‌ماند) */
+    public static function sanitizeDbError(string $msg): string
+    {
+        // کاربر/هاست مجاز ('root'@'localhost') → ('***'@'***')
+        $msg = preg_replace("~('[^']*'@'[^']*')~", "'***'@'***'", $msg) ?? $msg;
+        // "using password: NO|YES" و "password: ..." → password: ***
+        $msg = preg_replace("~((?:using\s+)?password\s*[:=]\s*)\S+~i", '$1***', $msg) ?? $msg;
+        return $msg;
     }
 
     public static function copyDir(string $src, string $dst, array $exclude = []): void
@@ -26,7 +65,15 @@ class Manager
         foreach ($it as $f) {
             $relPath = $it->getSubPathName();
             foreach ($exclude as $ex) {
-                if ($relPath === $ex || str_starts_with($relPath, $ex . '/')) continue 2;
+                // «docker/» و «docker» هر دو باید پوشه را مستثنا کنند؛ قبلاً نوشتهٔ «docker/»
+                // هیچ‌وقت با $relPath برابر نمی‌شد و کل پوشه کپی می‌شد.
+                $norm = rtrim(str_replace('\\', '/', $ex), '/');
+                if ($norm === '') continue;
+                $relNorm = str_replace('\\', '/', $relPath);
+                if ($relNorm === $ex || $relNorm === $norm
+                    || str_starts_with($relNorm, $ex . '/') || str_starts_with($relNorm, $norm . '/')) {
+                    continue 2;
+                }
             }
             $target = $dst . DIRECTORY_SEPARATOR . $relPath;
             if ($f->isDir()) @mkdir($target, 0777, true);
@@ -67,12 +114,43 @@ class Manager
             if ($schemaFile !== null) self::importSql($pdo, $dbName, $schemaFile, '');
             return [$dbName, ''];
         } catch (PDOException $e) {
+            error_log("createDatabase '{$dbName}' failed: " . $e->getMessage());
             throw new Exception(
-                "ساخت دیتابیس '{$dbName}' ناموفق (\"{$e->getMessage()}\") — "
+                "ساخت دیتابیس '{$dbName}' ناموفق (\"" . self::sanitizeDbError($e->getMessage()) . "\") — "
                 . "لطفاً مطمئن شوید کاربر دیتابیس دسترسی CREATE DATABASE دارد. "
                 . "در هاست اشتراکی ممکن است نیاز به تغییر تنظیمات دیتابیس باشد."
             );
         }
+    }
+
+    /** حذف فایل‌های حساس از یک درخت (حتی تو در تو) — برای بکاپ‌ها */
+    public static function stripSensitiveFiles(string $dir, array $basenames): void
+    {
+        if (!is_dir($dir) || $basenames === []) return;
+        $it = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($dir, RecursiveDirectoryIterator::SKIP_DOTS),
+            RecursiveIteratorIterator::CHILD_FIRST
+        );
+        $wanted = array_flip($basenames);
+        foreach ($it as $f) {
+            if ($f->isDir()) continue;
+            if (isset($wanted[$f->getFilename()])) @unlink($f->getPathname());
+        }
+    }
+
+    /** نگه‌داشتن حداکثر $keep بکاپ از هر ربات (کنترل رشد bots/backups/) */
+    public static function pruneBackups(string $backupsDir, string $folder, int $keep = 5): int
+    {
+        $keep = max(1, $keep);
+        $items = glob(rtrim($backupsDir, '/\\') . '/' . $folder . '_*', GLOB_ONLYDIR);
+        if (!$items) return 0;
+        usort($items, fn($a, $b) => (int)@filemtime($b) <=> (int)@filemtime($a));
+        $removed = 0;
+        foreach (array_slice($items, $keep) as $old) {
+            self::removeDir($old);
+            $removed++;
+        }
+        return $removed;
     }
 
     private static function importSql(PDO $pdo, string $db, string $file, string $tablePrefix): void
@@ -156,44 +234,88 @@ class Manager
         ];
         $new = str_replace(array_keys($replacements), array_values($replacements), $raw, $count);
         if ($count === 0) throw new Exception("placeholderهای config میرزا پیدا نشد (نسخه ناسازگار؟)");
+        $afterPlaceholders = $new;
         // هاست دیتابیس میرزا هاردکد localhost است؛ با هاست/پورت واقعی جایگزین می‌کنیم.
         // پورت صریحاً به‌عنوان آرگومان پنجم mysqli_connect داده می‌شود («host:port» داخل آرگومان host
         // رسمی/پشتیبانی‌شده نیست و روی بعضی استک‌ها نادیده گرفته می‌شود).
         $dbHost = $cfg['db_host'] ?? 'localhost';
         $dbPort = (int)($cfg['db_port'] ?? 3306);
         // استفاده از regex برای انعطاف‌پذیری بیشتر
-        $new = preg_replace(
+        $afterMysqli = preg_replace(
             '/mysqli_connect\s*\(\s*"localhost"\s*,\s*(\$[a-zA-Z_]+)\s*,\s*(\$[a-zA-Z_]+)\s*,\s*(\$[a-zA-Z_]+)\s*\)/',
             'mysqli_connect("' . $dbHost . '", $1, $2, $3, ' . $dbPort . ')',
             $new
         );
+        $new = is_string($afterMysqli) ? $afterMysqli : $new;
         // ===== فیکس: DSN مجزا برای PDO — regex برای انعطاف‌پذیری بیشتر =====
-        $new = preg_replace(
+        $afterDsn = preg_replace(
             '/mysql:host=localhost(?:;|$)/',
             'mysql:host=' . $dbHost . ';port=' . $dbPort . ';',
             $new
         );
-        // اگر regex جایگزین نشد، str_replace backup سعی کند
-        if ($new === $raw) {
-            $new = str_replace(['mysql:host=localhost;', 'localhost'], [$dbHost . ';port=' . $dbPort . ';', $dbHost], $new);
+        $new = is_string($afterDsn) ? $afterDsn : $new;
+        // اگر هیچ‌کدام از regexها چیزی عوض نکردند، backup امن str_replace (فقط وقتی واقعاً نیاز است)
+        if ($new === $afterPlaceholders) {
+            $new = str_replace(
+                ['mysql:host=localhost;', 'mysqli_connect("localhost"'],
+                ['mysql:host=' . $dbHost . ';port=' . $dbPort . ';', 'mysqli_connect("' . $dbHost . '"'],
+                $new
+            );
         }
         if (file_put_contents($file, $new) === false) throw new Exception("خطا در نوشتن config.php میرزا");
     }
 
-    /** رمزگشایی توکن ذخیره‌شده ربات فرزند (سازگار با توکن‌های ساده قدیمی) */
+    /** رمزگشایی توکن ذخیره‌شده ربات فرزند (سازگار با توکن‌های ساده قدیمی و کلید قدیمی) */
     public static function decryptChildToken(string $stored, string $key): string
     {
         if ($stored === '') return '';
         $data = base64_decode($stored, true);
         if ($data === false || strlen($data) <= 16) return $stored;
-        $d = openssl_decrypt(substr($data, 16), 'AES-256-CBC', hash('sha256', $key), 0, substr($data, 0, 16));
-        if (is_string($d) && preg_match('/^\d+:[\w\-]{20,}$/', $d)) return $d;
+        $iv = substr($data, 0, 16);
+        $enc = substr($data, 16);
+        foreach ([self::encryptionKey($key), self::legacyEncryptionKey($key)] as $k) {
+            $d = openssl_decrypt($enc, 'AES-256-CBC', $k, 0, $iv);
+            if (is_string($d) && preg_match('/^\d+:[\w\-]{20,}$/', $d)) return $d;
+        }
         return $stored;
     }
 
-    /** اجرای table.php از طریق HTTP (ساخت جدول‌ها) — مثل نصب‌کننده‌های رسمی */
-    public static function triggerTable(string $tableUrl): bool
+    /** secret وبهوک تلگرام: فقط وقتی سرور واقعاً override داده (مثل روی داکر) */
+    private static function webhookSecretOverride(): string
     {
+        $configured = getenv('TELEGRAM_WEBHOOK_SECRET') ?: ($_ENV['TELEGRAM_WEBHOOK_SECRET'] ?? '');
+        if ($configured === '' && defined('TELEGRAM_WEBHOOK_SECRET')) {
+            $configured = constant('TELEGRAM_WEBHOOK_SECRET');
+        }
+        return (is_string($configured) && $configured !== '') ? $configured : '';
+    }
+
+    /** secret وبهوک فاکسیما — دقیقاً همان فرمول lib/WebhookAuth.php (شامل override) */
+    public static function faximaWebhookSecret(string $botToken): string
+    {
+        $override = self::webhookSecretOverride();
+        if ($override !== '') return $override;
+        return $botToken === '' ? '' : hash('sha256', $botToken . '_faoxima_webhook_secret');
+    }
+
+    /** secret دسترسی به table.php فاکسیما (فقط با $APIKEY همان ربات قابل محاسبه است) */
+    public static function faximaTableSecret(string $botToken): string
+    {
+        return $botToken === '' ? '' : hash('sha256', $botToken . '_faxima_table_secret');
+    }
+
+    /** secret دسترسی به table.php میرزا */
+    public static function mirzaTableSecret(string $botToken): string
+    {
+        return $botToken === '' ? '' : hash('sha256', $botToken . '_mirza_table_secret');
+    }
+
+    /** اجرای table.php از طریق HTTP (ساخت جدول‌ها) — مثل نصب‌کننده‌های رسمی */
+    public static function triggerTable(string $tableUrl, string $secret = ''): bool
+    {
+        if ($secret !== '') {
+            $tableUrl .= (strpos($tableUrl, '?') === false ? '?' : '&') . 'secret=' . rawurlencode($secret);
+        }
         // تلاش اول: file_get_contents
         $ctx = stream_context_create(['http' => ['timeout' => 60, 'ignore_errors' => true], 'ssl' => ['verify_peer' => false]]);
         $res = @file_get_contents($tableUrl, false, $ctx);
@@ -222,21 +344,15 @@ class Manager
         }
         return false;
     }
-
     /** اجرای table.php میرزا از طریق HTTP — نگهداشته برای سازگاری */
-    public static function runMirzaTable(string $tableUrl): bool
+    public static function runMirzaTable(string $tableUrl, string $secret = ''): bool
     {
-        return self::triggerTable($tableUrl);
-    }
-
-    /** محاسبه secret وبهوک فاکسیما (همان فرمول lib/WebhookAuth.php) */
-    public static function faximaWebhookSecret(string $botToken): string
-    {
-        return $botToken === '' ? '' : hash('sha256', $botToken . '_faoxima_webhook_secret');
+        return self::triggerTable($tableUrl, $secret);
     }
 
     /**
-     * پچ کردن config.php فاکسیما (جایگزینی مقدار ۸ متغیر — همان کاری که نصب‌کننده رسمی می‌کند).
+     * پچ کردن config.php فاکسیما (جایگزینی مقدار ۹ متغیر — همان کاری که نصب‌کننده رسمی می‌کند
+     * به‌علاوهٔ $dbport که نصب‌کننده رسمی ندارد).
      * $domainPath یعنی «دامنه/مسیر» بدون https، مثلا: example.com/botsaz-faxima/bots/shop1
      */
     public static function patchFaximaConfig(string $botDir, array $cfg, string $dbName, string $token, int $adminId, string $botUsername, string $domainPath): void
@@ -244,15 +360,17 @@ class Manager
         $file = $botDir . '/config.php';
         $raw = file_get_contents($file);
         if ($raw === false) throw new Exception("config.php فاکسیما پیدا نشد");
-        // ===== فیکس: جدا کردن host و port =====
-        $dbHost = $cfg['db_host'];
-        $dbPort = $cfg['db_port'] ?? 3306;
-        $dbHostStr = $dbHost . ($dbPort != 3306 ? ":{$dbPort}" : '');
+        // ===== فیکس: host و port کاملاً جدا =====
+        // قبلاً «host:port» داخل $dbhost می‌نشست که هم mysqli_connect (آرگومان host)
+        // و هم DSN می‌شکست؛ حالا $dbhost فقط هاست است و پورت در $dbport می‌رود.
+        $dbHost = (string)($cfg['db_host'] ?? 'localhost');
+        $dbPort = (int)($cfg['db_port'] ?? 3306);
         $values = [
             'dbname' => $dbName,
             'usernamedb' => $cfg['db_user'],
             'passworddb' => $cfg['db_pass'],
-            'dbhost' => $dbHostStr,
+            'dbhost' => $dbHost,
+            'dbport' => (string)$dbPort,
             'APIKEY' => $token,
             'adminnumber' => (string)$adminId,
             'domainhosts' => $domainPath,
@@ -285,5 +403,4 @@ class Manager
             }
         }
     }
-
-    }
+}

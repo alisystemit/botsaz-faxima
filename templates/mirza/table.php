@@ -1,5 +1,28 @@
 <?php
 $randomString = bin2hex(random_bytes(3));
+
+// ===== گارد دسترسی table.php =====
+// فراخوانی مستقیم از HTTP فقط با secret مجاز است؛ اجرای CLI و include داخلی آزاد می‌مانند.
+if (PHP_SAPI !== 'cli') {
+    $rxTableScript = isset($_SERVER['SCRIPT_FILENAME']) ? @realpath($_SERVER['SCRIPT_FILENAME']) : false;
+    if ($rxTableScript !== false && $rxTableScript === @realpath(__FILE__)) {
+        $rxTableCfgRaw = (string) @file_get_contents(__DIR__ . '/config.php');
+        $rxTableToken = '';
+        if (preg_match('/\$APIKEY\s*=\s*[\'"]([^\'"]*)[\'"]/', $rxTableCfgRaw, $rxTableM)) {
+            $rxTableToken = (string) $rxTableM[1];
+        }
+        $rxTableSecret = $rxTableToken !== '' && $rxTableToken !== '{BOT_TOKEN}'
+            ? hash('sha256', $rxTableToken . '_mirza_table_secret')
+            : '';
+        $rxTableProvided = isset($_GET['secret']) && is_string($_GET['secret']) ? $_GET['secret'] : '';
+        if ($rxTableSecret === '' || $rxTableProvided === '' || !hash_equals($rxTableSecret, $rxTableProvided)) {
+            http_response_code(403);
+            exit('Forbidden');
+        }
+    }
+    unset($rxTableScript, $rxTableCfgRaw, $rxTableToken, $rxTableM, $rxTableSecret, $rxTableProvided);
+}
+
 require_once 'config.php';
 require_once 'text.php';
 require_once 'functions.php';

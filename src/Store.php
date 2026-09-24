@@ -17,6 +17,12 @@ class Store
             if (!is_dir($dir)) mkdir($dir, 0777, true);
             $this->pdo = new PDO('sqlite:' . $sqlitePath);
             $this->pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+            // ===== پایداری SQLite در برابر «database is locked» =====
+            // processed_updates به‌ازای هر آپدیت نوشته می‌شود؛ بدون busy_timeout و WAL،
+            // دو درخواست همزمان وبهوک خطا می‌گرفتند. WAL همزمانی خواندن/نوشتن را هم آزاد می‌کند.
+            $this->pdo->exec('PRAGMA busy_timeout = 5000');
+            $this->pdo->exec('PRAGMA journal_mode = WAL');
+            $this->pdo->exec('PRAGMA synchronous = NORMAL');
             $this->driver = 'sqlite';
             $this->initSqlite();
             return;
@@ -169,6 +175,13 @@ class Store
         }
         $st = $this->pdo->prepare("UPDATE users SET step=?, temp=? WHERE user_id=?");
         $st->execute([$step, json_encode($temp, JSON_UNESCAPED_UNICODE), $uid]);
+    }
+
+    /** حذف کامل کاربر (برای پاک‌سازی داده‌های تست مثل selftest) */
+    public function deleteUser(int $uid): void
+    {
+        $st = $this->pdo->prepare("DELETE FROM users WHERE user_id=?");
+        $st->execute([$uid]);
     }
 
     public function clearStep(int $uid): void
@@ -398,12 +411,14 @@ class Store
         } else {
             $this->pdo->exec("CREATE TABLE IF NOT EXISTS schema_versions (id INT AUTO_INCREMENT PRIMARY KEY, version INT NOT NULL, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)");
         }
-        // Run migrations
+        // Run migrations — خطای migration مرگبار نیست ولی باید در لاگ بماند
         try {
             $migrator = new Migrator($this->pdo, $this->driver);
-            $migrator->migrate();
+            $results = $migrator->migrate();
+            if (!empty($results)) {
+                error_log('Migrations applied: ' . implode(', ', array_keys($results)));
+            }
         } catch (Exception $e) {
-            // Migration failure is non-fatal
             error_log('Migration failed: ' . $e->getMessage());
         }
     }

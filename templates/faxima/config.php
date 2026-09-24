@@ -8,6 +8,9 @@ $dbname     = '';
 $usernamedb = '';
 $passworddb = '';
 $dbhost     = '';
+// پورت MySQL جدا از هاست نگه داشته می‌شود (خالی = پورت پیش‌فرض 3306).
+// دلیل: «host:port» در آرگومان host هم mysqli و هم DSN را می‌شکند.
+$dbport     = '';
 
 $redis_host     = '';
 $redis_port     = '6379';
@@ -93,15 +96,19 @@ if (!function_exists('rx_connect_pdo')) {
 }
 
 if (!function_exists('rx_connect_mysqli')) {
-    function rx_connect_mysqli($host, $username, $password, $database)
+    function rx_connect_mysqli($host, $username, $password, $database, $port = 0)
     {
         if (function_exists('mysqli_report')) {
             @mysqli_report(MYSQLI_REPORT_OFF);
         }
         $retries = rx_db_connect_retries();
         $attempt = 0;
+        // $port>0 فقط وقتی داده می‌شود تا پورت پیش‌فرض php.ini (معمولا 3306) حفظ شود
+        $rxPortArg = ((int) $port) > 0 ? (int) $port : null;
         while (true) {
-            $conn = @mysqli_connect($host, $username, $password, $database);
+            $conn = $rxPortArg === null
+                ? @mysqli_connect($host, $username, $password, $database)
+                : @mysqli_connect($host, $username, $password, $database, $rxPortArg);
             if ($conn instanceof mysqli) {
                 return $conn;
             }
@@ -131,7 +138,8 @@ if (!function_exists('getMysqliConnection')) {
             return null;
         }
         $host = $GLOBALS['dbhost'] ?? '';
-        $conn = rx_connect_mysqli($host !== '' ? $host : 'localhost', $user, $pass, $db);
+        $port = (int)($GLOBALS['dbport'] ?? 0);
+        $conn = rx_connect_mysqli($host !== '' ? $host : 'localhost', $user, $pass, $db, $port);
         if ($conn instanceof mysqli) {
             @mysqli_set_charset($conn, 'utf8mb4');
             $GLOBALS['connect'] = $conn;
@@ -283,8 +291,9 @@ if ($dbname !== '' && $usernamedb !== '') {
         rx_cleanup_installer($rxInstallerDir, 'config_bootstrap');
     }
     $dbhostResolved = $dbhost !== '' ? $dbhost : 'localhost';
+    $dbportResolved = (int)($dbport ?? 0);
     if (!defined('FAOXIMA_LAZY_MYSQLI') || FAOXIMA_LAZY_MYSQLI !== true) {
-        $connect = rx_connect_mysqli($dbhostResolved, $usernamedb, $passworddb, $dbname);
+        $connect = rx_connect_mysqli($dbhostResolved, $usernamedb, $passworddb, $dbname, $dbportResolved);
         if ($connect instanceof mysqli) {
             @mysqli_set_charset($connect, 'utf8mb4');
             @mysqli_query($connect, "SET time_zone = '+03:30'");
@@ -296,7 +305,9 @@ if ($dbname !== '' && $usernamedb !== '') {
         $connect = null;
     }
 
-    $dsn = 'mysql:host=' . $dbhostResolved . ';dbname=' . $dbname . ';charset=utf8mb4';
+    $dsn = 'mysql:host=' . $dbhostResolved
+        . ($dbportResolved > 0 ? ';port=' . $dbportResolved : '')
+        . ';dbname=' . $dbname . ';charset=utf8mb4';
     try {
         $pdo = rx_connect_pdo($dsn, $usernamedb, $passworddb, $options);
     } catch (\PDOException $rxPdoError) {
@@ -332,6 +343,7 @@ $GLOBALS['dbname']                     = $dbname;
 $GLOBALS['usernamedb']                 = $usernamedb;
 $GLOBALS['passworddb']                 = $passworddb;
 $GLOBALS['dbhost']                     = $dbhost;
+$GLOBALS['dbport']                     = $dbport;
 $GLOBALS['redis_host']                 = $redis_host;
 $GLOBALS['redis_port']                 = $redis_port;
 $GLOBALS['redis_password']             = $redis_password;

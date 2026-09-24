@@ -184,12 +184,14 @@ try {
         $canExec = true;
         return $canExec;
     }
-    function runMysqldumpWithFallback($dbhost, $usernamedb, $passworddb, $dbname, $tmpDump, $tmpDumpErr)
+    function runMysqldumpWithFallback($dbhost, $usernamedb, $passworddb, $dbname, $tmpDump, $tmpDumpErr, $dbport = 0)
     {
+        $portArg = ((int) $dbport) > 0 ? '-P ' . escapeshellarg((string) (int) $dbport) . ' ' : '';
         $baseArgs = sprintf(
-            '-h %s -u %s --no-tablespaces %s',
+            '-h %s -u %s %s--no-tablespaces %s',
             escapeshellarg((string)($dbhost !== '' ? $dbhost : 'localhost')),
             escapeshellarg((string)$usernamedb),
+            $portArg,
             escapeshellarg((string)$dbname)
         );
         $envPrefix = sprintf('MYSQL_PWD=%s', escapeshellarg((string)$passworddb));
@@ -331,7 +333,7 @@ try {
     $tmpDump = $backup_file_name . '.tmp';
     $tmpDumpErr = $tmpDump . '.err';
     if (isExecAvailable()) {
-        $dumpResult = runMysqldumpWithFallback($dbhost, $usernamedb, $passworddb, $dbname, $tmpDump, $tmpDumpErr);
+        $dumpResult = runMysqldumpWithFallback($dbhost, $usernamedb, $passworddb, $dbname, $tmpDump, $tmpDumpErr, (int)($GLOBALS['dbport'] ?? 0));
         if ($dumpResult['success']) {
             @rename($tmpDump, $backup_file_name);
             $dumpCreated = file_exists($backup_file_name) && filesize($backup_file_name) > 0;

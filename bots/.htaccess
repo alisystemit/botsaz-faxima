@@ -2,7 +2,9 @@
 # Deny everything sensitive, allow the real entrypoints.
 
 # Never expose child config / state / backups / logs / dumps
-<FilesMatch "(^\.|config\.php$|\.log$|\.sqlite$|\.sql$|\.bak$|\.env$)">
+# error_log$ → فایل‌های error_log بدون پسوند که table.php و برخی کرون‌ها می‌سازند
+# (قبلاً قابل دانلود بودند چون فقط \.log$ پوشش می‌داد)
+<FilesMatch "(^\.|config\.php$|error_log$|\.log$|\.sqlite$|\.sql$|\.bak$|\.env$)">
     Require all denied
 </FilesMatch>
 
@@ -13,6 +15,9 @@
     RewriteEngine On
     RewriteRule (^|/)states/ - [F,L]
     RewriteRule (^|/)backups/ - [F,L]
+    # فایل‌های خالیِ لاگ بدون پسوند هم در هر سطحی مسدود شوند
+    RewriteRule (^|/)error_log$ - [F,L]
+    RewriteRule (^|/)logs/ - [F,L]
 </IfModule>
 
 # Allowed on purpose: index.php / table.php / cron/*.php (child webhooks + cron endpoints)

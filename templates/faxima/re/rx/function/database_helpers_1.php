@@ -71,8 +71,12 @@ if (!function_exists('getDatabaseConnection')) {
         if (!isset($servername, $username, $password, $dbname)) {
             return null;
         }
+        $rxDbPort = (int)($GLOBALS['dbport'] ?? 0);
+        $rxDbDsn = "mysql:host={$servername}"
+            . ($rxDbPort > 0 ? ";port={$rxDbPort}" : '')
+            . ";dbname={$dbname};charset=utf8mb4";
         try {
-            $pdo = new PDO("mysql:host={$servername};dbname={$dbname};charset=utf8mb4", $username, $password, [
+            $pdo = new PDO($rxDbDsn, $username, $password, [
                 PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
                 PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
                 PDO::MYSQL_ATTR_INIT_COMMAND => "SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci",

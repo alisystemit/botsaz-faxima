@@ -15,19 +15,27 @@ $TOKEN = $cfg['main_token'];
 $SUPERS = $cfg['super_admins'] ?? [];
 
 // ===== رمزنگاری =====
-$secretKey = $cfg['secret_key'] ?? 'change-this-to-a-random-string';
+// منبع واحد secret_key → Manager::secretKey (همه‌جا یک مقدار)
+$secretKey = Manager::secretKey($cfg);
 function encryptToken(string $token, string $key): string
 {
     $iv = openssl_random_pseudo_bytes(16);
-    $encrypted = openssl_encrypt($token, 'AES-256-CBC', hash('sha256', $key), 0, $iv);
+    // کلید ۳۲ بایت خام (SHA-256)؛ قبلاً رشتهٔ hex بریده‌شده (۱۲۸ بیت مؤثر) استفاده می‌شد
+    $encrypted = openssl_encrypt($token, 'AES-256-CBC', Manager::encryptionKey($key), 0, $iv);
     return base64_encode($iv . $encrypted);
 }
 function decryptToken(string $encrypted, string $key): string
 {
-    $data = base64_decode($encrypted);
+    $data = base64_decode($encrypted, true);
+    if ($data === false || strlen($data) <= 16) return '';
     $iv = substr($data, 0, 16);
     $enc = substr($data, 16);
-    return openssl_decrypt($enc, 'AES-256-CBC', hash('sha256', $key), 0, $iv);
+    // ابتدا کلید جدید، سپس کلید قدیمی → توکن‌های ساخته‌شده با نسخه‌های قبلی هم باز می‌شوند
+    foreach ([Manager::encryptionKey($key), Manager::legacyEncryptionKey($key)] as $k) {
+        $d = openssl_decrypt($enc, 'AES-256-CBC', $k, 0, $iv);
+        if (is_string($d) && $d !== '') return $d;
+    }
+    return '';
 }
 
 $store = new Store($cfg['manager_db'], $cfg);
@@ -169,7 +177,7 @@ function childCount(PDO $pdo, array $bot): int {
 function childToken(array $bot): string {
     $t = $bot['token'] ?? '';
     if ($t === '') return '';
-    $key = $GLOBALS['secretKey'] ?? 'change-this-to-a-random-string';
+    $key = $GLOBALS['secretKey'] ?? Manager::DEFAULT_SECRET_KEY;
     try {
         $d = decryptToken($t, $key);
         if (is_string($d) && preg_match('/^\d+:[\w\-]{20,}$/', $d)) return $d;
@@ -184,25 +192,23 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
     $admin = isAdmin($user, $SUPERS);
 
     if (!canUse($user, $SUPERS)) {
-        if (isSuper($SUPERS, $uid)) { $store->setAllowed($uid, 1, 1); }
-        else {
-            BotApi::send($TOKEN, $chatId, "⛔️ شما دسترسی ندارید.\nآیدی شما: <code>{$uid}</code>\nاز ادمین بخواهید شما را مجاز کند.");
-            return;
-        }
-    }
-
-    // ===== عمق لینک عمیق =====
-    // فقط لاگ می‌زنیم؛ متن لینک به پیام خوش‌آمد /start الحاق می‌شود تا کاربر یک پیام ببیند نه دو
-    if ($deepLink !== null) {
-        Logger::getInstance()->info('deep_link', "User {$uid} deep link: {$deepLink}");
+        BotApi::send($TOKEN, $chatId, "⛔️ شما دسترسی ندارید.\nآیدی شما: <code>{$uid}</code>\nاز ادمین بخواهید شما را مجاز کند.");
+        return;
     }
 
     $step = $user['step'];
     $temp = json_decode($user['temp'] ?? '{}', true) ?: [];
 
+    // لینک عمیق /start <param> هر مرحلهٔ نیمه‌کاره را می‌شکند؛
+    // قبلاً clearStep می‌شد ولی $step قدیمی می‌ماند و کاربر به‌جای پیام خوش‌آمد،
+    // داخل handleStep می‌رفت و پیام «مرحله نامشخص» می‌گرفت.
     if ($deepLink !== null) {
+        Logger::getInstance()->info('deep_link', "User {$uid} deep link: {$deepLink}");
         $store->clearStep($uid);
+        $step = 'idle';
+        $temp = [];
     }
+
     if ($step !== 'idle') {
         handleStep($cfg, $store, $TOKEN, $SUPERS, $user, $chatId, $text, $msg, $step, $temp);
         return;
@@ -305,7 +311,12 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
                 foreach ($bots as $b) {
                     if ($b['status'] !== 'active') continue;
                     $pdo = childPdo($cfg, $b);
-                    if ($pdo) { $c = childCount($pdo, $b); if ($c > 0) $totalChildUsers += $c; }
+                    if ($pdo) {
+                        $c = childCount($pdo, $b);
+                        if ($c > 0) $totalChildUsers += $c;
+                        // آزادسازی اتصال قبل از ربات بعدی (جلوگیری از انباشت اتصال همزمان)
+                        $pdo = null;
+                    }
                 }
                 BotApi::send($TOKEN, $chatId,
                     "📊 <b>آمار ربات‌ساز</b>\n\n👥 کاربران: {$store->countUsers()}\n🤖 ربات‌ها: {$store->countBots()}\n👤 مجموع کاربران ربات‌ها: {$totalChildUsers}");
@@ -345,6 +356,13 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
     $uid = (int)$user['user_id'];
     $admin = isAdmin($user, $SUPERS);
 
+    // دکمهٔ «🏠 منو» همیشه باید کار کند — حتی وسط یک مرحلهٔ ورودی
+    if ($text === '🏠 منو') {
+        $store->clearStep($uid);
+        BotApi::send($TOKEN, $chatId, "🏠 منوی اصلی", ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
+        return;
+    }
+
     if ($text === '❌ انصراف' || $text === '/start' || str_starts_with($text, '/start ')) {
         $store->clearStep($uid);
         BotApi::send($TOKEN, $chatId, "انصراف داده شد. 🏠", ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
@@ -364,7 +382,7 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
                 return;
             }
             // ===== رمزنگاری توکن =====
-            $secretKey = $GLOBALS['secretKey'] ?? 'change-this-to-a-random-string';
+            $secretKey = $GLOBALS['secretKey'] ?? Manager::DEFAULT_SECRET_KEY;
             $encToken = encryptToken($token, $secretKey);
             $store->setStep($uid, 'await_admin_id', [
                 'token' => $encToken,
@@ -412,7 +430,8 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
                 BotApi::send($TOKEN, $chatId, $doneMsg,
                     ['reply_markup' => mainMenu($store->user($uid), $SUPERS, $store)]);
             } catch (Exception $e) {
-                BotApi::send($TOKEN, $chatId, "❌ خطا در ساخت ربات: " . htmlspecialchars($e->getMessage()) . "\nدوباره تلاش کن.");
+                Logger::getInstance()->error('build', "Build failed ({$slug}): " . $e->getMessage());
+                BotApi::send($TOKEN, $chatId, "❌ خطا در ساخت ربات: " . htmlspecialchars(Manager::sanitizeDbError($e->getMessage())) . "\nدوباره تلاش کن.");
             }
             return;
         }
@@ -496,8 +515,6 @@ function buildBot(array $cfg, Store $store, string $TOKEN, int $owner, string $t
 
     $tplDir = Manager::templateDir($type);
     $botDir = Manager::childBotsDir() . '/' . $slug;
-    usleep(100000);
-    if (is_dir($botDir)) throw new Exception("⛔️ این نام قبلاً استفاده شده.");
 
     // توکن در مرحله قبل رمزنگاری‌شده ذخیره شده؛ برای استفاده واقعی رمزگشایی کن
     $plainToken = childToken(['token' => $temp['token'] ?? '']);
@@ -507,10 +524,19 @@ function buildBot(array $cfg, Store $store, string $TOKEN, int $owner, string $t
     $dbName = '';
     $dirCreated = false;
 
+    // ===== ادعای اتمیک پوشه =====
+    // mkdir در صورت وجود از قبل شکست می‌خورد؛ بنابراین دو ساخت همزمان با یک نام،
+    // هرگز روی یک پوشه کار نمی‌کنند. قبلاً usleep+is_dir بود که مسابقه را فقط «کم‌احتمال» می‌کرد
+    // و rollbackِ ساختِ دومی پوشهٔ اول را پاک می‌کرد.
+    if (!@mkdir($botDir, 0777, true)) {
+        if (file_exists($botDir)) throw new Exception("⛔️ این نام قبلاً استفاده شده.");
+        throw new Exception("ساخت پوشه «{$slug}» ممکن نشد — دسترسی فایل‌سیستم را بررسی کنید.");
+    }
+    $dirCreated = true;
+
     try {
         // توجه: vendor/ حتماً کپی می‌شود — هر دو سورس به vendor/autoload.php نیاز حیاتی دارند
         Manager::copyDir($tplDir, $botDir, ['docker/', 'docker-compose.yml', '.env.example', 'vpnbot/', 'install.sh', 'images.jpeg', 'composer.json', 'composer.lock', 'installer/']);
-        $dirCreated = true;
 
         if ($type === 'mirza') {
             [$dbName, $tablePrefix] = Manager::createDatabase($cfg, $slug, null);
@@ -526,11 +552,15 @@ function buildBot(array $cfg, Store $store, string $TOKEN, int $owner, string $t
 
             $webhook = Manager::webhookUrl($cfg, $slug, 'mirza');
             $set = BotApi::setWebhook($plainToken, $webhook);
+            $webhookSet = true;
             $webhookNote = empty($set['ok']) ? ' (خطای وبهوک)' : '';
-            $tableOk = Manager::runMirzaTable(dirname($webhook) . '/table.php');
+            $tableOk = Manager::runMirzaTable(
+                dirname($webhook) . '/table.php',
+                Manager::mirzaTableSecret($plainToken)
+            );
 
             // ===== رمزنگاری توکن =====
-            $secretKey = $GLOBALS['secretKey'] ?? 'change-this-to-a-random-string';
+            $secretKey = $GLOBALS['secretKey'] ?? Manager::DEFAULT_SECRET_KEY;
             $encToken = encryptToken($plainToken, $secretKey);
 
             $store->addBot([
@@ -563,11 +593,15 @@ function buildBot(array $cfg, Store $store, string $TOKEN, int $owner, string $t
         $webhook = Manager::webhookUrl($cfg, $slug, 'faxima');
         $secret = Manager::faximaWebhookSecret($plainToken);
         $set = BotApi::setWebhook($plainToken, $webhook, $secret);
+        $webhookSet = true;
         $webhookNote = empty($set['ok']) ? ' (خطای وبهوک: ' . htmlspecialchars($set['description'] ?? 'unknown') . ')' : '';
-        $tableOk = Manager::triggerTable(dirname($webhook) . '/table.php');
+        $tableOk = Manager::triggerTable(
+            dirname($webhook) . '/table.php',
+            Manager::faximaTableSecret($plainToken)
+        );
 
         // ===== رمزنگاری توکن =====
-        $encToken = encryptToken($plainToken, $GLOBALS['secretKey'] ?? 'change-this-to-a-random-string');
+        $encToken = encryptToken($plainToken, $GLOBALS['secretKey'] ?? Manager::DEFAULT_SECRET_KEY);
 
         $store->addBot([
             'owner_id' => $owner, 'type' => 'faxima', 'folder' => $slug,
@@ -584,6 +618,12 @@ function buildBot(array $cfg, Store $store, string $TOKEN, int $owner, string $t
         return ['bot_username' => $temp['bot_username'] ?? '', 'db' => $dbName, 'custom_message' => $msg];
     } catch (Exception $e) {
         // ===== ROLLBACK =====
+        // ۱) وبهوک ثبت‌شده روی تلگرام باید برداشته شود تا ربات حذف‌شده دیگر پینگ نگیرد
+        if (!empty($webhookSet) && $plainToken !== '') {
+            try { BotApi::deleteWebhook($plainToken); }
+            catch (Exception $whErr) { error_log("Rollback webhook: " . $whErr->getMessage()); }
+        }
+        // ۲) دیتابیس ساخته‌شده حذف شود
         if ($dbCreated && $dbName !== '') {
             try {
                 $port = $cfg['db_port'] ?? 3306;
@@ -591,11 +631,12 @@ function buildBot(array $cfg, Store $store, string $TOKEN, int $owner, string $t
                 $serverPdo->exec("DROP DATABASE IF EXISTS `{$dbName}`");
             } catch (Exception $dbErr) { error_log("Rollback DB: " . $dbErr->getMessage()); }
         }
-        // پوشه را همیشه تمیز کن (حتی اگر کپی ناقص مانده باشد)
-        if (is_dir($botDir)) {
+        // ۳) فقط پوشه‌ای که «همین ساخت» ایجاد کرده پاک شود؛
+        //    در صورت مسابقه، پوشهٔ ساخت برنده دست‌نخورده می‌ماند.
+        if ($dirCreated && is_dir($botDir)) {
             try { Manager::removeDir($botDir); } catch (Exception $dirErr) { error_log("Rollback DIR: " . $dirErr->getMessage()); }
         }
-        throw new Exception("ساخت ناموفق: " . $e->getMessage() . " — منابع آزاد شدند.");
+        throw new Exception("ساخت ناموفق: " . Manager::sanitizeDbError($e->getMessage()) . " — منابع آزاد شدند.");
     }
 }
 
@@ -703,7 +744,17 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
     if ($data === 'users:list') {
         if (!$admin) { BotApi::send($TOKEN, $chatId, "⛔️ فقط ادمین."); return; }
         $ids = $store->allowedIds();
-        BotApi::send($TOKEN, $chatId, "👥 کاربران مجاز (" . count($ids) . "):\n" . ($ids ? implode("\n", array_map(fn($i) => "<code>$i</code>", $ids)) : "—"));
+        if (!$ids) { BotApi::send($TOKEN, $chatId, "👥 کاربران مجاز (0):\n—"); return; }
+        // پیام تلگرام سقف ۴۰۹۶ کاراکتر دارد → چندتکه ارسال می‌شود
+        $lines = array_map(fn($i) => "<code>$i</code>", $ids);
+        $chunks = array_chunk($lines, 40);
+        foreach ($chunks as $i => $chunk) {
+            $head = $i === 0
+                ? "👥 کاربران مجاز (" . count($ids) . "):\n"
+                : "👥 کاربران مجاز — ادامه (" . ($i * 40 + 1) . "–" . min(count($ids), ($i + 1) * 40) . "):\n";
+            BotApi::send($TOKEN, $chatId, $head . implode("\n", $chunk));
+            if (count($chunks) > 1) usleep(80000);
+        }
         return;
     }
 
@@ -719,8 +770,13 @@ function sendPendingRequests(Store $store, string $TOKEN, $chatId): void
 {
     $requests = $store->getPendingRequests();
     if (!$requests) { BotApi::send($TOKEN, $chatId, "✅ هیچ درخواستی نیست."); return; }
-    BotApi::send($TOKEN, $chatId, "📋 <b>درخواست‌ها</b> (" . count($requests) . "):");
-    foreach (array_slice($requests, 0, 10) as $r) {
+    $total = count($requests);
+    $slice = array_slice($requests, 0, 10);
+    $note = $total > count($slice)
+        ? "\nنمایش " . count($slice) . " از {$total} — با تأیید/رد هر درخواست، بعدی‌ها نمایان می‌شوند."
+        : '';
+    BotApi::send($TOKEN, $chatId, "📋 <b>درخواست‌ها</b> ({$total}):{$note}");
+    foreach ($slice as $r) {
         $name = htmlspecialchars($r['first_name'] ?? 'نامشخص');
         $username = $r['username'] ? "@" . htmlspecialchars($r['username']) : '';
         BotApi::send($TOKEN, $chatId,
@@ -806,8 +862,12 @@ function botAction(array $cfg, Store $store, string $TOKEN, array $SUPERS, array
             $backedUp = false;
             if (is_dir($dir)) {
                 @mkdir($backupDir, 0755, true);
-                try { Manager::copyDir($dir, $backupDir . '/data', ['config.php', '.htaccess']); $backedUp = true; }
-                catch (Exception $e) { Logger::getInstance()->error('delete', "Backup failed for {$bot['folder']}: " . $e->getMessage()); }
+                try {
+                    Manager::copyDir($dir, $backupDir . '/data', ['config.php', '.htaccess']);
+                    // config.php/.htaccess در پوشه‌های تو در تو هم نباید در بکاپ بمانند
+                    Manager::stripSensitiveFiles($backupDir . '/data', ['config.php', '.htaccess']);
+                    $backedUp = true;
+                } catch (Exception $e) { Logger::getInstance()->error('delete', "Backup failed for {$bot['folder']}: " . $e->getMessage()); }
             }
             if (is_dir($dir)) {
                 $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($dir, RecursiveDirectoryIterator::SKIP_DOTS), RecursiveIteratorIterator::CHILD_FIRST);
@@ -825,6 +885,9 @@ function botAction(array $cfg, Store $store, string $TOKEN, array $SUPERS, array
                 Logger::getInstance()->error('delete', "Failed to drop DB for {$bot['folder']}: " . $e->getMessage());
             }
             $store->deleteBot($bot['id']);
+            // ===== جلوگیری از رشد بی‌انتهای bots/backups/ =====
+            try { Manager::pruneBackups(dirname($dir) . '/backups', $bot['folder'], 5); }
+            catch (Exception $e) { Logger::getInstance()->warning('delete', "Backup prune failed: " . $e->getMessage()); }
             BotApi::edit($TOKEN, $chatId, $msgId, "🗑 ربات حذف شد." . ($backedUp ? "\n💾 بکاپ: <code>{$backupDir}</code>" : ""));
             return;
         }
