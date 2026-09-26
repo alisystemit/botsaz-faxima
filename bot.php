@@ -530,6 +530,13 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
                 return;
             }
             BotApi::send($TOKEN, $chatId, "⏳ در حال ساخت ربات <b>{$slug}</b> ...");
+            // ===== بررسی پیش‌نیازها قبل از ساخت =====
+            $_prereq_err = Manager::checkBuildPrerequisites();
+            if ($_prereq_err !== '') {
+                Logger::getInstance()->error('build', "Prerequisites failed for {$slug}: {$_prereq_err}");
+                BotApi::send($TOKEN, $chatId, "❌ خطا در ساخت ربات:\n{$_prereq_err}\nنام دیگری بفرست یا «❌ انصراف» بزن.");
+                return;
+            }
             $type = $temp['type'] ?? 'faxima';
             if (!in_array($type, ['faxima', 'mirza'], true)) {
                 $type = 'faxima';

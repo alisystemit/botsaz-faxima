@@ -44,6 +44,48 @@ class Manager
         return $k !== '' ? $k : self::DEFAULT_SECRET_KEY;
     }
 
+    // ===== بررسی پیش‌نیازها قبل از ساخت ربات =====
+    // اگر مشکلی بود، پیام خطای دقیق برمی‌گردوند
+    // اگر همه چیز OK بود، "" برمی‌گردوند
+    public static function checkBuildPrerequisites(): string
+    {
+        $root = dirname(__DIR__);
+        // 1. بررسی پوشه bots/
+        if (!is_dir($root . '/bots')) {
+            return "پوشه bots/ وجود ندارد - کлон را دوباره اجرا کنید";
+        }
+        if (!is_writable($root . '/bots')) {
+            $_perm = substr(sprintf('%o', @fileperms($root . '/bots')), -4);
+            $_owner = (function_exists('posix_getpwuid') && ($info = @posix_getpwuid(@fileowner($root . '/bots'))) !== false) ? $info['name'] : @fileowner($root . '/bots');
+            return "❌ پوشه bots/ قابل نوشتن نیست\n"
+                . "پرمیشن: {$_perm}\n"
+                . "مال: {$_owner}\n"
+                . "حل: chown www-data:www-data bots/";
+        }
+        // 2. بررسی پوشه data/
+        if (!is_dir($root . '/data/logs') && !@mkdir($root . '/data/logs', 0755, true)) {
+            return "پوشه data/logs/ قابل ساخت نیست";
+        }
+        if (!is_writable($root . '/data')) {
+            $_perm = substr(sprintf('%o', @fileperms($root . '/data')), -4);
+            return "❌ پوشه data/ قابل نوشتن نیست ({$_perm})\n"
+                . "حل: chown www-data:www-data data/";
+        }
+        // 3. بررسی config.php
+        if (!is_file($root . '/config.php')) {
+            return "config.php پیدا نشد - php tools/install.php را اجرا کنید";
+        }
+        // 4. بررسی PHP version
+        if (PHP_VERSION_ID < 80200) {
+            return "نسخه PHP " . PHP_VERSION . " کمتر از 8.2 لازم است";
+        }
+        // 5. بررسی vendor/
+        if (!is_file($root . '/vendor/autoload.php')) {
+            return "vendor/autoload.php پیدا نشد - composer install را اجرا کنید";
+        }
+        return ""; // همه چیز OK
+    }
+
     /** پاک‌سازی پیام خطای دیتابیس پیش از نمایش به کاربر (پیام کامل در error_log می‌ماند) */
     public static function sanitizeDbError(string $msg): string
     {
