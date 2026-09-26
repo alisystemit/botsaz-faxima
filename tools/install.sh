@@ -107,10 +107,13 @@ docroot_reachable() {
                 echo "   ❌ $p is not traversable by the web-server user (mode $perm)."
                 echo "      This is exactly what a project under /root runs into: Apache"
                 echo "      cannot reach it, so every request is 403 and Telegram never"
-                echo "      gets a reply. Fix it before the vhost can answer:"
-                echo "        leave /root:  mkdir -p /var/www && cp -a '$p' '/var/www/$(basename "$p")' \\"
-                echo "                      && ln -sfn '/var/www/$(basename "$p")' '$p'"
-                echo "        or only +x:  chmod o+x '$(dirname "$p")'"
+                echo "      gets a reply. Fix it before the vhost can answer (as root):"
+                echo "        allow the path:  chmod o+x '$p'"
+                echo "        then make data writable:"
+                echo "                          chown -R www-data:www-data '${1%/}/data'"
+                echo "        or move it out:  mkdir -p /var/www && cp -a '${1%/}' /var/www/ \\"
+                echo "                          && chown -R www-data:www-data /var/www/$(basename "${1%/}")/data"
+                echo "                          (then point DocumentRoot there and re-run this installer)"
                 DOCROOT_OK=0
                 return 1
                 ;;
@@ -259,6 +262,21 @@ h_warn() { HC_WARN=$((HC_WARN + 1)); printf '  [WARN] %s\n' "$1"; }
 h_fail() { HC_FAIL=$((HC_FAIL + 1)); printf '  [FAIL] %s\n' "$1"; }
 h_note() { printf '         %s\n' "$1"; }   # context only, not a result
 
+# Is mod_rewrite really enabled?
+# `a2enmod -l` does not exist in every Apache build - where it is missing it
+# prints usage on stderr and exits non-zero, and the old test redirected that
+# to /dev/null, so the check reported "OFF" on servers that had it ON. Ask
+# four different ways and take "yes" from any of them.
+apache_rewrite_on() {
+    [ -e /etc/apache2/mods-enabled/rewrite.load ] && return 0
+    [ -e /etc/apache2/mods-enabled/rewrite.conf ] && return 0
+    if has_cmd a2query;    then a2query -m rewrite    >/dev/null 2>&1 && return 0; fi
+    if has_cmd apache2ctl; then apache2ctl -M 2>/dev/null | grep -q '^rewrite_module' && return 0; fi
+    if has_cmd apachectl;  then apachectl  -M 2>/dev/null | grep -q '^rewrite_module' && return 0; fi
+    a2enmod -l 2>/dev/null | grep -qx 'rewrite' && return 0
+    return 1
+}
+
 # ---------------------------------------------------------------
 # report_health - "is everything actually in place?"
 # Read-only: never writes, never prompts, never changes the system.
@@ -310,11 +328,12 @@ report_health() {
         else
             h_warn "$ws service is not running - sudo systemctl start $ws"
         fi
-        if [ "$ws" = "apache2" ]; then
-            if a2enmod -l 2>/dev/null | grep -q "^rewrite$"; then
+        if [ "$ws" = "apache2" ] || [ "$ws" = "httpd" ]; then
+            if apache_rewrite_on; then
                 h_ok "mod_rewrite enabled (.htaccess protection is in force)"
             else
                 h_fail "mod_rewrite is OFF - .htaccess is ignored and config.php/src/data become public"
+                h_note "sudo a2enmod rewrite && sudo systemctl reload apache2"
             fi
         fi
     fi
@@ -490,15 +509,22 @@ echo "WHPENDING=".(int)($r["pending_update_count"] ?? 0)."\n";
 echo "WHERRDATE=".(int)($r["last_error_date"] ?? 0)."\n";
 echo "WHERR=".($r["last_error_message"] ?? "")."\n";' 2>/dev/null || true)"
 
-        local meline whurl pend wherrd wherr expected
+        local meline whurl pend wherrd wherr expected who probe_missing
         meline="$(printf '%s\n' "$v" | sed -n 's/^ME=//p')"
         whurl="$(printf '%s\n' "$v" | sed -n 's/^WHURL=//p')"
         pend="$(printf '%s\n' "$v" | sed -n 's/^WHPENDING=//p')"
         wherrd="$(printf '%s\n' "$v" | sed -n 's/^WHERRDATE=//p')"
         wherr="$(printf '%s\n' "$v" | sed -n 's/^WHERR=//p')"
 
+        # getMe prints "ME=OK @username" (a space before the @), so the match
+        # has to allow that space - matching only "OK@" made every healthy bot
+        # fall into the "unreachable" branch and the banner never verified it.
         case "$meline" in
-            OK@*)  bot_up=1; h_ok "bot is alive ${meline#OK}" ;;
+            OK\ *|OK@*)
+                bot_up=1
+                who="$(printf '%s' "${meline#OK}" | sed 's/^[ @]*//')"
+                h_ok "bot is alive${who:+ @$who}"
+                ;;
             ERR:*) bot_up=0; h_fail "Telegram rejected the token: ${meline#ERR:}" ;;
             *)     bot_up=0; h_fail "api.telegram.org unreachable - cannot verify the bot" ;;
         esac
@@ -528,8 +554,24 @@ echo "WHERR=".($r["last_error_message"] ?? "")."\n";' 2>/dev/null || true)"
             code="$(wh_probe "$expected")"
             case "$code" in
                 200)      wh_ok=1; h_ok "webhook answers HTTP 200 at $expected" ;;
-                403)      wh_ok=1; h_ok "webhook answers HTTP 403 (secret rejected, route is alive) at $expected"
-                          h_note "a 403 means Apache+PHP+path all work; only the secret token differs" ;;
+                403)
+                    # A 403 has two very different causes: .htaccess rejecting
+                    # the secret, or Apache never reaching the path at all
+                    # (AH00035 "search permissions are missing"). Ask for a
+                    # file that does not exist to tell them apart - an
+                    # unreachable path answers 403, a reachable one 404.
+                    probe_missing="$(wh_probe "${base_url%/}/.botsaz-no-such-file")"
+                    if [ "$probe_missing" = "403" ] || [ "$DOCROOT_OK" != "1" ]; then
+                        wh_ok=0
+                        h_fail "HTTP 403 at $expected - Apache cannot even reach the project path"
+                        h_note "the secret has nothing to do with it; Telegram sees exactly this 403"
+                        h_note "fix the DocumentRoot permissions in section 5, then re-run --check"
+                    else
+                        wh_ok=1
+                        h_ok "webhook answers HTTP 403 (secret rejected, route is alive) at $expected"
+                        h_note "a 403 means Apache+PHP+path all work; only the secret token differs"
+                    fi
+                    ;;
                 404)
                     wh_ok=0
                     h_fail "HTTP 404 at $expected - Telegram gets exactly this and drops every update"
@@ -557,7 +599,7 @@ echo "WHERR=".($r["last_error_message"] ?? "")."\n";' 2>/dev/null || true)"
 
     # ---------- 10) is anything private leaking? ----------
     printf '\n  --- 10) Private files exposed to the internet ---\n'
-    if [ "$wh_ok" = "1" ] && [ -n "$base_url" ]; then
+    if [ "$wh_ok" = "1" ] && [ "$DOCROOT_OK" = "1" ] && [ -n "$base_url" ]; then
         for f in "config.php" "src/" "tools/" "data/"; do
             code="$(wh_probe "${base_url%/}/$f")"
             case "$code" in
@@ -566,6 +608,10 @@ echo "WHERR=".($r["last_error_message"] ?? "")."\n";' 2>/dev/null || true)"
                 *)   h_ok "blocked: /$f -> HTTP $code" ;;
             esac
         done
+    elif [ "$DOCROOT_OK" != "1" ]; then
+        # Every probe would come back 403 for the wrong reason (AH00035), so a
+        # green result here would be a lie. Say so instead.
+        h_warn "skipped - Apache cannot reach DocumentRoot yet, so nothing proves .htaccess is doing the blocking"
     else
         h_warn "skipped - the site has to answer before this means anything"
     fi
@@ -1393,8 +1439,17 @@ configure_vhost() {
             } | $SUDO tee -a "$ap_conf" > /dev/null
         fi
         if has_cmd a2enmod; then
-            # rewrite powers .htaccess, ssl powers :443
-            $SUDO a2enmod ssl rewrite headers >/dev/null 2>&1 || true
+            # rewrite powers .htaccess, ssl powers :443. Never swallow the
+            # output: a silently failing a2enmod is what leaves a "green"
+            # install with .htaccess protection turned off.
+            aem_out=""
+            if aem_out="$($SUDO a2enmod ssl rewrite headers 2>&1)"; then
+                echo "   ✔ Apache modules enabled: ssl, rewrite, headers"
+            else
+                echo "   ⚠️  a2enmod could not enable ssl/rewrite/headers:"
+                printf '%s\n' "$aem_out" | sed -n '1,3p'
+                echo "      Enable them by hand: sudo a2enmod rewrite ssl headers"
+            fi
         fi
         if has_cmd a2ensite; then $SUDO a2ensite botsaz >/dev/null 2>&1 || true; fi
         # before testing/reloading: any duplicate ServerName must go away now,
