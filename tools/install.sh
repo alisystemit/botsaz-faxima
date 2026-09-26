@@ -252,6 +252,69 @@ if ! [[ "$BASE_URL" =~ ^https:// ]]; then
     echo "   (If you have a domain + SSL, make sure to use exactly that.)"
 fi
 
+# ---------- 4b) SSL certificate for the domain found in base_url ----------
+# Telegram only accepts a webhook over https, so as soon as a real domain is
+# known we try to get a certificate for it - right after the address was typed.
+# Everything here is best-effort on purpose: DNS may not be pointing at this
+# server yet, so a failure warns and the installer continues instead of dying.
+echo ""
+echo "==========================================="
+echo "  🔒 SSL certificate (Let's Encrypt)"
+echo "==========================================="
+issue_ssl() {
+    # hostname = scheme and path stripped away: https://a.com/x -> a.com
+    local host
+    host="$(printf '%s' "$BASE_URL" | sed -E 's#^[A-Za-z][A-Za-z0-9+.-]*://##' | cut -d/ -f1 | cut -d: -f1)"
+
+    if [ -z "$host" ] || [ "$host" = "localhost" ] || [ "$host" = "127.0.0.1" ] \
+        || printf '%s' "$host" | grep -Eq '^[0-9]+(\.[0-9]+){3}$'; then
+        echo "   ⚠️  '$host' is not a public domain - no certificate requested."
+        echo "   Set base_url to a real domain (https://example.com/botsaz) to get SSL."
+        return 0
+    fi
+
+    # certbot can be installed here too, so this step still works on its own
+    if ! has_cmd certbot; then
+        echo "   ⚠️  certbot is not installed."
+        if can_apt && ask_yes "   Install certbot now? (required to issue the certificate)"; then
+            apt_install certbot || true
+            # the matching plugin is what lets certbot edit the vhost for us
+            if has_cmd apache2 || has_cmd httpd; then apt_install python3-certbot-apache || true; fi
+            if has_cmd nginx; then apt_install python3-certbot-nginx || true; fi
+        fi
+    fi
+    if ! has_cmd certbot; then
+        echo "   ⚠️  Skipping SSL for now - install certbot and re-run to get a certificate."
+        return 0
+    fi
+
+    if certbot certificates 2>/dev/null | grep -q "Domains:.*$host"; then
+        echo "   ✔ A certificate for $host already exists - skipping issuance."
+        return 0
+    fi
+
+    echo "   ⏳ Requesting a Let's Encrypt certificate for $host ..."
+    echo "      The domain must already point to this server and port 80 must be reachable."
+    local rc=0
+    if has_cmd apache2 || has_cmd httpd; then
+        certbot --apache -d "$host" --non-interactive --agree-tos --register-unsafely-without-email || rc=$?
+    elif has_cmd nginx; then
+        certbot --nginx -d "$host" --non-interactive --agree-tos --register-unsafely-without-email || rc=$?
+    else
+        certbot certonly --webroot -w "$ROOT_DIR" -d "$host" --non-interactive --agree-tos --register-unsafely-without-email || rc=$?
+    fi
+
+    if [ "$rc" = "0" ]; then
+        echo "   🔒 Certificate issued for $host ✔"
+        echo "      Renewal is automatic (certbot installs its own timer/cron)."
+    else
+        echo "   ⚠️  Could not issue the certificate (exit $rc)."
+        echo "      Usual causes: DNS not pointing here, port 80 blocked, or a local machine."
+        echo "      Re-run it later with: sudo certbot --apache -d $host"
+    fi
+}
+issue_ssl
+
 # 5) MySQL credentials + real connection / CREATE DATABASE test
 echo ""
 echo "========================================="
