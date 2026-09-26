@@ -1133,30 +1133,28 @@ done
 unset _arg
 
 # ===== FIX: Auto-fix /root permissions before any check or install =====
-# The /root directory is typically drwx------ (700) which prevents
-# Apache (www-data) from traversing to the project. This causes
-# every request to return 403 and breaks the webhook completely.
-# This block runs BEFORE check/install to ensure the path is accessible.
+# /root typically has drwx------ (700) or drwx-----x (701).
+# Either way, Apache (www-data) cannot reliably traverse it.
+# Mode 701 has --x for others, but Apache still fails in practice.
+# This block ALWAYS fixes /root regardless of the "others" digit.
 if [ "$(id -u)" -eq 0 ] && [ -d /root ]; then
     _root_perm="$(stat -c '%a' /root 2>/dev/null)"
-    _others_digit="${_root_perm: -1}"
-    case "$_others_digit" in
-        1|3|5|7) ;;  # others can traverse - OK
-        *)
-            if [ "$MODE" = "check" ]; then
-                echo "   ⚠️  /root has mode $_root_perm (others cannot traverse)."
-                echo "      Run: chmod o+x /root"
-                echo "      Or: bash tools/install.sh (to auto-fix)"
-            elif [ "$MODE" = "install" ]; then
-                echo ""
-                echo "========================================="
-                echo "  🔧 Auto-fix: /root permissions"
-                echo "========================================="
-                chmod o+x /root
-                echo "   ✔ chmod o+x /root (was $_root_perm, now $(stat -c '%a' /root))"
-            fi
-            ;;
-    esac
+    # Fix /root unless it's already 711 or 755 (known-good)
+    if [ "$_root_perm" != "711" ] && [ "$_root_perm" != "755" ]; then
+        if [ "$MODE" = "check" ]; then
+            echo "   ⚠️  /root has mode $_root_perm (not traversable by www-data)."
+            echo "      Run: chmod o+x /root"
+            echo "      Or: bash tools/install.sh (to auto-fix)"
+        elif [ "$MODE" = "install" ]; then
+            echo ""
+            echo "========================================="
+            echo "  🔧 Auto-fix: /root permissions"
+            echo "========================================="
+            chmod o+x /root 2>/dev/null && \
+                echo "   ✔ chmod o+x /root (was $_root_perm, now $(stat -c '%a' /root))" || \
+                echo "   ⚠️  chmod o+x /root failed - run manually"
+        fi
+    fi
 fi
 
 if [ "$MODE" = "check" ] || [ "$MODE" = "logs" ]; then
