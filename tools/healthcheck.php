@@ -53,6 +53,21 @@ if (is_dir('/root')) {
     }
 }
 
+// ===== ۰.۱. بررسی دسترسی bots/ (ساخت ربات‌های فرزند) =====
+// پوشه bots/ باید نوشتنی توسط www-data باشه تا ربات جدید ساخته بشه
+$_bots_dir = dirname(__DIR__) . '/../bots';
+if (is_dir($_bots_dir)) {
+    $_bots_octal = substr(sprintf('%o', fileperms($_bots_dir)), -4);
+    $_bots_uid = fileowner($_bots_dir);
+    $_bots_owner = function_exists('posix_getpwuid') ? (posix_getpwuid($_bots_uid) ?: ['name' => $_bots_uid])['name'] : $_bots_uid;
+    if ($_bots_owner !== 'www-data') {
+        $warnings[] = "bots/ مال $_bots_owner هست (mode $_bots_octal) - ساخت ربات فرزند کار نمی‌کنه";
+        $warnings[] = "  حل: chown www-data:www-data bots/ (یا bash tools/install.sh)";
+    } else {
+        $ok[] = "bots/ قابل نوشتنه (owner: www-data, mode $_bots_octal)";
+    }
+}
+
 // ===== ۱. بررسی config.php =====
 echo "[1] بررسی config.php...\n";
 if (!empty($cfg['main_token']) && $cfg['main_token'] !== 'PUT_MAIN_BOT_TOKEN_HERE') {

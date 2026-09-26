@@ -494,6 +494,24 @@ report_health() {
         h_fail "data/ is not writable - no logs and no manager database"
     fi
 
+    # ----- bots/ directory check (child bot creation) -----
+    if [ ! -d "$ROOT_DIR/bots" ]; then
+        h_warn "bots/ does not exist yet - it is created on first bot build"
+    elif [ "$(id -u)" -eq 0 ]; then
+        _bots_owner="$(stat -c '%U:%G' "$ROOT_DIR/bots" 2>/dev/null)"
+        if [ "$_bots_owner" = "www-data:www-data" ]; then
+            h_ok "bots/ is writable (www-data owns it)"
+        else
+            h_warn "bots/ owner is $_bots_owner - child bots can't be built"
+            h_note "sudo chown www-data:www-data '$ROOT_DIR/bots'"
+        fi
+    elif [ -w "$ROOT_DIR/bots" ]; then
+        h_ok "bots/ is writable"
+    else
+        h_warn "bots/ is not writable - child bot builds will fail"
+        h_note "sudo chown www-data:www-data '$ROOT_DIR/bots'"
+    fi
+
     # ---------- 4) config.php values ----------
     printf '\n  --- 4) config.php values ---\n'
     base_url="$(cfg_get base_url)"
@@ -798,6 +816,29 @@ echo "WHERR=".($r["last_error_message"] ?? "")."\n";' 2>/dev/null || true)"
                 500|502|503) wh_ok=0; h_fail "HTTP $code at $expected - PHP is failing, see the log report below" ;;
                 *)        wh_ok=0; h_warn "HTTP $code at $expected" ;;
             esac
+
+            # "Telegram last error: Connection refused" three lines above,
+            # next to "webhook answers HTTP 200", is a contradiction the
+            # reader is left to resolve alone - and it is exactly the shape
+            # of this report right after the script itself restarts Apache:
+            # Telegram's delivery fails inside that restart, and the probe
+            # above succeeds a second later. Say how old the error is and
+            # what our own successful request proves about it. The FAIL is
+            # kept: an error that outlives a working probe means Telegram
+            # reaches this server by a different route than we do.
+            local _now_ts _age
+            if [ -n "$wherr" ] && [ -n "$wherrd" ] && [ "$wh_ok" = "1" ] \
+                && [ "$wherrd" -gt 0 ] 2>/dev/null \
+                && printf '%s' "$wherrd" | grep -Eq '^[0-9]+$'; then
+                _now_ts="$(date +%s 2>/dev/null || echo 0)"
+                if printf '%s' "$_now_ts" | grep -Eq '^[0-9]+$' \
+                    && [ "$_now_ts" -gt "$wherrd" ]; then
+                    _age=$((_now_ts - wherrd))
+                    h_note "that error is ${_age}s old, and our own request to this same URL succeeded after it"
+                    h_note "so it describes an older moment: run --check again in a minute and it must clear"
+                    h_note "if it stays while the probe keeps answering 200, Telegram cannot reach us the way we reach ourselves"
+                fi
+            fi
             if [ -n "$whurl" ] && [ "$whurl" != "$expected" ]; then
                 h_warn "Telegram has '$whurl' but config expects '$expected' - re-run php tools/set_webhook.php"
             fi
@@ -952,7 +993,7 @@ report_logs() {
 
     # ---- [3] deliveries Telegram made that came back wrong ----
     printf '\n  [3] Webhook requests that failed (access log)\n'
-    local found_acc=0
+    local found_acc=0 acc_bad=0
     for f in /var/log/apache2/access.log /var/log/nginx/access.log; do
         [ -r "$f" ] || continue
         found_acc=1
@@ -965,11 +1006,33 @@ report_logs() {
             printf '      %s - Telegram reached us but we answered wrongly:\n' "$src"
             printf '%s\n' "$lines" | sed 's/^/        /'
             total=$((total + n))
+            acc_bad=1
         else
             printf '      %s: every webhook delivery answered 2xx/3xx\n' "$src"
         fi
     done
     [ "$found_acc" = "0" ] && printf '      (no readable access log)\n'
+
+    # "we answered wrongly" only means something next to what we answer NOW.
+    # Certbot's own vhost serves /var/www/html until this project's vhost is
+    # written, and in that window every Telegram delivery lands on it and
+    # comes back 404 - so a run of real failures gets printed here long after
+    # the project answers 200, sitting right beside a health check that says
+    # exactly that. Without this line the reader has two contradictory
+    # answers and nothing to tell which one is live.
+    if [ "$acc_bad" = "1" ]; then
+        local nowc ourb
+        nowc="-"
+        ourb="$(cfg_get base_url)"
+        if [ -n "$ourb" ]; then
+            nowc="$(wh_probe "${ourb%/}/bot.php" || true)"
+        fi
+        case "$nowc" in
+            200|403) printf '      right now %s/bot.php answers HTTP %s -> the lines above are history\n' "${ourb%/}" "$nowc" ;;
+            -)       printf '      (no base_url in config.php, so it cannot tell whether those still happen)\n' ;;
+            *)       printf '      right now %s/bot.php answers HTTP %s -> NOT history, this is still failing\n' "${ourb%/}" "$nowc" ;;
+        esac
+    fi
 
     # ---- [4] PHP's own error_log ----
     printf '\n  [4] PHP error_log   (last 20 lines)\n'
@@ -2082,13 +2145,21 @@ WEBHOOK_URL="${BASE_URL}/bot.php"
 $PHP_BIN "$ROOT_DIR/tools/set_webhook.php" "$WEBHOOK_URL" || echo "⚠️  Webhook not set (the URL is probably not https/public). Set it manually later."
 
 # ===== FIX: data/ ownership and Apache restart =====
-# If the project is under /root, Apache (www-data) needs write access to data/
+# If the project is under /root, Apache (www-data) needs write access to data/ and bots/
 # and the vhost needs to be properly configured.
 if [ "$(id -u)" -eq 0 ] && [ -d "$ROOT_DIR/data" ]; then
     if [ "$(stat -c '%U:%G' "$ROOT_DIR/data")" != "www-data:www-data" ]; then
         chown -R www-data:www-data "$ROOT_DIR/data" 2>/dev/null && \
             echo "   ✔ chown -R www-data:www-data $ROOT_DIR/data" || \
             echo "   ⚠️  Could not chown data/ - run manually"
+    fi
+fi
+# bots/ directory needs write access for child bot creation
+if [ -d "$ROOT_DIR/bots" ]; then
+    if [ "$(stat -c '%U:%G' "$ROOT_DIR/bots")" != "www-data:www-data" ]; then
+        chown www-data:www-data "$ROOT_DIR/bots" 2>/dev/null && \
+            echo "   ✔ chown www-data:www-data $ROOT_DIR/bots" || \
+            echo "   ⚠️  Could not chown bots/ - run manually"
     fi
 fi
 # Ensure Apache is running with the correct config
