@@ -158,6 +158,96 @@ show_path_chain() { # $1 = file path
     fi
 }
 
+# What in systemd keeps the web server out of this path?
+#
+# ProtectHome= mounts /root, /home and /run/user as empty inaccessible
+# directories INSIDE the service's own mount namespace. Every command a human
+# runs - namei, stat, even `sudo -u www-data test -x` - happens OUTSIDE that
+# namespace and answers "the path is walkable", while Apache inside it gets
+# (13) Permission denied on every request. Nothing about the mode bits
+# changed between those two answers, which is why the chmod advice printed
+# here for months did nothing: the bits were never the problem, and the tools
+# reporting them cannot see the sandbox the server actually runs in.
+#   echoes the reason (empty = nothing hides the path)
+#   0 = answered, 3 = cannot tell
+systemd_sandbox_blocker() { # $1 = project path
+    local p="$1" v="" f d hit unit=""
+    # ProtectHome only guards these three roots; a project in /var/www can
+    # never be hidden this way, so do not pretend it can.
+    case "$p" in
+        /root|/root/*|/home|/home/*|/run/user|/run/user/*) ;;
+        *) return 0 ;;
+    esac
+    # systemctl show returns the MERGED value (base unit plus every drop-in),
+    # i.e. what the running service really sees. Parsing the files by hand
+    # would reimplement systemd's merge rules and get them subtly wrong on
+    # exactly the servers this check exists for.
+    if has_cmd systemctl; then
+        if systemctl show apache2 -p LoadState --value 2>/dev/null | grep -qx loaded; then
+            unit="apache2"
+        elif systemctl show httpd -p LoadState --value 2>/dev/null | grep -qx loaded; then
+            unit="httpd"
+        fi
+    fi
+    if [ -n "$unit" ]; then
+        v="$(systemctl show "$unit" -p ProtectHome --value 2>/dev/null)" || v=""
+        case "$v" in
+            yes|true|1|on)
+                printf 'ProtectHome=%s' "$v"
+                return 0 ;;
+        esac
+        # ProtectHome can be off while an explicit entry hides the path just
+        # as hard - and it needs a DIFFERENT line in the drop-in, so it has to
+        # be reported on its own instead of folded into the answer above.
+        v="$(systemctl show "$unit" -p InaccessiblePaths --value 2>/dev/null)" || v=""
+        for d in $v; do
+            case "$p" in
+                "$d"|"$d"/*)
+                    printf 'InaccessiblePaths=%s' "$d"
+                    return 0 ;;
+            esac
+        done
+        return 0
+    fi
+    # No usable systemctl: read the base unit, then every drop-in on top of
+    # it, last one wins. Cruder than the merged value above, but it still
+    # catches a missing or hand-edited drop-in - which is what goes wrong.
+    for f in /lib/systemd/system/apache2.service \
+             /usr/lib/systemd/system/apache2.service \
+             /etc/systemd/system/apache2.service; do
+        if [ -f "$f" ]; then
+            v="$(sed -n 's/^ProtectHome[[:space:]]*=[[:space:]]*//p' "$f" | tail -n1)"
+            break
+        fi
+    done
+    if [ -d /etc/systemd/system/apache2.service.d ]; then
+        for f in /etc/systemd/system/apache2.service.d/*.conf; do
+            if [ -f "$f" ]; then
+                d="$(sed -n 's/^ProtectHome[[:space:]]*=[[:space:]]*//p' "$f" | tail -n1)"
+                if [ -n "$d" ]; then v="$d"; fi
+            fi
+        done
+    fi
+    case "$v" in
+        yes|true|1|on)
+            printf 'ProtectHome=%s' "$v"
+            return 0 ;;
+    esac
+    for f in /etc/systemd/system/apache2.service.d/*.conf; do
+        if [ -f "$f" ]; then
+            d="$(sed -n 's/^[[:space:]]*InaccessiblePaths[[:space:]]*=[[:space:]]*//p' "$f" | tail -n1)"
+            for hit in $d; do
+                case "$p" in
+                    "$hit"|"$hit"/*)
+                        printf 'InaccessiblePaths=%s' "$hit"
+                        return 0 ;;
+                esac
+            done
+        fi
+    done
+    return 0
+}
+
 # First ancestor of $1 that the web-server user cannot walk through, printed
 # without a trailing newline (empty when the whole chain is traversable).
 # Split out from the reporting below so the repair path can simply ask again
