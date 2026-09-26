@@ -1564,11 +1564,45 @@ configure_vhost() {
         # DocumentRoot is still closed, so every update comes back 403 and
         # nothing in the run would ever mention it again.
         docroot_reachable "$ROOT_DIR" apply || true
+
+        # ...but a re-run must not be waved through blindly. If the domain
+        # changed, or a certificate just arrived while no HTTPS block was ever
+        # written, this very "vhost already exists" is what hides the breakage:
+        # ServerName stays on the old name, and with no SSL vhost for port 443
+        # Apache falls back to the first non-TLS vhost, so the client's
+        # handshake is answered with plain text and Telegram reports exactly
+        # this instead of an HTTP status:
+        #   SSL error {error:0A0000C6:SSL routines::packet length too long}
+        local cur_host="" has_443=0 need_write=0 why="" bak=""
         if [ -f "$ap_conf" ]; then
-            echo "   ✔ Apache vhost already exists ($ap_conf) - left untouched."
+            cur_host="$(sed -n 's/^[[:space:]]*ServerName[[:space:]]\{1,\}\([^[:space:]]*\).*/\1/p' "$ap_conf" | head -n1)"
+            if grep -qE '^[[:space:]]*<VirtualHost[^>]*:443' "$ap_conf"; then has_443=1; fi
+            if [ "$cur_host" != "$host" ]; then
+                need_write=1
+                why="it serves '${cur_host:-no ServerName}' but base_url is '$host'"
+            elif [ "$cert_ok" = "1" ] && [ "$has_443" = "0" ]; then
+                need_write=1
+                why="it has no HTTPS block although a certificate for $host exists"
+            elif [ "$cert_ok" = "1" ] && ! grep -q "letsencrypt/live/$host/" "$ap_conf"; then
+                need_write=1
+                why="its certificate belongs to another domain, not $host"
+            fi
+        fi
+        if [ -f "$ap_conf" ] && [ "$need_write" = "0" ]; then
+            echo "   ✔ Apache vhost already exists ($ap_conf) and matches $host - left untouched."
             return 0
         fi
-        if ! ask_yes "   Create the Apache vhost for $host -> $ROOT_DIR ?"; then
+        if [ "$need_write" = "1" ]; then
+            echo "   ⚠️  the existing vhost has to be updated: $why"
+            if ! ask_yes "   Rewrite $ap_conf (a backup is taken first)?"; then
+                echo "   ⚠️  vhost left as it is - it will keep answering '${cur_host:-?}', not $host."
+                return 0
+            fi
+            bak="$ap_conf.bak.$(date +%Y%m%d%H%M%S)"
+            if $SUDO cp -a "$ap_conf" "$bak" 2>/dev/null; then
+                echo "   backup: $bak"
+            fi
+        elif ! ask_yes "   Create the Apache vhost for $host -> $ROOT_DIR ?"; then
             echo "   vhost skipped"
             return 0
         fi
