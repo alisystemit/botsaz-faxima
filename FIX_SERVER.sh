@@ -12,27 +12,27 @@ echo "========================================="
 echo ""
 
 # ---- 1. /root permissions ----
-echo "[1/6] Fixing /root permissions..."
+echo "[1/7] Fixing /root permissions..."
 _current=$(stat -c '%a' /root)
 chmod 711 /root
 echo "   ✔ /root: $_current → $(stat -c '%a' /root)"
 
 # ---- 2. data/ ownership ----
-echo "[2/6] Fixing data/ ownership..."
+echo "[2/7] Fixing data/ ownership..."
 if [ -d /botsaz-faxima/data ]; then
     chown -R www-data:www-data /botsaz-faxima/data
     echo "   ✔ data/ → www-data:www-data"
 fi
 
 # ---- 3. bots/ ownership ----
-echo "[3/6] Fixing bots/ ownership..."
+echo "[3/7] Fixing bots/ ownership..."
 if [ -d /botsaz-faxima/bots ]; then
     chown www-data:www-data /botsaz-faxima/bots
     echo "   ✔ bots/ → www-data:www-data"
 fi
 
 # ---- 4. PCRE JIT fix ----
-echo "[4/6] Fixing PCRE JIT..."
+echo "[4/7] Fixing PCRE JIT..."
 _php_ini=$(php -r 'echo php_ini_loaded_file();' 2>/dev/null || echo '')
 if [ -n "$_php_ini" ] && [ -f "$_php_ini" ]; then
     if ! grep -q '^pcre.jit=' "$_php_ini" 2>/dev/null; then
@@ -44,7 +44,7 @@ if [ -n "$_php_ini" ] && [ -f "$_php_ini" ]; then
 fi
 
 # ---- 5. Apache vhost check ----
-echo "[5/6] Checking Apache vhost..."
+echo "[5/7] Checking Apache vhost..."
 if [ -f /etc/apache2/sites-available/botsaz.conf ]; then
     _docroot=$(grep -i 'DocumentRoot' /etc/apache2/sites-available/botsaz.conf | head -1)
     echo "   DocumentRoot: $_docroot"
@@ -58,9 +58,28 @@ if [ -f /etc/apache2/sites-available/botsaz.conf ]; then
 fi
 
 # ---- 6. Restart Apache ----
-echo "[6/6] Restarting Apache..."
+echo "[6/7] Restarting Apache..."
 systemctl restart apache2 2>/dev/null || service apache2 restart 2>/dev/null
 echo "   ✔ Apache restarted"
+
+# ---- 7. AppArmor check ----
+echo "[7/7] Checking AppArmor..."
+if command -v aa-status >/dev/null 2>&1; then
+    if aa-status 2>/dev/null | grep -q 'apparmor module is loaded'; then
+        echo "   ⚠️  AppArmor is ACTIVE - Apache may be blocked from /root"
+        echo "   Moving project to /var/www/botsaz-faxima..."
+        mkdir -p /var/www
+        cp -a /root/botsaz-faxima /var/www/ 2>/dev/null
+        chown -R www-data:www-data /var/www/botsaz-faxima 2>/dev/null
+        sed -i 's#/root/botsaz-faxima#/var/www/botsaz-faxima#g' /etc/apache2/sites-available/botsaz.conf 2>/dev/null
+        systemctl restart apache2 2>/dev/null
+        echo "   ✔ Project moved to /var/www/botsaz-faxima"
+    else
+        echo "   ✔ AppArmor not active"
+    fi
+fi
+
+# ---- Verification ----
 
 # ---- Verification ----
 echo ""
