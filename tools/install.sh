@@ -1191,15 +1191,23 @@ for _arg in "$@"; do
 done
 unset _arg
 
-# ===== FIX: Auto-fix /root permissions before any check or install =====
-# /root typically has drwx------ (700) or drwx-----x (701).
-# Either way, Apache (www-data) cannot reliably traverse it.
-# Mode 701 has --x for others, but Apache still fails in practice.
-# This block ALWAYS fixes /root regardless of the "others" digit.
+# ===== Auto-fix /root before any check or install =====
+# The project lives under /root, so one question decides everything: can the
+# account Apache runs as walk into it? Ask THAT, instead of comparing mode
+# numbers - comparing numbers is how this ended up with a fix that fixed
+# nothing. The old test wanted 711 or 755 while the command it ran was
+# chmod o+x: on 700 that yields 701, on 701 it changes nothing, so the target
+# was unreachable and every --check reprinted the warning forever. 701 is a
+# trap in the other direction too - it grants o+x, so namei shows a perfectly
+# traversable chain, but it leaves the GROUP digit at 0, and an account that
+# is a member of group root is refused by exactly the bits that look fine.
+# So: test the account, repair what the test reports, then test again.
 if [ "$(id -u)" -eq 0 ] && [ -d /root ]; then
-    _root_perm="$(stat -c '%a' /root 2>/dev/null)"
-    # Fix /root unless it's already 711 or 755 (known-good)
-    if [ "$_root_perm" != "711" ] && [ "$_root_perm" != "755" ]; then
+    _wu="$(apache_run_user 2>/dev/null || true)"
+    _wu="${_wu:-www-data}"
+    _blk="$(webuser_blocker /root 2>/dev/null || true)"
+    if [ -n "$_blk" ]; then
+        _root_perm="$(stat -c '%a' /root 2>/dev/null || true)"
         if [ "$MODE" = "check" ]; then
             echo "   ⚠️  /root has mode $_root_perm (not traversable by www-data)."
             echo "      Run: chmod o+x /root"
