@@ -127,10 +127,11 @@ setup_app_db_account() {
         # 'localhost'; with skip_name_resolve only the literal IP matches
         mysql_root -e "CREATE USER IF NOT EXISTS '$app_user'@'$h' IDENTIFIED BY '$app_pw';" >/dev/null 2>&1 || true
     done
+    # Step 1: does our password work at all? (login only - no GRANT has run yet)
     if ! app_db_login_ok "$app_user" "$app_pw"; then
         # it pre-existed with another password; only overwrite when nothing
-        # depends on it yet, otherwise config.php would be left with a password
-        # that no longer works
+        # depends on it yet, otherwise config.php would be left holding a
+        # password that no longer works
         if [ -f "$ROOT_DIR/config.php" ]; then
             echo "   ✔ Account '$app_user' already exists with a different password - left untouched."
             return 0
@@ -138,13 +139,19 @@ setup_app_db_account() {
         for h in localhost 127.0.0.1; do
             mysql_root -e "ALTER USER '$app_user'@'$h' IDENTIFIED BY '$app_pw';" >/dev/null 2>&1 || true
         done
+        if ! app_db_login_ok "$app_user" "$app_pw"; then
+            echo "   ❌ Could not create a working MySQL account."
+            echo "      The credentials step below will ask you for the database details."
+            return 0
+        fi
     fi
+    # Step 2: now grant, then prove the account can actually CREATE DATABASE
     for h in localhost 127.0.0.1; do
         mysql_root -e "GRANT ALL PRIVILEGES ON *.* TO '$app_user'@'$h';" >/dev/null 2>&1 || true
     done
     mysql_root -e "FLUSH PRIVILEGES;" >/dev/null 2>&1 || true
 
-    if app_db_login_ok "$app_user" "$app_pw"; then
+    if app_db_can_createdb "$app_user" "$app_pw"; then
         DB_PREFILL_USER="$app_user"
         DB_PREFILL_PASS="$app_pw"
         echo "   ✔ MySQL account '$app_user' created and VERIFIED over TCP (login + CREATE DATABASE)"
