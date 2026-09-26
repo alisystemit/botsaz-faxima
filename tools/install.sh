@@ -1209,19 +1209,68 @@ if [ "$(id -u)" -eq 0 ] && [ -d /root ]; then
     if [ -n "$_blk" ]; then
         _root_perm="$(stat -c '%a' /root 2>/dev/null || true)"
         if [ "$MODE" = "check" ]; then
-            echo "   ⚠️  /root has mode $_root_perm (not traversable by www-data)."
-            echo "      Run: chmod o+x /root"
-            echo "      Or: bash tools/install.sh (to auto-fix)"
+            echo "   ⚠️  $_wu cannot search /root (mode ${_root_perm:-?}) - Apache answers 403 to everything."
+            echo "      prove it first, then set whichever digit is actually missing:"
+            echo "        sudo -u $_wu test -x /root && echo yes || echo no   # this prints 'no'"
+            echo "        chmod o+x /root     # others lack x"
+            echo "        chmod g+x /root     # $_wu is in group root and the group digit is 0"
+            echo "        getfacl -p /root    # both already set -> it is not the mode at all"
         elif [ "$MODE" = "install" ]; then
             echo ""
             echo "========================================="
             echo "  🔧 Auto-fix: /root permissions"
             echo "========================================="
-            chmod o+x /root 2>/dev/null && \
-                echo "   ✔ chmod o+x /root (was $_root_perm, now $(stat -c '%a' /root))" || \
-                echo "   ⚠️  chmod o+x /root failed - run manually"
+            for _try in o+x g+x; do
+                [ -n "$(webuser_blocker /root 2>/dev/null || true)" ] || break
+                _before="$(stat -c '%a' /root 2>/dev/null || true)"
+                chmod "$_try" /root 2>/dev/null || true
+                _after="$(stat -c '%a' /root 2>/dev/null || true)"
+                if [ -n "$_after" ] && [ "$_after" != "$_before" ]; then
+                    echo "   ✔ chmod $_try /root   ($_before -> $_after)"
+                fi
+            done
+            if [ -z "$(webuser_blocker /root 2>/dev/null || true)" ]; then
+                echo "   ✔ $_wu can search /root now - the 403s are over"
+            else
+                echo "   ⚠️  /root is now $(stat -c '%a' /root 2>/dev/null || echo '?') and $_wu is STILL refused."
+                echo "      The mode bits are therefore not the cause. Look at what else denies it:"
+                echo "        id $_wu      getfacl -p /root      sudo -u $_wu test -x /root && echo yes || echo no"
+                echo "        cat /sys/module/apparmor/parameters/enabled"
+            fi
+            # ---- AppArmor fix: move project out of /root ----
+            # If mode bits are fine but Apache still gets 403,
+            # AppArmor is likely blocking Apache from /root.
+            # Fix: move the project to /var/www/ where AppArmor allows access.
+            if [ "$MODE" = "install" ] && command -v aa-status >/dev/null 2>&1; then
+                if aa-status 2>/dev/null | grep -q 'apparmor module is loaded'; then
+                    echo ""
+                    echo "========================================="
+                    echo "  🔧 AppArmor detected - moving project"
+                    echo "========================================="
+                    echo "   AppArmor restricts Apache from /root."
+                    echo "   Moving project to /var/www/botsaz-faxima..."
+                    if [ ! -d /var/www/botsaz-faxima ]; then
+                        mkdir -p /var/www
+                        cp -a /root/botsaz-faxima /var/www/
+                        echo "   ✔ Copied to /var/www/botsaz-faxima"
+                    else
+                        echo "   ⚠️  /var/www/botsaz-faxima already exists"
+                    fi
+                    chown -R www-data:www-data /var/www/botsaz-faxima 2>/dev/null
+                    echo "   ✔ chown www-data:www-data /var/www/botsaz-faxima"
+                    # Update DocumentRoot in vhost
+                    _vhost="/etc/apache2/sites-available/botsaz.conf"
+                    if [ -f "$_vhost" ]; then
+                        sed -i 's#/root/botsaz-faxima#/var/www/botsaz-faxima#g' "$_vhost"
+                        echo "   ✔ Updated DocumentRoot in $_vhost"
+                    fi
+                    echo "   ⚠️  Run: bash tools/install.sh --check"
+                    echo "        to verify the move worked"
+                fi
+            fi
         fi
     fi
+    unset _wu _blk _root_perm _try _before _after
 fi
 
 if [ "$MODE" = "check" ] || [ "$MODE" = "logs" ]; then
