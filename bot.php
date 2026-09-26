@@ -264,6 +264,7 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
             ['command' => 'mybots', 'description' => '📦 ربات‌های من'],
             ['command' => 'stats', 'description' => '📊 آمار ربات‌ساز'],
             ['command' => 'cron', 'description' => '⏰ راه‌اندازی کرون'],
+            ['command' => 'diagnose', 'description' => '🔍 بررسی سیستم (ادمین)'],
             ['command' => 'help', 'description' => 'ℹ️ راهنما'],
         ]);
         $role = $admin ? "مدیر 👑" : "کاربر مجاز ✅";
@@ -282,6 +283,7 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
         case '/help':   $text = 'ℹ️ راهنما'; break;
         case '/stats':  $text = $admin ? '📊 آمار' : 'ℹ️ راهنما'; break;
         case '/cron':   $text = $admin ? '⏰ کرون' : 'ℹ️ راهنما'; break;
+        case '/diagnose': $text = $admin ? '🔍 دیاگنوز' : 'ℹ️ راهنما'; break;
     }
 
     // دکمه «📋 درخواست‌های جدید» شمارنده پویا دارد: «📋 درخواست‌های جدید (N)»
@@ -347,6 +349,63 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
             return;
         }
         switch ($text) {
+            // ===== 🔍 دیاگنوز سیستم (فقط ادمین) =====
+            case '/diagnose':
+            case '🔍 دیاگنوز': {
+                if (!$admin) { BotApi::send($TOKEN, $chatId, "⛔️ فقط ادمین."); return; }
+                $_diag = [];
+                $_diag[] = "🖥️ <b>سیستم</b>\n"
+                    . "PHP: " . PHP_VERSION . "\n"
+                    . "Server: " . ($_SERVER['SERVER_SOFTWARE'] ?? 'unknown') . "\n"
+                    . "OS: " . (PHP_OS ?: 'unknown');
+                // بررسی پوشه‌ها
+                $_dirs = [
+                    'ROOT_DIR' => __DIR__,
+                    'bots/' => __DIR__ . '/bots',
+                    'data/' => __DIR__ . '/data',
+                    'data/logs/' => __DIR__ . '/data/logs',
+                ];
+                $_dir_msg = "📁 <b>پوشه‌ها</b>\n";
+                foreach ($_dirs as $_name => $_path) {
+                    if (!is_dir($_path)) {
+                        $_dir_msg .= "❌ {$_name}: وجود ندارد\n";
+                    } elseif (!is_writable($_path)) {
+                        $_p = substr(sprintf('%o', @fileperms($_path)), -4);
+                        $_dir_msg .= "❌ {$_name}: write protected ({$_p})\n";
+                    } else {
+                        $_p = substr(sprintf('%o', @fileperms($_path)), -4);
+                        $_dir_msg .= "✅ {$_name}: OK ({$_p})\n";
+                    }
+                }
+                // بررسی لاگ
+                $_log_file = __DIR__ . '/data/logs/' . date('Y-m-d') . '.log';
+                $_log_status = is_writable($_log_file) ? "✅" : "❌";
+                $_dir_msg .= "📝 لاگ امروز: {$_log_status} {$_log_file}\n";
+                // بررسی دیتابیس
+                try {
+                    $_pdo = new PDO("mysql:host={$cfg['db_host']};port=" . ($cfg['db_port'] ?? 3306) . ";charset=utf8mb4", $cfg['db_user'], $cfg['db_pass'], [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_TIMEOUT => 3]);
+                    $_db_test = $_pdo->query("SELECT 1")->fetchColumn();
+                    $_dir_msg .= "🗄️ MySQL: ✅ Connected\n";
+                } catch (Exception $e) {
+                    $_dir_msg .= "🗄️ MySQL: ❌ " . htmlspecialchars($e->getMessage()) . "\n";
+                }
+                // دیسک
+                $_disk = function_exists('disk_free_space') ? round(disk_free_space(__DIR__) / 1024 / 1024, 1) : '?';
+                $_dir_msg .= "💾 فضای دیسک آزاد: {$_disk} MB\n";
+                // وبهوک
+                $_wh = "❓ unknown";
+                if (!empty($cfg['main_token']) && $cfg['main_token'] !== 'PUT_MAIN_BOT_TOKEN_HERE') {
+                    $_wh_info = @json_decode(@file_get_contents("https://api.telegram.org/bot{$cfg['main_token']}/getWebhookInfo"), true);
+                    if (!empty($_wh_info['ok'])) {
+                        $_wh = $_wh_info['result']['url'] ?? 'no url';
+                        $_wh .= " (pending: " . ($_wh_info['result']['pending_update_count'] ?? 0) . ")";
+                    }
+                }
+                $_dir_msg .= "🔗 وبهوک: {$_wh}\n";
+                BotApi::send($TOKEN, $chatId, implode("\n", $_diag) . "\n\n" . $_dir_msg);
+                return;
+            }
+            
             case '📊 آمار':
                 $bots = $store->allBots();
                 $totalChildUsers = 0;
