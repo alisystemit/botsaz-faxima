@@ -787,6 +787,34 @@ report_health() {
         else
             h_fail "DocumentRoot is not reachable - see the explanation printed above"
         fi
+
+        # The check above walks the path as the account, from THIS shell.
+        # Apache walks it from inside its own mount namespace, and that is a
+        # different answer: ProtectHome hides /root and /home there, so the
+        # account test passes, namei passes, every mode bit passes - and the
+        # server still answers 403 to every request. Nothing else in this
+        # report can see the sandbox, so ask about it separately, or this
+        # disagreement is reported as a healthy server forever.
+        local _sb="" _sb_rc=0
+        _sb="$(systemd_sandbox_blocker "$ROOT_DIR")" || _sb_rc=$?
+        if [ "$_sb_rc" = "3" ]; then
+            h_warn "cannot ask systemd whether it hides $ROOT_DIR from the web server"
+            h_note "if that service runs under ProtectHome, every request is 403 while"
+            h_note "all the checks above still pass - verify with:"
+            h_note "  systemctl show apache2 -p ProtectHome --value"
+        elif [ -n "$_sb" ]; then
+            h_fail "systemd keeps the web server out of $ROOT_DIR ($_sb)"
+            h_note "this is why every permission check passed and requests still failed:"
+            h_note "those run outside the service sandbox, Apache runs inside it"
+            h_note "install mode writes the drop-in for you; by hand it is:"
+            h_note "  sudo mkdir -p /etc/systemd/system/apache2.service.d"
+            h_note "  printf '[Service]\nInaccessiblePaths=\nProtectHome=false\n' | sudo tee /etc/systemd/system/apache2.service.d/botsaz.conf"
+            h_note "  sudo systemctl daemon-reload && sudo systemctl restart apache2"
+        else
+            h_ok "systemd does not hide $ROOT_DIR from the web server"
+        fi
+        unset _sb _sb_rc
+
         if [ -d /etc/apache2/sites-enabled ]; then
             drop_vhost_conflicts "$host" "/etc/apache2/sites-available/botsaz.conf"
             if [ "${VHOST_CONFLICTS:-0}" = "0" ]; then
