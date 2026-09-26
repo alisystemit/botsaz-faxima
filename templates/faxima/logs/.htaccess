@@ -1,5 +1,0 @@
-# Block any direct browser access to log files.
-Options -Indexes
-<FilesMatch ".*">
-    Require all denied
-</FilesMatch>

@@ -1,9 +1,0 @@
-# قالب‌ها فقط منبع‌اند — هرگز نباید از وب قابل اجرا/دانلود شوند.
-#
-# چرا authz (Require) و نه rewrite؟ rewrite در per-dir context فقط از نزدیک‌ترین
-# .htaccessِ دارای RewriteRule «ارث» می‌برد؛ ثابت‌شده با rewrite-trace:
-# فراخوانی templates/faxima/api/index.php فقط rules خودِ api/ را می‌دید و
-# RewriteRule ریشه (که templates/ را F می‌کرد) اصلاً اجرا نمی‌شد → 200/500 واقعی!
-# Require all denied در authz اما مثل سایر directiveها از والد به فرزند merge می‌شود
-# و همهٔ زیرپوشه‌ها (از جمله api/app/sub با rewrite مستقل) را می‌پوشاند.
-Require all denied
