@@ -87,7 +87,7 @@ mysql_root() {
     if [ -n "${DB_ADMIN_PW:-}" ]; then
         "$MYSQL_BIN" -uroot -h127.0.0.1 -p"$DB_ADMIN_PW" "$@"
     else
-        "$MYSQL_BIN" -uroot "$@"
+        $SUDO "$MYSQL_BIN" -uroot "$@"
     fi
 }
 
