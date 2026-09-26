@@ -1470,6 +1470,12 @@ configure_vhost() {
 
     if has_cmd apache2 || has_cmd httpd; then
         local ap_conf="/etc/apache2/sites-available/botsaz.conf"
+        # Check (and offer to repair) the path BEFORE the early return below.
+        # A re-run finds the vhost already written, skips everything - and
+        # that is precisely the state where the vhost is live while its
+        # DocumentRoot is still closed, so every update comes back 403 and
+        # nothing in the run would ever mention it again.
+        docroot_reachable "$ROOT_DIR" apply || true
         if [ -f "$ap_conf" ]; then
             echo "   ✔ Apache vhost already exists ($ap_conf) - left untouched."
             return 0
@@ -1480,7 +1486,7 @@ configure_vhost() {
         fi
         # a vhost pointing at an unreachable directory is worse than none:
         # Apache starts, reports success, and 403s every request
-        if ! docroot_reachable "$ROOT_DIR" apply; then
+        if [ "$DOCROOT_OK" != "1" ]; then
             echo "   ⚠️  Writing the vhost anyway - it cannot answer until the path above is fixed."
         fi
         $SUDO mkdir -p /etc/apache2/sites-available 2>/dev/null || true
