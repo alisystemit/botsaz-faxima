@@ -1,0 +1,24 @@
+# bots/ — child bots live here (public/webhook entrypoints must stay reachable).
+# Deny everything sensitive, allow the real entrypoints.
+
+# Never expose child config / state / backups / logs / dumps / runtime queues
+# error_log$ → فایل‌های error_log بدون پسوند که table.php و برخی کرون‌ها می‌سازند
+# (قبلاً قابل دانلود بودند چون فقط \.log$ پوشش می‌داد)
+# info/hash.txt/json/lock → صف‌های زمان‌اجرا (cron/users.json، cron/info، cron.lock، hash.txt)
+<FilesMatch "(^\.|config\.php$|error_log$|^hash\.txt$|^info$|\.log$|\.sqlite$|\.sql$|\.bak$|\.env$|\.json$|\.lock$)">
+    Require all denied
+</FilesMatch>
+
+# Deny state/backup dirs.
+# NOTE: Directory blocks are illegal inside .htaccess files (Apache returns 500
+# for every request under bots/), so mod_rewrite is used instead.
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule (^|/)states/ - [F,L]
+    RewriteRule (^|/)backups/ - [F,L]
+    # فایل‌های خالیِ لاگ بدون پسوند هم در هر سطحی مسدود شوند
+    RewriteRule (^|/)error_log$ - [F,L]
+    RewriteRule (^|/)logs/ - [F,L]
+</IfModule>
+
+# Allowed on purpose: index.php / table.php / cron/*.php (child webhooks + cron endpoints)

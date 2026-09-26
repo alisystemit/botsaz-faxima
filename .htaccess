@@ -1,0 +1,25 @@
+# ===== ریشه پروژه — محافظت از فایل‌های داخلی =====
+# نکته: bots/ باید باقی بماند (وبهوک ربات‌های فرزند: index.php / table.php / cron/)
+
+Options -Indexes
+
+# مسدودسازی فایل‌های حساس ریشه
+<FilesMatch "^(\.env|\.git|README|composer\.(json|lock)|config\.example\.php)">
+    Require all denied
+</FilesMatch>
+
+# مسدودسازی کد منبع و ابزارها (بدون دست زدن به bots/)
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    # ریشهٔ ریپوی گیت — FilesMatch فقط basename را می‌بیند و HEAD/config/index داخل .git/ را رها می‌کرد
+    RewriteRule (^|/)\.git(/|$) - [F,L]
+    RewriteRule ^(tools|src|templates|data|docs)(/|$) - [F,L]
+    RewriteRule ^config\.php$ - [F,L]
+</IfModule>
+
+# بدون mod_rewrite: حداقل config.php و پوشه‌های داخلی غیرقابل دانلود شوند
+<IfModule !mod_rewrite.c>
+    <FilesMatch "^config\.php$">
+        Require all denied
+    </FilesMatch>
+</IfModule>
