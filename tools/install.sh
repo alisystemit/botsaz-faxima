@@ -101,6 +101,63 @@ apt_install() {
 # bot that answers nothing while every check around it still looks green.
 DOCROOT_OK=1
 
+# The account that actually serves requests - read, not guessed. Debian and
+# Ubuntu write it into /etc/apache2/envvars; www-data is the fallback.
+apache_run_user() {
+    local u=""
+    if [ -f /etc/apache2/envvars ]; then
+        u="$(sed -n 's/^[[:space:]]*export[[:space:]]\{1,\}APACHE_RUN_USER=//p' /etc/apache2/envvars | head -n1 | tr -d "\"'")"
+    fi
+    printf '%s' "${u:-www-data}"
+}
+
+# What that account can REALLY do.
+# Why this exists: parsing mode bits said "/root/botsaz-faxima is reachable"
+# on a server where Apache was still logging AH00035 for the very same path a
+# second later. Bits cannot see an ACL, a group-only grant, a different
+# DocumentRoot or a restriction on the Apache service - so once they look
+# fine, ask the OS as the account itself.
+#   echoes the directory the account cannot search (empty = whole chain OK)
+#   0 = answered, 3 = cannot impersonate (caller keeps the stat answer)
+webuser_blocker() {
+    local u d="${1%/}" runner
+    u="$(apache_run_user)"
+    id -u "$u" >/dev/null 2>&1 || return 3
+    [ -d "$d" ] || { printf '%s' "$d"; return 0; }
+    if [ "$(id -u)" -eq 0 ] && has_cmd sudo; then
+        runner="sudo -n -u $u"
+    elif [ "$(id -u)" -eq 0 ] && has_cmd runuser; then
+        runner="runuser -u $u --"
+    elif has_cmd sudo; then
+        runner="sudo -n -u $u"
+    else
+        return 3
+    fi
+    while [ -n "$d" ] && [ "$d" != "/" ]; do
+        # shellcheck disable=SC2086
+        if ! $runner test -x "$d" 2>/dev/null; then
+            printf '%s' "$d"
+            return 0
+        fi
+        d="$(dirname "$d")"
+    done
+    return 0
+}
+
+# Show every component of a path with its owner and mode. This is the one
+# command that answers "which part is closed" without anybody guessing.
+show_path_chain() { # $1 = file path
+    if has_cmd namei; then
+        ${SUDO:-} namei -l "$1" 2>/dev/null | sed 's/^/        /'
+    else
+        local c="$1"
+        while [ -n "$c" ] && [ "$c" != "/" ]; do
+            printf '        %-30s %s\n' "$c" "$(stat -c '%A %U:%G %a' "$c" 2>/dev/null || echo '?')"
+            c="$(dirname "$c")"
+        done
+    fi
+}
+
 # First ancestor of $1 that the web-server user cannot walk through, printed
 # without a trailing newline (empty when the whole chain is traversable).
 # Split out from the reporting below so the repair path can simply ask again
@@ -123,32 +180,50 @@ _docroot_blocker() {
 # $1 = DocumentRoot.  $2 = "apply" lets the INSTALL path repair the permissions
 # in place; --check never passes it and therefore stays strictly read-only.
 docroot_reachable() {
-    local p="$1" bad perm
+    local p="$1" bad perm origin
     if [ ! -d "$p" ]; then
         echo "   ❌ DocumentRoot does not exist: $p"
         DOCROOT_OK=0
         return 1
     fi
     bad="$(_docroot_blocker "$p")"
+    origin="stat"
+    if [ -z "$bad" ]; then
+        # The bits look fine - now confirm with the account Apache runs as.
+        # A disagreement here is worth more than either answer alone.
+        bad="$(webuser_blocker "$p")" || bad=""
+        [ -n "$bad" ] && origin="webuser"
+    fi
     [ -n "$bad" ] || return 0
     perm="$(stat -c '%a' "$bad" 2>/dev/null)"
-    echo "   ❌ $bad is not traversable by the web-server user (mode $perm)."
-    echo "      This is exactly what a project under /root runs into: Apache"
-    echo "      cannot reach it, so every request is 403 and Telegram never"
-    echo "      gets a reply. Fix it before the vhost can answer (as root):"
-    echo "        allow the path:  chmod o+x '$bad'"
-    echo "        then make data writable:"
-    echo "                          chown -R www-data:www-data '${p%/}/data'"
-    echo "        or move it out:  mkdir -p /var/www && cp -a '${p%/}' /var/www/ \\"
-    echo "                          && chown -R www-data:www-data /var/www/$(basename "${p%/}")/data"
-    echo "                          (then point DocumentRoot there and re-run this installer)"
+    if [ "$origin" = "webuser" ]; then
+        echo "   ❌ $(apache_run_user) cannot search '$bad' although its mode is ${perm:-?}."
+        echo "      The permission bits look right, so this is NOT a plain chmod: a group-only"
+        echo "      grant, an ACL, or a restriction on the Apache service all look like this."
+        echo "      Show every component, then ask the account itself:"
+        echo "        namei -l '${p%/}/bot.php'"
+        echo "        sudo -u $(apache_run_user) test -x '${p%/}' && echo yes || echo no"
+        show_path_chain "${p%/}/bot.php"
+    else
+        echo "   ❌ $bad is not traversable by the web-server user (mode $perm)."
+        echo "      This is exactly what a project under /root runs into: Apache"
+        echo "      cannot reach it, so every request is 403 and Telegram never"
+        echo "      gets a reply. Fix it before the vhost can answer (as root):"
+        echo "        allow the path:  chmod o+x '$bad'"
+        echo "        then make data writable:"
+        echo "                          chown -R www-data:www-data '${p%/}/data'"
+        echo "        or move it out:  mkdir -p /var/www && cp -a '${p%/}' /var/www/ \\"
+        echo "                          && chown -R www-data:www-data /var/www/$(basename "${p%/}")/data"
+        echo "                          (then point DocumentRoot there and re-run this installer)"
+    fi
     DOCROOT_OK=0
 
     # Widening access to /root is security-relevant, so this uses ask_no: the
     # question defaults to NO, the commands are already on screen, and a
-    # closed stdin can only ever answer NO. Reaching this line at all needs
-    # the "apply" argument, which --check does not pass.
-    if [ "${2:-}" = "apply" ] && [ -t 0 ] \
+    # closed stdin can only ever answer NO. Only the plain-permission case is
+    # offered - when the bits are already right, chmod would change nothing
+    # and the real cause has to be found with the commands printed above.
+    if [ "$origin" = "stat" ] && [ "${2:-}" = "apply" ] && [ -t 0 ] \
         && ask_no "   Fix these permissions now (chmod o+x + chown data)?"; then
         if $SUDO chmod o+x "$bad"; then
             echo "   ✔ chmod o+x '$bad'"
@@ -648,8 +723,11 @@ echo "WHERR=".($r["last_error_message"] ?? "")."\n";' 2>/dev/null || true)"
                     if [ "$probe_missing" = "403" ] || [ "$DOCROOT_OK" != "1" ]; then
                         wh_ok=0
                         h_fail "HTTP 403 at $expected - Apache cannot even reach the project path"
+                        h_note "this is Apache's own answer, so it outranks any mode-bit walk above"
                         h_note "the secret has nothing to do with it; Telegram sees exactly this 403"
-                        h_note "fix the DocumentRoot permissions in section 5, then re-run --check"
+                        h_note "which component is closed - every one of them, with owner and mode:"
+                        show_path_chain "${ROOT_DIR}/bot.php"
+                        h_note "namei -l ${ROOT_DIR}/bot.php   and   sudo -u $(apache_run_user) test -x $ROOT_DIR"
                     else
                         wh_ok=1
                         h_ok "webhook answers HTTP 403 (secret rejected, route is alive) at $expected"
