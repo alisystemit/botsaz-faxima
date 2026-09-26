@@ -80,6 +80,87 @@ apt_install() {
 # database - and the steps below assume all three exist. So they go first, one
 # question at a time. On an already-configured server every check here finds
 # what it needs and this block changes nothing.
+# Run SQL as the MySQL administrator.
+# With an empty DB_ADMIN_PW this is a socket login as OS root, which works while
+# the account is still auth_socket; once a password exists it is used instead.
+mysql_root() {
+    if [ -n "${DB_ADMIN_PW:-}" ]; then
+        "$MYSQL_BIN" -uroot -h127.0.0.1 -p"$DB_ADMIN_PW" "$@"
+    else
+        "$MYSQL_BIN" -uroot "$@"
+    fi
+}
+
+# Can this MySQL account log in over TCP with this password?
+# Kept separate from the privilege test on purpose: a freshly created account
+# always logs in but has no GRANT yet, and conflating the two made the setup
+# mistake "brand new" for "pre-exists with a different password".
+app_db_login_ok() { # $1 = user, $2 = password
+    "$MYSQL_BIN" -h127.0.0.1 -u"$1" -p"$2" -e "SELECT 1;" >/dev/null 2>&1
+}
+
+# ...and can it do the one thing every child bot needs: CREATE DATABASE.
+# This is the final gate - only a green light here reaches the credentials step.
+app_db_can_createdb() { # $1 = user, $2 = password
+    local tmp="botsaz_pretest_$$"
+    "$MYSQL_BIN" -h127.0.0.1 -u"$1" -p"$2" \
+        -e "CREATE DATABASE \`$tmp\`; DROP DATABASE \`$tmp\`;" >/dev/null 2>&1
+}
+
+# Give the application its own MySQL account instead of depending on root.
+# A fresh Ubuntu keeps root on auth_socket, which refuses exactly the TCP login
+# the installer and every bot use - so a dedicated password-authenticated
+# account is both simpler and testable. NOTHING is reported as done until a real
+# TCP login WITH CREATE DATABASE succeeds, so a green line here really means the
+# credentials step below will work.
+setup_app_db_account() {
+    local app_user="botsaz"
+    local app_pw="" h=""
+    # hex only: no quotes/backslashes, so it is safe in SQL and in argv
+    app_pw="$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"
+    if [ -z "$app_pw" ]; then
+        echo "   ❌ Could not generate a database password - skipping the account setup."
+        return 0
+    fi
+    for h in localhost 127.0.0.1; do
+        # both host spellings: with name resolution on, 127.0.0.1 becomes
+        # 'localhost'; with skip_name_resolve only the literal IP matches
+        mysql_root -e "CREATE USER IF NOT EXISTS '$app_user'@'$h' IDENTIFIED BY '$app_pw';" >/dev/null 2>&1 || true
+    done
+    if ! app_db_login_ok "$app_user" "$app_pw"; then
+        # it pre-existed with another password; only overwrite when nothing
+        # depends on it yet, otherwise config.php would be left with a password
+        # that no longer works
+        if [ -f "$ROOT_DIR/config.php" ]; then
+            echo "   ✔ Account '$app_user' already exists with a different password - left untouched."
+            return 0
+        fi
+        for h in localhost 127.0.0.1; do
+            mysql_root -e "ALTER USER '$app_user'@'$h' IDENTIFIED BY '$app_pw';" >/dev/null 2>&1 || true
+        done
+    fi
+    for h in localhost 127.0.0.1; do
+        mysql_root -e "GRANT ALL PRIVILEGES ON *.* TO '$app_user'@'$h';" >/dev/null 2>&1 || true
+    done
+    mysql_root -e "FLUSH PRIVILEGES;" >/dev/null 2>&1 || true
+
+    if app_db_login_ok "$app_user" "$app_pw"; then
+        DB_PREFILL_USER="$app_user"
+        DB_PREFILL_PASS="$app_pw"
+        echo "   ✔ MySQL account '$app_user' created and VERIFIED over TCP (login + CREATE DATABASE)"
+        echo "   ┌─────────────────────────────────────────────────────"
+        echo "   │ Host      : 127.0.0.1"
+        echo "   │ User      : $app_user"
+        echo "   │ Password  : $app_pw"
+        echo "   │ Privileges: ALL (one database is created per bot)"
+        echo "   └─────────────────────────────────────────────────────"
+        echo "   Save these - they are also written into config.php later."
+    else
+        echo "   ❌ Could not create a working MySQL account."
+        echo "      The credentials step below will ask you for the database details."
+    fi
+}
+
 preflight_fresh_server() {
     echo "✅ Fresh-server preflight (base packages, web server, database)..."
 
@@ -130,42 +211,42 @@ preflight_fresh_server() {
         if has_cmd mysql; then db_bin="mysql"; elif has_cmd mariadb; then db_bin="mariadb"; fi
     fi
     if [ -n "$db_bin" ]; then
+        MYSQL_BIN="$db_bin"
         echo "   ⏳ Starting and enabling the database service..."
         $SUDO systemctl enable --now mysql  >/dev/null 2>&1 \
             || $SUDO systemctl enable --now mariadb >/dev/null 2>&1 \
             || $SUDO service mysql start >/dev/null 2>&1 \
             || $SUDO service mariadb start >/dev/null 2>&1 || true
 
-        # A fresh Debian/Ubuntu install puts MySQL root behind auth_socket, which
-        # refuses a TCP login with an empty password. The credentials step below
-        # would fail for a reason nobody can see, so ask for a password now and
-        # hand it to that step - which then reuses it instead of asking twice.
-        if ! "$db_bin" -h127.0.0.1 -uroot -e "SELECT 1" >/dev/null 2>&1; then
-            echo "   ⚠️  MySQL root cannot log in over TCP yet (fresh installs use auth_socket)."
-            local rootpw="" esc=""
-            read -r -s -p "   Set a password for MySQL root now (Enter to skip): " rootpw || true
+        # Can we administer MySQL? OS root gets in free while the account is
+        # still auth_socket; once a password exists (set by hand, or by an
+        # earlier run) it is needed instead.
+        DB_ADMIN_PW=""
+        DB_ADMIN_SKIP=0
+        if ! mysql_root -e "SELECT 1" >/dev/null 2>&1; then
+            echo "   ⚠️  Cannot administer MySQL as OS root - a root password is already set."
+            read -r -s -p "   MySQL root password (Enter to skip the account setup): " DB_ADMIN_PW || true
             echo ""
-            if [ -n "$rootpw" ]; then
-                esc="$rootpw"
-                esc="${esc//\\/\\\\}"   # \  -> \\
-                esc="${esc//\'/\'\'}"   # '  -> ''
-                # 127.0.0.1 first, while socket auth still works: if a TCP-facing
-                # root account already exists it must get the same password,
-                # otherwise it would win the host match and still reject login.
-                $SUDO "$db_bin" -e "ALTER USER 'root'@'127.0.0.1' IDENTIFIED BY '$esc';" >/dev/null 2>&1 || true
-                if $SUDO "$db_bin" -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '$esc';" >/dev/null 2>&1 \
-                    || $SUDO "$db_bin" -e "SET PASSWORD FOR 'root'@'localhost' = PASSWORD('$esc');" >/dev/null 2>&1; then
-                    echo "   ✔ MySQL root password set"
-                    DB_PREFILL_PASS="$rootpw"
-                else
-                    echo "   ⚠️  Could not set it automatically - run this yourself:"
-                    echo "      sudo mysql -e \"ALTER USER 'root'@'localhost' IDENTIFIED BY 'YOUR_PASSWORD';\""
-                fi
-            else
-                echo "   ⚠️  Left as-is - the credentials step will ask you again."
+            if [ -z "$DB_ADMIN_PW" ] || ! mysql_root -e "SELECT 1" >/dev/null 2>&1; then
+                echo "   ❌ No usable MySQL administrator - skipping the account setup."
+                DB_ADMIN_PW=""
+                DB_ADMIN_SKIP=1
             fi
+        fi
+
+        # Show the accounts BEFORE touching anything: this is what explains any
+        # later "Access denied" - the plugin column says whether the account can
+        # ever work over TCP.
+        echo "   MySQL 'root' accounts (host -> auth plugin):"
+        mysql_root -N -e "SELECT CONCAT('      ', host, ' -> ', plugin) FROM mysql.user WHERE user='root';" 2>/dev/null \
+            || echo "      (could not read mysql.user)"
+
+        if [ "$DB_ADMIN_SKIP" = "1" ]; then
+            :   # already reported above
+        elif [ -f "$ROOT_DIR/config.php" ]; then
+            echo "   ✔ config.php already exists - MySQL accounts left untouched."
         else
-            echo "   ✔ MySQL root accepts TCP logins"
+            setup_app_db_account
         fi
     fi
 }
@@ -625,8 +706,9 @@ echo ""
 echo "========================================="
 echo "  🗄️  MySQL database credentials"
 echo "========================================="
-# If the fresh-server preflight had to create a MySQL root password, it is
-# handed over here: pressing Enter reuses it, so the password is typed once.
+# If the fresh-server preflight created a verified MySQL account, both halves
+# are handed over here: pressing Enter reuses them, so nothing is typed twice.
+DB_USER_DEF="${DB_PREFILL_USER:-root}"
 DB_PW_HINT=""
 if [ -n "${DB_PREFILL_PASS:-}" ]; then
     DB_PW_HINT=" [press Enter to reuse the one set during server setup]"
@@ -636,8 +718,8 @@ while true; do
     DB_HOST=${DB_HOST:-127.0.0.1}
     read -r -p "    DB Port [3306]: " DB_PORT
     DB_PORT=${DB_PORT:-3306}
-    read -r -p "    DB User [root]: " DB_USER
-    DB_USER=${DB_USER:-root}
+    read -r -p "    DB User [$DB_USER_DEF]: " DB_USER
+    DB_USER=${DB_USER:-$DB_USER_DEF}
     read -r -s -p "    DB Password${DB_PW_HINT}: " DB_PASS
     DB_PASS="${DB_PASS:-${DB_PREFILL_PASS:-}}"
     echo ""
@@ -646,7 +728,8 @@ while true; do
     if ! [[ "$DB_PORT" =~ ^[0-9]+$ ]]; then DB_PORT=3306; fi
 
     echo "   ⏳ Testing connection and CREATE DATABASE permission..."
-    if DBH="$DB_HOST" DBP="$DB_PORT" DBU="$DB_USER" DBPW="$DB_PASS" $PHP_BIN -r '
+    DB_TEST_OUT=""
+    if DB_TEST_OUT="$(DBH="$DB_HOST" DBP="$DB_PORT" DBU="$DB_USER" DBPW="$DB_PASS" $PHP_BIN -r '
 try {
     $pdo = new PDO("mysql:host=".getenv("DBH").";port=".(int)getenv("DBP").";charset=utf8mb4",
         getenv("DBU"), getenv("DBPW"),
@@ -655,11 +738,40 @@ try {
     $pdo->exec("CREATE DATABASE `$tmp` CHARACTER SET utf8mb4");
     $pdo->exec("DROP DATABASE `$tmp`");
     echo "OK";
-} catch (Throwable $e) { fwrite(STDERR, $e->getMessage()); exit(1); }'; then
+} catch (Throwable $e) { fwrite(STDERR, $e->getMessage()); exit(1); }' 2>&1)"; then
         echo "   Connection + CREATE DATABASE permission ✔"
         break
     fi
-    echo "   ❌ Connection or database permission failed (error above)."
+    [ -n "$DB_TEST_OUT" ] && printf '%s\n' "$DB_TEST_OUT"
+    DB_PW_STATE="EMPTY"
+    if [ -n "$DB_PASS" ]; then DB_PW_STATE="supplied"; fi
+    echo "   ❌ Connection or database permission failed."
+    echo "      Tried: host=$DB_HOST:$DB_PORT  user=$DB_USER  password sent: $DB_PW_STATE"
+    # Turn the raw SQLSTATE into an actual cause - the codes differ a lot and
+    # only one of them tells you to change the password.
+    case "$DB_TEST_OUT" in
+        *"[1698]"*)
+            echo "      1698 = this account still uses socket auth (auth_socket);"
+            echo "             it can NEVER log in over TCP, no matter the password."
+            echo "             The account list printed during server setup shows this."
+            ;;
+        *"[1045]"*)
+            echo "      1045 = wrong user name or wrong password."
+            ;;
+        *"2002"*|*"2003"*)
+            echo "      2002/2003 = nothing is listening on $DB_HOST:$DB_PORT - is MySQL running?"
+            ;;
+        *"[1044]"*)
+            echo "      1044 = logged in, but this user is not allowed to CREATE DATABASE."
+            ;;
+        *"[1049]"*)
+            echo "      1049 = unknown database name."
+            ;;
+    esac
+    if [ "$DB_PW_STATE" = "EMPTY" ] && [ -n "${DB_PREFILL_PASS:-}" ]; then
+        echo "      The password came out EMPTY although a verified one is available."
+        echo "      Press Enter at the password prompt to use it, or type it."
+    fi
     echo "   Botsaz builds a separate database per child bot; without this right we cannot continue."
     if ask_yes "   Re-enter the credentials? (no = continue without a verified database)"; then continue; fi
     echo "   ⚠️  Continuing without a verified database - child bot builds will probably fail."
