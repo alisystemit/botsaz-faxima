@@ -175,7 +175,7 @@ _docroot_blocker() {
         # No special case for /root. There used to be one, rejecting every
         # mode except 711/755/705, and it was wrong in both directions: it
         # called 701 "not traversable" - a mode that grants exactly the bit
-        # this loop is testing - and the fix it then printed, chmod o+x, is a
+        # this loop is testing - and the fix it then printed, chmod 711, is a
         # no-op on a mode that already has o+x, so the reader was sent in a
         # circle. Walking into a directory needs x only; r is for listing it,
         # which Apache never does to a parent. When x is present but Apache
@@ -218,7 +218,7 @@ docroot_reachable() {
         echo "      This is exactly what a project under /root runs into: Apache"
         echo "      cannot reach it, so every request is 403 and Telegram never"
         echo "      gets a reply. Fix it before the vhost can answer (as root):"
-        echo "        allow the path:  chmod o+x '$bad'"
+        echo "        allow the path:  chmod 711 '$bad'"
         echo "        then make data writable:"
         echo "                          chown -R www-data:www-data '${p%/}/data'"
         echo "        or move it out:  mkdir -p /var/www && cp -a '${p%/}' /var/www/ \\"
@@ -233,9 +233,9 @@ docroot_reachable() {
     # offered - when the bits are already right, chmod would change nothing
     # and the real cause has to be found with the commands printed above.
     if [ "$origin" = "stat" ] && [ "${2:-}" = "apply" ] && [ -t 0 ] \
-        && ask_no "   Fix these permissions now (chmod o+x + chown data)?"; then
-        if $SUDO chmod o+x "$bad"; then
-            echo "   ✔ chmod o+x '$bad'"
+        && ask_no "   Fix these permissions now (chmod 711 + chown data)?"; then
+        if $SUDO chmod 711 "$bad"; then
+            echo "   ✔ chmod 711 '$bad'"
             if [ -d "${p%/}/data" ]; then
                 if $SUDO chown -R www-data:www-data "${p%/}/data"; then
                     echo "   ✔ chown -R www-data:www-data '${p%/}/data'"
@@ -254,6 +254,148 @@ docroot_reachable() {
         fi
     fi
     return 1
+}
+
+# ==================================================================
+# systemd hardening - Apache/php-fpm cannot see /root even with 711
+# On Debian/Ubuntu the apache2 (and php*-fpm) units ship with sandboxing
+# like ProtectHome=true / ProtectSystem=strict / InaccessiblePaths=/root.
+# Then chmod 711 changes nothing: namei shows a traversable chain and
+# `sudo -u www-data test -x /root` prints yes, yet Apache still logs
+# AH00035 "search permissions are missing" and answers 403 to everything.
+# The persistent fix is a drop-in override, NOT a manual edit of
+# /lib/systemd/system/apache2.service (apt overwrites it on upgrade):
+#   /etc/systemd/system/apache2.service.d/override.conf:
+#     [Service]
+#     InaccessiblePaths=
+#     ProtectHome=false
+# $1 = "apply" actually writes the override (install mode);
+# anything else only reports (--check stays read-only).
+# ==================================================================
+systemd_unit_has_hardening() { # $1 = unit name -> 0 = blocks /root|/home
+    local unit="$1" show=""
+    has_cmd systemctl || return 1
+    show="$($SUDO systemctl show "$unit" -p ProtectHome,ProtectSystem,InaccessiblePaths,ReadWritePaths 2>/dev/null || true)"
+    [ -z "$show" ] && return 1
+    # ProtectHome=yes|true|read-only|tmpfs  -> /root and /home are hidden
+    if printf '%s\n' "$show" | grep -Eq '^ProtectHome=(yes|true|read-only|tmpfs)'; then
+        return 0
+    fi
+    # Explicit InaccessiblePaths=/root (or /home) entry
+    if printf '%s\n' "$show" | grep -Eq 'InaccessiblePaths=.*/(root|home)( |$)'; then
+        return 0
+    fi
+    return 1
+}
+
+systemd_override_present() { # $1 = unit name -> 0 = our drop-in exists
+    local unit="$1" f="/etc/systemd/system/${1}.service.d/override.conf"
+    [ -f "$f" ] || return 1
+    grep -q '^\[Service\]' "$f" 2>/dev/null || return 1
+    grep -q '^ProtectHome=false' "$f" 2>/dev/null || return 1
+    return 0
+}
+
+# Report-only check used by report_health (--check changes nothing).
+systemd_report_hardening() {
+    local u needs_fix=0
+    case "$ROOT_DIR" in
+        /root/*|/home/*) ;;
+        *) return 0 ;;  # project outside ProtectHome scope - nothing to say
+    esac
+    for u in apache2 httpd; do
+        has_cmd systemctl || break
+        $SUDO systemctl cat "$u" >/dev/null 2>&1 || continue
+        if systemd_unit_has_hardening "$u"; then
+            if systemd_override_present "$u"; then
+                h_ok "$u systemd override present (ProtectHome=false)"
+            else
+                h_fail "$u systemd hardening blocks $ROOT_DIR (ProtectHome/InaccessiblePaths)"
+                h_note "chmod 711 cannot fix this - the denial is in the service, not on disk:"
+                h_note "  systemctl show $u -p ProtectHome,InaccessiblePaths"
+                h_note "fix (persistent across apt upgrades):"
+                h_note "  sudo bash tools/fix_systemd_apache.sh"
+                h_note "or: sudo mkdir -p /etc/systemd/system/$u.service.d"
+                h_note "    printf '[Service]\\nInaccessiblePaths=\\nProtectHome=false\\n' | sudo tee /etc/systemd/system/$u.service.d/override.conf"
+                h_note "    sudo systemctl daemon-reload && sudo systemctl restart $u"
+            fi
+            needs_fix=1
+        fi
+    done
+    # php-fpm units matter for nginx setups (apache mod_php has no such unit)
+    for u in $(systemctl list-units --all --type=service --no-legend 2>/dev/null | awk '{print $1}' | grep -E '^php[0-9.]*-fpm\.service$' || true); do
+        if systemd_unit_has_hardening "$u"; then
+            if systemd_override_present "$u"; then
+                h_ok "$u systemd override present (ProtectHome=false)"
+            else
+                h_fail "$u systemd hardening blocks $ROOT_DIR"
+                h_note "  sudo bash tools/fix_systemd_apache.sh"
+            fi
+            needs_fix=1
+        fi
+    done
+    [ "$needs_fix" = "1" ] && return 1
+    return 0
+}
+
+# Write the drop-in override and reload systemd.
+# $1 = "apply" to actually write (install mode), else dry-run report.
+# $2 = unit short name (apache2). php-fpm units are auto-detected.
+fix_apache_systemd_hardening() {
+    local mode="${1:-}" unit svc dropdir dropfile changed=0 u
+    case "$ROOT_DIR" in
+        /root/*|/home/*) ;;
+        *) return 0 ;;  # not under ProtectHome - nothing to do
+    esac
+    has_cmd systemctl || return 0
+    for svc in apache2 httpd; do
+        $SUDO systemctl cat "$svc" >/dev/null 2>&1 || continue
+        unit="$svc"
+        if ! systemd_unit_has_hardening "$unit"; then
+            echo "   ✔ $unit systemd sandboxing does not block $ROOT_DIR"
+            continue
+        fi
+        if systemd_override_present "$unit"; then
+            echo "   ✔ $unit systemd override already present"
+            continue
+        fi
+        if [ "$mode" != "apply" ]; then
+            echo "   ❌ $unit systemd hardening blocks $ROOT_DIR (ProtectHome/InaccessiblePaths)."
+            echo "      chmod cannot fix this - run: sudo bash tools/fix_systemd_apache.sh"
+            continue
+        fi
+        dropdir="/etc/systemd/system/${unit}.service.d"
+        dropfile="$dropdir/override.conf"
+        echo "   ⏳ $unit is sandboxed (ProtectHome) - writing persistent override..."
+        $SUDO mkdir -p "$dropdir" 2>/dev/null || true
+        printf '[Service]\nInaccessiblePaths=\nProtectHome=false\n' | $SUDO tee "$dropfile" >/dev/null
+        echo "   ✔ wrote $dropfile"
+        changed=1
+    done
+    # same override for any installed php-fpm (nginx path)
+    for u in $(systemctl list-unit-files --type=service --no-legend 2>/dev/null | awk '{print $1}' | grep -E '^php[0-9.]*-fpm\.service$' || true); do
+        unit="${u%.service}"
+        systemd_unit_has_hardening "$unit" || continue
+        systemd_override_present "$unit" && continue
+        [ "$mode" != "apply" ] && continue
+        dropdir="/etc/systemd/system/${unit}.service.d"
+        dropfile="$dropdir/override.conf"
+        printf '[Service]\nInaccessiblePaths=\nProtectHome=false\n' | $SUDO tee "$dropfile" >/dev/null
+        echo "   ✔ wrote $dropfile"
+        changed=1
+    done
+    if [ "$changed" = "1" ]; then
+        $SUDO systemctl daemon-reload 2>/dev/null || true
+        for svc in apache2 httpd; do
+            $SUDO systemctl cat "$svc" >/dev/null 2>&1 || continue
+            $SUDO systemctl restart "$svc" 2>/dev/null && echo "   ✔ $svc restarted with new sandboxing" || \
+                echo "   ⚠️  $svc restart failed - restart manually"
+        done
+        for u in $(systemctl list-units --all --type=service --no-legend 2>/dev/null | awk '{print $1}' | grep -E '^php[0-9.]*-fpm\.service$' || true); do
+            $SUDO systemctl restart "$u" 2>/dev/null || true
+        done
+    fi
+    return 0
 }
 
 # Does any OTHER enabled vhost claim the same ServerName?
@@ -1196,7 +1338,7 @@ unset _arg
 # account Apache runs as walk into it? Ask THAT, instead of comparing mode
 # numbers - comparing numbers is how this ended up with a fix that fixed
 # nothing. The old test wanted 711 or 755 while the command it ran was
-# chmod o+x: on 700 that yields 701, on 701 it changes nothing, so the target
+# chmod 711: on 700 that yields 701, on 701 it changes nothing, so the target
 # was unreachable and every --check reprinted the warning forever. 701 is a
 # trap in the other direction too - it grants o+x, so namei shows a perfectly
 # traversable chain, but it leaves the GROUP digit at 0, and an account that
@@ -1212,7 +1354,7 @@ if [ "$(id -u)" -eq 0 ] && [ -d /root ]; then
             echo "   ⚠️  $_wu cannot search /root (mode ${_root_perm:-?}) - Apache answers 403 to everything."
             echo "      prove it first, then set whichever digit is actually missing:"
             echo "        sudo -u $_wu test -x /root && echo yes || echo no   # this prints 'no'"
-            echo "        chmod o+x /root     # others lack x"
+            echo "        chmod 711 /root     # others lack x"
             echo "        chmod g+x /root     # $_wu is in group root and the group digit is 0"
             echo "        getfacl -p /root    # both already set -> it is not the mode at all"
         elif [ "$MODE" = "install" ]; then
@@ -1220,15 +1362,7 @@ if [ "$(id -u)" -eq 0 ] && [ -d /root ]; then
             echo "========================================="
             echo "  🔧 Auto-fix: /root permissions"
             echo "========================================="
-            for _try in o+x g+x; do
-                [ -n "$(webuser_blocker /root 2>/dev/null || true)" ] || break
-                _before="$(stat -c '%a' /root 2>/dev/null || true)"
-                chmod "$_try" /root 2>/dev/null || true
-                _after="$(stat -c '%a' /root 2>/dev/null || true)"
-                if [ -n "$_after" ] && [ "$_after" != "$_before" ]; then
-                    echo "   ✔ chmod $_try /root   ($_before -> $_after)"
-                fi
-            done
+            chmod 711 /root
             if [ -z "$(webuser_blocker /root 2>/dev/null || true)" ]; then
                 echo "   ✔ $_wu can search /root now - the 403s are over"
             else

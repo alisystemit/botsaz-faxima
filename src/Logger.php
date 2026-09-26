@@ -60,18 +60,37 @@ class Logger
             @mkdir(dirname($this->logFile), 0755, true);
             $this->logFile = self::LOG_DIR . date('Y-m-d') . '.log';
         }
-        // اگر هنوز هم نتوانستم، لاگ را نمی‌نویسم ولی خطا را ثبت می‌کنم
+        // خط را همیشه اول می‌سازیم تا اگر فایل در دسترس نبود، پیامِ اصلی
+        // (و نه فقطِ «cannot write») به‌صورتِ خطا به error_log برسد.
+        $time = date('Y-m-d H:i:s');
+        $line = "[{$time}] [{$level}] [{$context}] {$message}";
+
+        // اگر هنوز هم نتوانستم، لاگ را نمی‌نویسم ولی پیامِ واقعی را دور نمی‌ریزم
         if (!is_dir(dirname($this->logFile))) {
-            error_log("[Logger] Cannot create log directory: " . self::LOG_DIR);
+            self::fallbackLog('Cannot create log directory: ' . self::LOG_DIR, $line);
             return;
         }
-        $time = date('Y-m-d H:i:s');
-        $line = "[{$time}] [{$level}] [{$context}] {$message}\n";
-        $result = @file_put_contents($this->logFile, $line, FILE_APPEND | LOCK_EX);
+        $result = @file_put_contents($this->logFile, $line . "\n", FILE_APPEND | LOCK_EX);
         if ($result === false) {
-            // Last resort: error_log
-            error_log("[Logger] Cannot write to {$this->logFile} - check data/ permissions");
+            // Last resort: error_log — خودِ لاگ هم نباید علتِ 500 را ببلعد
+            self::fallbackLog("Cannot write to {$this->logFile} - check data/ permissions", $line);
         }
+    }
+
+    /**
+     * لاگِ جایگزین وقتی data/logs در دسترس نیست.
+     *
+     * قبلاً اینجا فقطِ دلیلِ شکست نوشته می‌شد و خودِ پیام (مثلاً متنِ exception ای
+     * که باعثِ HTTP 500 شده) برای همیشه گم می‌شد — یعنی درست در بدترین لحظه،
+     * یعنی وقتی لاگ‌فایل خراب است، تنها راهِ فهمیدنِ علتِ خرابی از بین می‌رفت.
+     * حالا هر دو در یک خطِ واحد به error_log می‌روند (زیر Apache یعنی
+     * /var/log/apache2/error.log) که هیچ‌وقت به پوشهٔ پروژه وابسته نیست.
+     */
+    private static function fallbackLog(string $reason, string $line): void
+    {
+        // error_log نوعِ 0 (پیش‌فرض) مستقیم به SAPI می‌رود و از error handler
+        // عبور نمی‌کند → هیچ‌وقت باعثِ بازگشتِ بی‌نهایت یا هشدارِ داخلِ JSON نمی‌شود.
+        @error_log('[Logger] ' . $reason . ' | ' . $line);
     }
 
     private function rotateLogs(bool $throttled = false): void
@@ -132,25 +151,48 @@ class Logger
 // ===== ثبت خودکار استثناها =====
 function registerExceptionHandler(): void
 {
-    set_exception_handler(function ($e) {
-        $log = Logger::getInstance();
-        $log->error('uncaught', $e->getMessage(), [
-            'file' => $e->getFile(),
-            'line' => $e->getLine(),
-            'trace' => $e->getTraceAsString(),
-        ]);
+    // لاگِ مستقیم، بی‌واسطهٔ Logger: اگر data/ بسته باشد خودِ Logger هم شکست
+    // می‌خورد و علتِ 500 در تاریکی می‌ماند. error_log زیر Apache به
+    // /var/log/apache2/error.log می‌رود و به پوشهٔ پروژه وابسته نیست.
+    $raw = static function (string $tag, string $msg, string $file = '', int $line = 0): void {
+        $where = $file !== '' ? " @ {$file}:{$line}" : '';
+        @error_log("[bot.php] {$tag}: {$msg}{$where}");
+    };
+
+    set_exception_handler(function ($e) use ($raw) {
+        $raw('uncaught ' . get_class($e), $e->getMessage(), $e->getFile(), $e->getLine());
+        try {
+            $log = Logger::getInstance();
+            $log->error('uncaught', $e->getMessage(), [
+                'file' => $e->getFile(),
+                'line' => $e->getLine(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+        } catch (Throwable $ignored) {
+            // لاگر نباید خودش باعثِ شکستِ دوم شود — پیام بالا همین‌طور به error_log رفته است
+        }
         // اگر خروجی هنوز فرستاده نشده، status واقعی را بگذار؛
         // وگرنه وبهوک همیشه 200 می‌دهد و تلگرام آپدیتِ شکست‌خورده را دوباره نمی‌فرستد.
         if (!headers_sent()) http_response_code(500);
     });
     set_error_handler(function ($severity, $message, $file, $line) {
-        if (!(error_reporting() & $severity)) return;
-        Logger::getInstance()->warning('php_error', $message, ['file' => $file, 'line' => $line]);
+        if (!(error_reporting() & $severity)) return false;
+        try {
+            Logger::getInstance()->warning('php_error', $message, ['file' => $file, 'line' => $line]);
+        } catch (Throwable $ignored) {
+        }
+        // خروجیِ null مثلِ قبلِ کد: خطای «پردازش‌شده» محسوب می‌شود و PHP
+        // هشدار را داخلِ بدنهٔ JSON تزریق نمی‌کند (بدنهٔ وبهوک باید JSON بماند).
+        return;
     });
-    register_shutdown_function(function () {
+    register_shutdown_function(function () use ($raw) {
         $error = error_get_last();
         if ($error && in_array($error['type'], [E_ERROR, E_CORE_ERROR, E_COMPILE_ERROR])) {
-            Logger::getInstance()->error('fatal', $error['message'], ['file' => $error['file'], 'line' => $error['line']]);
+            $raw('fatal', $error['message'], $error['file'], $error['line']);
+            try {
+                Logger::getInstance()->error('fatal', $error['message'], ['file' => $error['file'], 'line' => $error['line']]);
+            } catch (Throwable $ignored) {
+            }
             if (!headers_sent()) http_response_code(500);
         }
     });
