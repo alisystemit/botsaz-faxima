@@ -1324,6 +1324,24 @@ install_php_if_needed() {
 }
 install_php_if_needed
 
+# ---------- Fix: PCRE JIT memory allocation warning ----------
+# Some Ubuntu/Debian configs block PCRE JIT memory allocation,
+# causing "preg_match(): Allocation of JIT memory failed" warnings.
+# Fix: set pcre.jit=0 in PHP ini.
+_pcre_jit_ok=$($PHP_BIN -r 'echo ini_get("pcre.jit");' 2>/dev/null || echo "unknown")
+if [ "$_pcre_jit_ok" = "1" ]; then
+    _php_ini=$($PHP_BIN -r 'echo php_ini_loaded_file();' 2>/dev/null || echo '')
+    if [ -n "$_php_ini" ] && [ -f "$_php_ini" ]; then
+        if ! grep -q '^pcre.jit=' "$_php_ini" 2>/dev/null; then
+            echo 'pcre.jit=0' >> "$_php_ini"
+            echo "   ✔ Disabled PCRE JIT in $_php_ini"
+        else
+            echo "   ✔ PCRE JIT already configured"
+        fi
+    fi
+    echo "   ℹ️  PCRE JIT disabled (security restriction) - no preg_match warnings"
+fi
+
 # ---------- 0) prerequisite: PHP extensions ----------
 echo "✅ Checking PHP extensions..."
 # pairs: extension_name:apt_package_name
