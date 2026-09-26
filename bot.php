@@ -595,7 +595,17 @@ function buildBot(array $cfg, Store $store, string $TOKEN, int $owner, string $t
     // و rollbackِ ساختِ دومی پوشهٔ اول را پاک می‌کرد.
     if (!@mkdir($botDir, 0755, true)) {
         if (file_exists($botDir)) throw new Exception("⛔️ این نام قبلاً استفاده شده.");
-        throw new Exception("ساخت پوشه «{$slug}» ممکن نشد — دسترسی فایل‌سیستم را بررسی کنید.");
+        // Detailed diagnostic: show path, parent perms, owner
+        $_parent = dirname($botDir);
+        $_perm = @stat($_parent) ? substr(sprintf('%o', @fileperms($_parent)), -4) : '?';
+        $_owner = @stat($_parent) ? (function_exists('posix_getpwuid') ? (posix_getpwuid(@fileowner($_parent)) ?: ['name'=>$_owner_uid])['name'] : '?') : '?';
+        $_owner_uid = @fileowner($_parent) ?? '?';
+        throw new Exception("ساخت پوشه «{$slug}» ممکن نشد ❌\n"
+            ."مسیر: {$botDir}\n"
+            ."پوشه والد: {$_parent}\n"
+            ."پرمیشن: {$_perm} (owner: {$_owner_uid}:{$_owner})\n"
+            ."علت احتمالی: پوشه bots/ مال www-data نیست\n"
+            ."حل: bash tools/install.sh یا chown www-data:www-data bots/");
     }
     $dirCreated = true;
 

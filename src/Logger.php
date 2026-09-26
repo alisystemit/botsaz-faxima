@@ -55,9 +55,23 @@ class Logger
     private function write(string $level, string $context, string $message): void
     {
         $this->rotateLogs(true);
+        // اگر لاگ‌فایل خالی هست (mkdir نشد)، دوباره تلاش کن
+        if (empty($this->logFile) || !is_dir(dirname($this->logFile))) {
+            @mkdir(dirname($this->logFile), 0755, true);
+            $this->logFile = self::LOG_DIR . date('Y-m-d') . '.log';
+        }
+        // اگر هنوز هم نتوانستم، لاگ را نمی‌نویسم ولی خطا را ثبت می‌کنم
+        if (!is_dir(dirname($this->logFile))) {
+            error_log("[Logger] Cannot create log directory: " . self::LOG_DIR);
+            return;
+        }
         $time = date('Y-m-d H:i:s');
         $line = "[{$time}] [{$level}] [{$context}] {$message}\n";
-        @file_put_contents($this->logFile, $line, FILE_APPEND | LOCK_EX);
+        $result = @file_put_contents($this->logFile, $line, FILE_APPEND | LOCK_EX);
+        if ($result === false) {
+            // Last resort: error_log
+            error_log("[Logger] Cannot write to {$this->logFile} - check data/ permissions");
+        }
     }
 
     private function rotateLogs(bool $throttled = false): void
@@ -66,6 +80,7 @@ class Logger
         self::$lastRotateAt = time();
         if (!is_dir(self::LOG_DIR)) {
             @mkdir(self::LOG_DIR, 0755, true);
+            // Log file will be set on next write
             return;
         }
 
@@ -76,6 +91,7 @@ class Logger
         while (count($files) > self::MAX_FILES) {
             @unlink(array_pop($files));
         }
+    }
 
         // بررسی اندازه فایل فعلی
         $current = self::LOG_DIR . date('Y-m-d') . '.log';
