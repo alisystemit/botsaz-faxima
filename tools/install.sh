@@ -1848,6 +1848,43 @@ if (file_put_contents((string) getenv("CFG_OUT"), $out) === false) {
     echo "   config.php written ✔"
 fi
 
+# A re-run with a DIFFERENT address gets stuck right here: the base_url prompt
+# takes the new domain, but because we never overwrite config.php it stays on
+# the old one - while the webhook, the certificate request and the vhost are
+# all built from what was just typed. Telegram then delivers to one name and
+# the health check probes another, and neither of them answers. Only this
+# single key moves; the database, the secret and any other manual edit in the
+# file stay byte-for-byte where they are.
+old_base="$(cfg_get base_url)"
+if [ -n "$old_base" ] && [ "$old_base" != "$BASE_URL" ]; then
+    echo ""
+    echo "⚠️  config.php says base_url = $old_base"
+    echo "      but you just entered       = $BASE_URL"
+    if ask_yes "   Update base_url inside config.php to $BASE_URL too?"; then
+        if CFG_FILE="$ROOT_DIR/config.php" NEW_BASE="$BASE_URL" "$PHP_BIN" -r '
+$f = (string) getenv("CFG_FILE");
+$raw = @file_get_contents($f);
+if ($raw === false) { fwrite(STDERR, "config.php read failed\n"); exit(1); }
+$new = (string) getenv("NEW_BASE");
+$n = 0;
+$out = preg_replace_callback(
+    "/^([ \t]*)(?:\x27base_url\x27|\x22base_url\x22)[ \t]*=>[ \t]*.*$/m",
+    function ($m) use ($new) {
+        return $m[1] . "\x27base_url\x27 => " . var_export($new, true) . ",";
+    },
+    $raw, 1, $n
+);
+if ($out === null || $n !== 1) { fwrite(STDERR, "base_url not found in config.php\n"); exit(1); }
+if (file_put_contents($f, $out) === false) { fwrite(STDERR, "config.php write failed\n"); exit(1); }
+'; then
+            echo "   base_url updated inside config.php ✔"
+        else
+            echo "   ❌ could not change base_url - edit it by hand in config.php."
+            echo "      Until then everything else stays on $old_base."
+        fi
+    fi
+fi
+
 # ---------- 6b) SHOW the MySQL credentials and VERIFY them from the file ----------
 # Why read them back from config.php instead of echoing $DB_* here? Because
 # config.php is the single source of truth: Manager::createDatabase(),
@@ -1906,6 +1943,17 @@ $PHP_BIN "$ROOT_DIR/tools/install.php"
 # 8) register the main bot webhook
 echo ""
 echo "✅ Setting the webhook..."
+# The webhook has to come from the same place the health check compares it
+# against: config.php. It used to be built from the just-typed $BASE_URL, so
+# when config could not be updated Telegram was pointed at one name and the
+# checker at another - with nothing printed to say so.
+_cfg_base="$(cfg_get base_url)"
+if [ -n "$_cfg_base" ] && [ "$_cfg_base" != "$BASE_URL" ]; then
+    echo "⚠️  config.php is on $_cfg_base; the webhook will be built from that."
+    echo "      To move it, change base_url in config.php and run:"
+    echo "      php tools/set_webhook.php"
+    BASE_URL="$_cfg_base"
+fi
 WEBHOOK_URL="${BASE_URL}/bot.php"
 $PHP_BIN "$ROOT_DIR/tools/set_webhook.php" "$WEBHOOK_URL" || echo "⚠️  Webhook not set (the URL is probably not https/public). Set it manually later."
 
