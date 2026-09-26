@@ -535,6 +535,45 @@ report_health() {
             else
                 h_fail "$VHOST_CONFLICTS other vhost(s) also claim $host - they win and cause 404"
             fi
+
+            # Our own vhost must answer the name config.php asks for, and it
+            # must have an HTTPS block. Without any SSL vhost, Apache falls
+            # back to the first non-TLS vhost on port 443, answers the
+            # handshake with plain text, and Telegram reports that as
+            #   SSL error {error:0A0000C6:SSL routines::packet length too long}
+            # instead of an HTTP status - which nothing else in this report
+            # would ever connect to a missing <VirtualHost *:443>.
+            local own_a="/etc/apache2/sites-available/botsaz.conf"
+            local own_e="/etc/apache2/sites-enabled/botsaz.conf"
+            if [ ! -f "$own_a" ]; then
+                h_warn "no vhost of our own was written - bash tools/install.sh"
+            elif [ ! -e "$own_e" ]; then
+                h_fail "$own_a exists but is not enabled - sudo a2ensite botsaz && sudo systemctl reload apache2"
+            else
+                local vhost_h=""
+                vhost_h="$(sed -n 's/^[[:space:]]*ServerName[[:space:]]\{1,\}\([^[:space:]]*\).*/\1/p' "$own_a" | head -n1)"
+                if [ "$vhost_h" = "$host" ]; then
+                    h_ok "our vhost claims $host itself"
+                else
+                    h_fail "our vhost claims '${vhost_h:-no ServerName}' but base_url is '$host'"
+                    h_note "a re-run of this installer offers to rewrite it (with a backup):"
+                    h_note "  bash tools/install.sh"
+                    h_note "or by hand: sudo nano $own_a   -> ServerName $host in both blocks"
+                fi
+                if grep -qE '^[[:space:]]*<VirtualHost[^>]*:443' "$own_a"; then
+                    if grep -q "letsencrypt/live/$host/" "$own_a"; then
+                        h_ok "HTTPS block present and its certificate belongs to $host"
+                    else
+                        h_fail "HTTPS block present but its certificate belongs to another domain"
+                        h_note "a re-run of this installer rewrites the vhost with the right one"
+                    fi
+                else
+                    h_fail "no <VirtualHost *:443> block - https://$host cannot be answered at all"
+                    h_note "Apache replies with plain text on 443 in this state; Telegram reports:"
+                    h_note "  SSL error {error:0A0000C6:SSL routines::packet length too long}"
+                    h_note "fix: once the certificate exists, run bash tools/install.sh again"
+                fi
+            fi
         fi
     else
         h_warn "no hostname in base_url - cannot inspect the vhost"
