@@ -576,15 +576,16 @@ $me = @json_decode((string)@file_get_contents($api."getMe"), true);
 if (empty($me["ok"])) { echo "ME=ERR:".($me["description"] ?? "no answer from api.telegram.org"); exit; }
 echo "ME=OK @".$me["result"]["username"]."\n";
 $wh = @json_decode((string)@file_get_contents($api."getWebhookInfo"), true);
-if (empty($wh["ok"])) { echo "WH=ERR"; exit; }
+if (empty($wh["ok"])) { echo "WH=ERR:".($wh["description"] ?? "no answer from api.telegram.org"); exit; }
 $r = $wh["result"];
 echo "WHURL=".($r["url"] ?? "")."\n";
 echo "WHPENDING=".(int)($r["pending_update_count"] ?? 0)."\n";
 echo "WHERRDATE=".(int)($r["last_error_date"] ?? 0)."\n";
 echo "WHERR=".($r["last_error_message"] ?? "")."\n";' 2>/dev/null || true)"
 
-        local meline whurl pend wherrd wherr expected who probe_missing
+        local meline whurl pend wherrd wherr whinfo expected who probe_missing
         meline="$(printf '%s\n' "$v" | sed -n 's/^ME=//p')"
+        whinfo="$(printf '%s\n' "$v" | sed -n 's/^WH=//p')"
         whurl="$(printf '%s\n' "$v" | sed -n 's/^WHURL=//p')"
         pend="$(printf '%s\n' "$v" | sed -n 's/^WHPENDING=//p')"
         wherrd="$(printf '%s\n' "$v" | sed -n 's/^WHERRDATE=//p')"
@@ -603,6 +604,14 @@ echo "WHERR=".($r["last_error_message"] ?? "")."\n";' 2>/dev/null || true)"
             *)     bot_up=0; h_fail "api.telegram.org unreachable - cannot verify the bot" ;;
         esac
 
+        # getWebhookInfo can fail on its own (rate limit, a blip) while getMe
+        # succeeds. Then WHURL is simply absent - and reading that as "no
+        # webhook registered" sends the reader to re-run set_webhook on a
+        # server whose webhook was perfectly fine, which is what happened.
+        if [ -n "$whinfo" ]; then
+            h_warn "could not read getWebhookInfo: ${whinfo#ERR:}"
+            h_note "the webhook status is UNKNOWN right now, not missing - nothing to fix here"
+        else
         if [ -z "$whurl" ]; then
             h_fail "no webhook registered - php tools/set_webhook.php"
         else
@@ -618,6 +627,7 @@ echo "WHERR=".($r["last_error_message"] ?? "")."\n";' 2>/dev/null || true)"
             h_warn "$pend update(s) queued - the bot is not consuming them"
         else
             h_ok "no updates waiting"
+        fi
         fi
 
         # ...and the question Telegram actually asks: does that URL answer?
