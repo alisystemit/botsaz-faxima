@@ -336,6 +336,56 @@ if (file_put_contents((string) getenv("CFG_OUT"), $out) === false) {
     echo "   config.php written ✔"
 fi
 
+# ---------- 6b) SHOW the MySQL credentials and VERIFY them from the file ----------
+# Why read them back from config.php instead of echoing $DB_* here? Because
+# config.php is the single source of truth: Manager::createDatabase(),
+# patchFaximaConfig() and patchMirzaConfig() all copy db_host / db_port /
+# db_user / db_pass out of that file into every child bot. Printing and testing
+# exactly what the file contains guarantees that what you see is what the bots
+# will use - and a wrong credential fails HERE instead of halfway through a
+# bot build.
+echo ""
+echo "==========================================="
+echo "  🔐 MySQL credentials stored in config.php"
+echo "==========================================="
+if CFG_FILE="$ROOT_DIR/config.php" $PHP_BIN -r '
+$f = (string) getenv("CFG_FILE");
+if (!is_file($f)) { fwrite(STDERR, "[X] config.php not found\n"); exit(1); }
+$cfg = @require $f;
+if (!is_array($cfg)) { fwrite(STDERR, "[X] config.php does not return an array\n"); exit(1); }
+$labels = array("db_host"=>"Host", "db_port"=>"Port", "db_user"=>"User",
+                "db_pass"=>"Password", "db_prefix"=>"Prefix");
+foreach ($labels as $k => $lab) {
+    $v = (string)($cfg[$k] ?? "");
+    if ($v === "") $v = "(empty)";
+    printf("  %-9s: %s\n", $lab, $v);
+}
+echo "  ----------------------------------------------------\n";
+try {
+    $pdo = new PDO(
+        "mysql:host=".($cfg["db_host"] ?? "").";port=".(int)($cfg["db_port"] ?? 3306).";charset=utf8mb4",
+        (string)($cfg["db_user"] ?? ""), (string)($cfg["db_pass"] ?? ""),
+        array(PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_TIMEOUT => 8)
+    );
+    $tmp = "botsaz_cfgtest_" . bin2hex(random_bytes(3));
+    $pdo->exec("CREATE DATABASE `$tmp` CHARACTER SET utf8mb4");
+    $pdo->exec("DROP DATABASE `$tmp`");
+    echo "  [OK] config.php connects AND can CREATE DATABASE\n";
+    echo "  These exact credentials are copied into both child bots\n";
+    echo "  (faxima + mirza), so their installs will not fail on MySQL.\n";
+} catch (Throwable $e) {
+    echo "  [X] config.php credentials do NOT work: " . $e->getMessage() . "\n";
+    echo "  Child bot builds WILL fail - fix config.php and re-run this installer.\n";
+    exit(1);
+}'; then
+    echo "==========================================="
+else
+    echo "==========================================="
+    echo "  ❌ config.php verification FAILED - aborting."
+    echo "==========================================="
+    exit 1
+fi
+
 # 7) run the initial installer
 echo ""
 echo "✅ Running the initial installer..."
