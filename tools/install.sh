@@ -75,6 +75,760 @@ apt_install() {
     hash -r 2>/dev/null || true
 }
 
+# ==================================================================
+# SHARED: health check + error-log report
+# Everything below is defined BEFORE the installer starts, because
+#     bash tools/install.sh --check
+# has to run the whole report and exit without executing a single install step.
+# The install path calls exactly the same functions at the end, so what you read
+# months later with --check is what the installer itself verified on day one.
+# ==================================================================
+
+# Can the web-server user (www-data) walk down to DocumentRoot?
+# The repo is normally cloned as root and /root is 0700, so www-data cannot
+# traverse it: Apache logs "DocumentRoot ... does not exist" at start-up and
+# "Permission denied ... search permissions are missing" on every request - a
+# bot that answers nothing while every check around it still looks green.
+DOCROOT_OK=1
+docroot_reachable() {
+    local p="$1" perm last
+    if [ ! -d "$p" ]; then
+        echo "   ❌ DocumentRoot does not exist: $p"
+        DOCROOT_OK=0
+        return 1
+    fi
+    p="${p%/}"
+    while [ -n "$p" ] && [ "$p" != "/" ]; do
+        perm="$(stat -c '%a' "$p" 2>/dev/null)" || return 0
+        last="${perm: -1}"          # the "others" digit: odd means +x
+        case "$last" in
+            1|3|5|7) ;;
+            *)
+                echo "   ❌ $p is not traversable by the web-server user (mode $perm)."
+                echo "      This is exactly what a project under /root runs into: Apache"
+                echo "      cannot reach it, so every request is 403 and Telegram never"
+                echo "      gets a reply. Fix it before the vhost can answer:"
+                echo "        leave /root:  mkdir -p /var/www && cp -a '$p' '/var/www/$(basename "$p")' \\"
+                echo "                      && ln -sfn '/var/www/$(basename "$p")' '$p'"
+                echo "        or only +x:  chmod o+x '$(dirname "$p")'"
+                DOCROOT_OK=0
+                return 1
+                ;;
+        esac
+        p="$(dirname "$p")"
+    done
+    return 0
+}
+
+# Does any OTHER enabled vhost claim the same ServerName?
+# certbot --apache leaves its own vhost behind (000-default-le-ssl.conf). It
+# sorts before ours and Apache serves the FIRST vhost matching the name, so it
+# answers from /var/www/html instead of the project and every update comes back
+# "Wrong response from the webhook: 404".
+#   $3 = "apply"  -> actually disable the competitors (install mode)
+#   anything else -> only report them (--check is strictly read-only)
+# Sets VHOST_CONFLICTS to how many competitors were found.
+drop_vhost_conflicts() {
+    local host="$1" mine="$2" apply="${3:-}" link tgt base minebase esc
+    VHOST_CONFLICTS=0
+    [ -d /etc/apache2/sites-enabled ] || return 0
+    esc="$(printf '%s' "$host" | sed 's/[.[\*^$\\/]/\\&/g')"
+    minebase="$(basename "${mine%.conf}")"
+    for link in /etc/apache2/sites-enabled/*; do
+        [ -e "$link" ] || continue
+        base="$(basename "$link")"
+        base="${base%.conf}"
+        # Never treat our own vhost as a competitor. readlink -f is not
+        # dependable (it silently fails on filesystems without symlinks), so the
+        # NAME is compared too - otherwise a broken readlink would make the
+        # installer disable the very vhost it just wrote.
+        tgt="$(readlink -f "$link" 2>/dev/null || true)"
+        [ -n "$tgt" ] || tgt="$link"
+        if [ "$base" = "$minebase" ] || [ "$tgt" = "$mine" ] || [ "$link" = "$mine" ]; then
+            continue
+        fi
+        grep -Eq "^[[:space:]]*ServerName[[:space:]]+${esc}([[:space:]]|$)" "$tgt" 2>/dev/null || continue
+        VHOST_CONFLICTS=$((VHOST_CONFLICTS + 1))
+        echo "   ⚠️  Another enabled vhost also claims $host:"
+        echo "        $tgt"
+        if [ "$apply" = "apply" ]; then
+            echo "      It loads first, so it would serve its own DocumentRoot instead of"
+            echo "      this project - disabling it (both use the same certificate)."
+            if has_cmd a2dissite; then $SUDO a2dissite "$base" >/dev/null 2>&1 || true; fi
+            $SUDO rm -f "$link" 2>/dev/null || true
+        else
+            echo "      It loads first, so it answers from its own DocumentRoot and"
+            echo "      Telegram gets 404. Disable it with:"
+            echo "        sudo a2dissite $base && sudo systemctl reload apache2"
+        fi
+    done
+    return 0
+}
+
+# Ask a URL and print ONLY its HTTP status (0 = nothing answered at all).
+# Used three times: is the webhook alive, is the path right, is a sensitive
+# file blocked. One implementation so all three answers mean the same thing.
+wh_probe() { # $1 = url -> echoes the HTTP status
+    WEBHOOK_URL="$1" ROOT_DIR="$ROOT_DIR" $PHP_BIN -r '
+$u = getenv("WEBHOOK_URL");
+$root = getenv("ROOT_DIR");
+$secret = "";
+if (is_file($root."/config.php") && is_file($root."/src/Manager.php")) {
+    $cfg = @include $root."/config.php";
+    if (is_array($cfg)) {
+        require_once $root."/src/Manager.php";
+        if (class_exists("Manager") && method_exists("Manager","faximaWebhookSecret")) {
+            $secret = Manager::faximaWebhookSecret((string)($cfg["main_token"] ?? ""));
+        }
+    }
+}
+$hdr = "Content-Type: application/json\r\n";
+if ($secret !== "") $hdr .= "X-Telegram-Bot-Api-Secret-Token: ".$secret."\r\n";
+$ctx = stream_context_create(["http" => [
+    "method" => "POST", "header" => $hdr, "content" => "{}",
+    "timeout" => 10, "ignore_errors" => true,
+]]);
+@file_get_contents($u, false, $ctx);
+$code = 0;
+if (isset($http_response_header[0]) && preg_match("#HTTP/\S+\s+(\d+)#", $http_response_header[0], $m)) $code = (int)$m[1];
+echo $code;' 2>/dev/null || true
+}
+
+# Read one value out of config.php without booting the whole application.
+cfg_get() { # $1 = key -> value (empty if it cannot be read)
+    [ -f "$ROOT_DIR/config.php" ] || return 0
+    CFG_KEY="$1" CFG_FILE="$ROOT_DIR/config.php" "$PHP_BIN" -r '
+$c = @include getenv("CFG_FILE");
+if (is_array($c) && array_key_exists(getenv("CFG_KEY"), $c)) {
+    $v = $c[getenv("CFG_KEY")];
+    if (is_scalar($v)) echo (string)$v;
+    elseif (is_array($v)) echo json_encode($v);
+}' 2>/dev/null || true
+}
+
+# One PHP round-trip for everything that lives in the databases, so a broken
+# server is never probed more times than necessary.
+db_probe() {
+    CFG_FILE="$ROOT_DIR/config.php" "$PHP_BIN" -r '
+$c = @include getenv("CFG_FILE");
+if (!is_array($c)) { echo "cfg=missing\n"; exit; }
+$host = $c["db_host"] ?? "127.0.0.1"; $port = $c["db_port"] ?? 3306;
+try {
+    $pdo = new PDO("mysql:host=$host;port=$port",
+        (string)($c["db_user"] ?? ""), (string)($c["db_pass"] ?? ""),
+        [PDO::ATTR_TIMEOUT => 6, PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+    echo "db=OK\n";
+} catch (Throwable $e) {
+    echo "db=ERR: ".str_replace("\n", " ", $e->getMessage())."\n"; exit;
+}
+// CREATE DATABASE is what Manager::createDatabase needs for every new child bot
+$probe = "botsaz_probe_".getmypid();
+try {
+    $pdo->exec("CREATE DATABASE IF NOT EXISTS `$probe`");
+    $pdo->exec("DROP DATABASE `$probe`");
+    echo "createdb=OK\n";
+} catch (Throwable $e) { echo "createdb=ERR: ".str_replace("\n", " ", $e->getMessage())."\n"; }
+// Manager SQLite DB. Migrations live HERE (tools/install.php builds a Store on
+// manager_db), not in MySQL - reading them from MySQL would report "none" on a
+// perfectly healthy installation.
+$md = $c["manager_db"] ?? "";
+$s = null; $mstate = "missing\n";
+if ($md !== "" && is_file($md)) {
+    try { $s = new PDO("sqlite:$md", null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]); }
+    catch (Throwable $e) { $mstate = "ERR: ".str_replace("\n", " ", $e->getMessage())."\n"; }
+}
+if ($s === null) {
+    echo "mgrdb=".$mstate;
+    echo "mig=none\n";
+} else {
+    try { echo "mig=".(int)$s->query("SELECT COALESCE(MAX(version),0) FROM schema_versions")->fetchColumn()."\n"; }
+    catch (Throwable $e) { echo "mig=none\n"; }
+    try {
+        $all = (int)$s->query("SELECT COUNT(*) FROM bots")->fetchColumn();
+        $act = (int)$s->query("SELECT COUNT(*) FROM bots WHERE status = \"active\"")->fetchColumn();
+        echo "mgrdb=OK all=$all active=$act\n";
+    } catch (Throwable $e) { echo "mgrdb=ERR: ".str_replace("\n", " ", $e->getMessage())."\n"; }
+}
+' 2>/dev/null || true
+}
+
+# ---- result counters (globals: the installer banner reads them) ----
+HC_PASS=0; HC_WARN=0; HC_FAIL=0
+h_ok()   { HC_PASS=$((HC_PASS + 1)); printf '  [OK]   %s\n' "$1"; }
+h_warn() { HC_WARN=$((HC_WARN + 1)); printf '  [WARN] %s\n' "$1"; }
+h_fail() { HC_FAIL=$((HC_FAIL + 1)); printf '  [FAIL] %s\n' "$1"; }
+h_note() { printf '         %s\n' "$1"; }   # context only, not a result
+
+# ---------------------------------------------------------------
+# report_health - "is everything actually in place?"
+# Read-only: never writes, never prompts, never changes the system.
+# ---------------------------------------------------------------
+report_health() {
+    HC_PASS=0; HC_WARN=0; HC_FAIL=0
+    bot_up=0; tpl_ok=0; wh_ok=0; DOCROOT_OK=1
+    local cfg="$ROOT_DIR/config.php" base_url="" main_token="" host=""
+    local v code f m mods missing pv
+
+    printf '\n==========================================\n'
+    printf '  🔍  Health check - every part of the bot\n'
+    printf '==========================================\n'
+
+    # ---------- 1) PHP ----------
+    printf '\n  --- 1) PHP ---\n'
+    pv="$("$PHP_BIN" -r 'echo PHP_VERSION;' 2>/dev/null || true)"
+    if [ -z "$pv" ]; then
+        h_fail "PHP CLI not found - install php8.2-cli or fix PATH"
+    else
+        if "$PHP_BIN" -r 'exit(version_compare(PHP_VERSION,"8.2.0",">=")?0:1);' 2>/dev/null; then
+            h_ok "PHP $pv (project needs >= 8.2)"
+        else
+            h_fail "PHP $pv is older than the 8.2 this project needs"
+        fi
+        mods="$("$PHP_BIN" -m 2>/dev/null || true)"
+        missing=""
+        for m in pdo_mysql pdo_sqlite curl mbstring openssl json; do
+            printf '%s\n' "$mods" | grep -qi "^$m$" || missing="$missing $m"
+        done
+        if [ -z "$missing" ]; then
+            h_ok "extensions loaded: pdo_mysql pdo_sqlite curl mbstring openssl json"
+        else
+            h_fail "missing PHP extensions:$missing"
+        fi
+    fi
+
+    # ---------- 2) web server ----------
+    printf '\n  --- 2) Web server ---\n'
+    local ws=""
+    if has_cmd apache2ctl || has_cmd apache2; then ws="apache2"; fi
+    if [ -z "$ws" ] && has_cmd nginx; then ws="nginx"; fi
+    if [ -z "$ws" ]; then
+        h_fail "neither Apache nor nginx is installed - nothing can serve the webhook"
+    else
+        h_ok "$ws is installed"
+        if has_cmd systemctl && systemctl is-active --quiet "$ws" 2>/dev/null; then
+            h_ok "$ws service is running"
+        else
+            h_warn "$ws service is not running - sudo systemctl start $ws"
+        fi
+        if [ "$ws" = "apache2" ]; then
+            if a2enmod -l 2>/dev/null | grep -q "^rewrite$"; then
+                h_ok "mod_rewrite enabled (.htaccess protection is in force)"
+            else
+                h_fail "mod_rewrite is OFF - .htaccess is ignored and config.php/src/data become public"
+            fi
+        fi
+    fi
+
+    # ---------- 3) project files ----------
+    printf '\n  --- 3) Project files ---\n'
+    if [ -f "$cfg" ]; then h_ok "config.php exists"; else h_fail "config.php is missing - the bot cannot start"; fi
+    missing=""
+    for f in bot.php index.php src/Manager.php src/BotApi.php src/Store.php \
+             templates/faxima/config.php templates/mirza/config.php \
+             templates/faxima/index.php templates/mirza/index.php; do
+        [ -f "$ROOT_DIR/$f" ] || missing="$missing $f"
+    done
+    if [ -z "$missing" ]; then tpl_ok=1; h_ok "core files and both bot templates present"
+    else tpl_ok=0; h_fail "missing files:$missing (re-clone the repository)"; fi
+
+    if [ ! -d "$ROOT_DIR/data" ]; then
+        h_warn "data/ does not exist yet - it is created on first run"
+    elif [ "$(id -u)" -eq 0 ]; then
+        if has_cmd sudo && sudo -u www-data test -w "$ROOT_DIR/data" 2>/dev/null; then
+            h_ok "www-data can write data/ (logs + manager database)"
+        else
+            h_fail "www-data cannot write data/ - sudo chown -R www-data:www-data '$ROOT_DIR/data'"
+        fi
+    elif [ -w "$ROOT_DIR/data" ]; then
+        h_ok "data/ is writable"
+    else
+        h_fail "data/ is not writable - no logs and no manager database"
+    fi
+
+    # ---------- 4) config.php values ----------
+    printf '\n  --- 4) config.php values ---\n'
+    base_url="$(cfg_get base_url)"
+    main_token="$(cfg_get main_token)"
+    host="$(printf '%s' "$base_url" | sed -E 's#^[A-Za-z][A-Za-z0-9+.-]*://##' | cut -d/ -f1 | cut -d: -f1)"
+
+    if [ -z "$base_url" ]; then
+        h_fail "base_url is empty"
+    elif [ "${base_url#https://}" = "$base_url" ]; then
+        h_fail "base_url is '$base_url' - it must start with https:// (Telegram refuses http)"
+    else
+        h_ok "base_url = $base_url"
+    fi
+    if [ -z "$main_token" ] || ! printf '%s' "$main_token" | grep -Eq '^[0-9]+:[A-Za-z0-9_-]{30,}$'; then
+        h_fail "main_token is missing or still a placeholder - take it from @BotFather"
+    else
+        h_ok "main_token is a real Telegram token"
+    fi
+    v="$(cfg_get super_admins)"
+    if [ -z "$v" ] || [ "$v" = "[123456789]" ]; then
+        h_fail "super_admins is still [123456789] - nobody can control the bot"
+    else
+        h_ok "super_admins = $v"
+    fi
+    v="$(cfg_get secret_key)"
+    if [ -z "$v" ] || [ "$v" = "change-this-to-a-random-string-32bytes!" ]; then
+        h_fail "secret_key is still the default - child bot tokens are not encrypted"
+    else
+        h_ok "secret_key has been replaced with your own value"
+    fi
+
+    # ---------- 5) vhost / DocumentRoot ----------
+    printf '\n  --- 5) Vhost and DocumentRoot ---\n'
+    if [ -n "$host" ]; then
+        DOCROOT_OK=1
+        if docroot_reachable "$ROOT_DIR"; then
+            h_ok "$ROOT_DIR is reachable by the web-server user"
+        else
+            h_fail "DocumentRoot is not reachable - see the explanation printed above"
+        fi
+        if [ -d /etc/apache2/sites-enabled ]; then
+            drop_vhost_conflicts "$host" "/etc/apache2/sites-available/botsaz.conf"
+            if [ "${VHOST_CONFLICTS:-0}" = "0" ]; then
+                h_ok "no other vhost competes for $host"
+            else
+                h_fail "$VHOST_CONFLICTS other vhost(s) also claim $host - they win and cause 404"
+            fi
+        fi
+    else
+        h_warn "no hostname in base_url - cannot inspect the vhost"
+    fi
+
+    # ---------- 6) SSL ----------
+    printf '\n  --- 6) SSL certificate ---\n'
+    local cert="/etc/letsencrypt/live/$host/fullchain.pem" endd t_end days_left=-1
+    if [ -z "$host" ]; then
+        h_warn "no hostname - cannot check the certificate"
+    elif [ ! -f "$cert" ]; then
+        h_warn "no Let's Encrypt certificate for $host - certbot --apache -d $host --non-interactive"
+    else
+        endd="$(openssl x509 -enddate -noout -in "$cert" 2>/dev/null | cut -d= -f2 || true)"
+        t_end="$(date -d "$endd" +%s 2>/dev/null || true)"
+        if [ -n "$t_end" ]; then
+            days_left=$(( (t_end - $(date +%s)) / 86400 ))
+            if [ "$days_left" -lt 0 ]; then
+                h_fail "certificate for $host EXPIRED on $endd"
+            elif [ "$days_left" -lt 14 ]; then
+                h_warn "certificate for $host expires in $days_left day(s) - renew now"
+            else
+                h_ok "certificate for $host is valid for $days_left more days"
+            fi
+        else
+            h_ok "certificate for $host is present"
+        fi
+    fi
+
+    # ---------- 7) DNS ----------
+    printf '\n  --- 7) DNS ---\n'
+    local ip=""
+    if [ -z "$host" ]; then
+        h_warn "no hostname - cannot check DNS"
+    else
+        if has_cmd getent; then ip="$(getent ahostsv4 "$host" 2>/dev/null | awk '{print $1; exit}')" || ip=""; fi
+        if [ -z "$ip" ] && has_cmd dig; then ip="$(dig +short "$host" A 2>/dev/null | grep -E '^[0-9.]+$' | head -n1)" || ip=""; fi
+        if [ -z "$ip" ]; then
+            h_warn "$host does not resolve - Telegram will never reach the webhook"
+        elif printf '%s' "$ip" | grep -qE '^(127\.|0\.0\.0\.0)'; then
+            h_warn "$host resolves to $ip (local only) - a public webhook cannot use that"
+        else
+            h_ok "$host resolves to $ip"
+        fi
+    fi
+
+    # ---------- 8) databases ----------
+    printf '\n  --- 8) Database ---\n'
+    # ONE probe for all four answers: a server with a broken database must not
+    # be hit six times just to build one report.
+    local dbv migv crv mgv dbr
+    dbr="$(db_probe)"
+    dbv="$(printf '%s\n' "$dbr" | sed -n 's/^db=//p' | head -n1)"
+    migv="$(printf '%s\n' "$dbr" | sed -n 's/^mig=//p' | head -n1)"
+    crv="$(printf '%s\n' "$dbr" | sed -n 's/^createdb=//p' | head -n1)"
+    mgv="$(printf '%s\n' "$dbr" | sed -n 's/^mgrdb=//p' | head -n1)"
+    case "$dbv" in
+        OK) h_ok "MySQL connection works ($(cfg_get db_user)@$(cfg_get db_host))" ;;
+        missing) h_fail "config.php could not be read - cannot test the database" ;;
+        ERR:*) h_fail "MySQL connection failed: $dbv" ;;
+        *) h_fail "MySQL gave no answer at all (service down? wrong port?)" ;;
+    esac
+    if [ -n "$migv" ] && [ "$migv" != "none" ] && [ "$migv" != "0" ]; then
+        h_ok "migrations applied through v$migv"
+    else
+        h_warn "no migrations recorded - php tools/install.php"
+    fi
+    case "$crv" in
+        OK) h_ok "this account can CREATE DATABASE (child bots can be built)" ;;
+        ERR:*) h_fail "CREATE DATABASE denied: $crv" ;;
+        *) h_warn "could not test CREATE DATABASE" ;;
+    esac
+    case "$mgv" in
+        OK*) h_ok "manager database: ${mgv#OK }" ;;
+        missing) h_warn "manager database not created yet - php tools/install.php" ;;
+        ERR:*) h_fail "manager database error: $mgv" ;;
+        *) h_warn "manager database could not be read" ;;
+    esac
+
+    # ---------- 9) Telegram main bot ----------
+    printf '\n  --- 9) Telegram main bot ---\n'
+    if [ -z "$main_token" ] || ! printf '%s' "$main_token" | grep -Eq '^[0-9]+:[A-Za-z0-9_-]{30,}$'; then
+        h_warn "skipped - main_token is not usable yet"
+    else
+        v="$(TG_TOKEN="$main_token" "$PHP_BIN" -r '
+$t = getenv("TG_TOKEN");
+$api = "https://api.telegram.org/bot".$t."/";
+$me = @json_decode((string)@file_get_contents($api."getMe"), true);
+if (empty($me["ok"])) { echo "ME=ERR:".($me["description"] ?? "no answer from api.telegram.org"); exit; }
+echo "ME=OK @".$me["result"]["username"]."\n";
+$wh = @json_decode((string)@file_get_contents($api."getWebhookInfo"), true);
+if (empty($wh["ok"])) { echo "WH=ERR"; exit; }
+$r = $wh["result"];
+echo "WHURL=".($r["url"] ?? "")."\n";
+echo "WHPENDING=".(int)($r["pending_update_count"] ?? 0)."\n";
+echo "WHERRDATE=".(int)($r["last_error_date"] ?? 0)."\n";
+echo "WHERR=".($r["last_error_message"] ?? "")."\n";' 2>/dev/null || true)"
+
+        local meline whurl pend wherrd wherr expected
+        meline="$(printf '%s\n' "$v" | sed -n 's/^ME=//p')"
+        whurl="$(printf '%s\n' "$v" | sed -n 's/^WHURL=//p')"
+        pend="$(printf '%s\n' "$v" | sed -n 's/^WHPENDING=//p')"
+        wherrd="$(printf '%s\n' "$v" | sed -n 's/^WHERRDATE=//p')"
+        wherr="$(printf '%s\n' "$v" | sed -n 's/^WHERR=//p')"
+
+        case "$meline" in
+            OK@*)  bot_up=1; h_ok "bot is alive ${meline#OK}" ;;
+            ERR:*) bot_up=0; h_fail "Telegram rejected the token: ${meline#ERR:}" ;;
+            *)     bot_up=0; h_fail "api.telegram.org unreachable - cannot verify the bot" ;;
+        esac
+
+        if [ -z "$whurl" ]; then
+            h_fail "no webhook registered - php tools/set_webhook.php"
+        else
+            h_ok "webhook registered: $whurl"
+        fi
+        if [ -n "$wherr" ]; then
+            h_fail "Telegram last error: $wherr"
+            [ -n "$wherrd" ] && h_note "at $(date -d "@$wherrd" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "$wherrd")"
+        else
+            h_ok "Telegram reports no webhook error"
+        fi
+        if [ -n "$pend" ] && [ "$pend" -gt 0 ] 2>/dev/null; then
+            h_warn "$pend update(s) queued - the bot is not consuming them"
+        else
+            h_ok "no updates waiting"
+        fi
+
+        # ...and the question Telegram actually asks: does that URL answer?
+        expected="${base_url%/}/bot.php"
+        if [ -z "$base_url" ]; then
+            h_warn "cannot probe the webhook URL without base_url"
+        else
+            code="$(wh_probe "$expected")"
+            case "$code" in
+                200)      wh_ok=1; h_ok "webhook answers HTTP 200 at $expected" ;;
+                403)      wh_ok=1; h_ok "webhook answers HTTP 403 (secret rejected, route is alive) at $expected"
+                          h_note "a 403 means Apache+PHP+path all work; only the secret token differs" ;;
+                404)
+                    wh_ok=0
+                    h_fail "HTTP 404 at $expected - Telegram gets exactly this and drops every update"
+                    local origin origin_code
+                    origin="$(printf '%s' "${BASE_URL:-}" | sed -E 's#^(https?://[^/]+).*#\1#')"
+                    origin="${origin:-$(printf '%s' "$expected" | sed -E 's#^(https?://[^/]+).*#\1#')}"
+                    origin_code="$(wh_probe "$origin/bot.php")"
+                    if [ "$origin_code" = "200" ] || [ "$origin_code" = "403" ]; then
+                        h_note "$origin/bot.php answers (HTTP $origin_code), so the PATH in base_url is wrong:"
+                        h_note "set 'base_url' => '$origin' in config.php, then php tools/set_webhook.php"
+                    else
+                        h_note "$origin/bot.php answered HTTP ${origin_code:-0} too - no vhost serves this project:"
+                        h_note "apachectl -S   and   grep -n DocumentRoot /etc/apache2/sites-enabled/*.conf"
+                    fi
+                    ;;
+                0)        wh_ok=0; h_fail "nothing answers $expected (DNS / vhost / web server down)" ;;
+                500|502|503) wh_ok=0; h_fail "HTTP $code at $expected - PHP is failing, see the log report below" ;;
+                *)        wh_ok=0; h_warn "HTTP $code at $expected" ;;
+            esac
+            if [ -n "$whurl" ] && [ "$whurl" != "$expected" ]; then
+                h_warn "Telegram has '$whurl' but config expects '$expected' - re-run php tools/set_webhook.php"
+            fi
+        fi
+    fi
+
+    # ---------- 10) is anything private leaking? ----------
+    printf '\n  --- 10) Private files exposed to the internet ---\n'
+    if [ "$wh_ok" = "1" ] && [ -n "$base_url" ]; then
+        for f in "config.php" "src/" "tools/" "data/"; do
+            code="$(wh_probe "${base_url%/}/$f")"
+            case "$code" in
+                200) h_fail "PUBLIC: ${base_url%/}/$f returns 200 - the file is downloadable!" ;;
+                0)   h_warn "could not test ${base_url%/}/$f (no answer)" ;;
+                *)   h_ok "blocked: /$f -> HTTP $code" ;;
+            esac
+        done
+    else
+        h_warn "skipped - the site has to answer before this means anything"
+    fi
+
+    # ---------- 11) child bots ----------
+    printf '\n  --- 11) Child bots ---\n'
+    local allb actb
+    allb="$(printf '%s\n' "$dbr" | sed -n 's/^mgrdb=OK all=\([0-9]*\).*/\1/p')"
+    actb="$(printf '%s\n' "$dbr" | sed -n 's/^mgrdb=OK all=[0-9]* active=\([0-9]*\).*/\1/p')"
+    if [ -z "$allb" ]; then
+        h_warn "cannot list child bots (manager database unreadable)"
+    elif [ "$allb" = "0" ]; then
+        h_ok "no child bots created yet - nothing else to check here"
+    else
+        h_ok "$allb child bot(s) registered, $actb active"
+        # every active child must have a webhook and a token that still works
+        local child_bad=0 child_shown=0
+        while IFS='|' read -r cf ct cu cw; do
+            [ -n "$cf" ] || continue
+            child_shown=$((child_shown + 1))
+            if [ -z "$cw" ]; then
+                h_warn "$cf ($ct): no webhook URL stored"
+                child_bad=$((child_bad + 1))
+                continue
+            fi
+            code="$(wh_probe "$cw")"
+            case "$code" in
+                200|403) : ;;
+                404)
+                    h_fail "$cf ($ct): webhook 404 at $cw"
+                    child_bad=$((child_bad + 1)) ;;
+                0)
+                    h_fail "$cf ($ct): webhook does not answer at $cw"
+                    child_bad=$((child_bad + 1)) ;;
+                *)
+                    h_warn "$cf ($ct): webhook answered HTTP $code at $cw"
+                    child_bad=$((child_bad + 1)) ;;
+            esac
+        done <<CHILDREN
+$(db_probe_children)
+CHILDREN
+        if [ "$child_bad" = "0" ] && [ "$child_shown" -gt 0 ]; then
+            h_ok "all $child_shown checked child bot webhooks answer"
+        fi
+    fi
+
+    # ---------- summary ----------
+    printf '\n==========================================\n'
+    if [ "$HC_FAIL" = "0" ] && [ "$HC_WARN" = "0" ]; then
+        printf '  ✅ All %d checks passed.\n' "$HC_PASS"
+    elif [ "$HC_FAIL" = "0" ]; then
+        printf '  ✅ %d OK, %d warning(s), no failures.\n' "$HC_PASS" "$HC_WARN"
+    else
+        printf '  ❌ %d OK, %d warning(s), %d FAILURE(S).\n' "$HC_PASS" "$HC_WARN" "$HC_FAIL"
+        printf '     Fix the [FAIL] lines above, then re-run:\n'
+        printf '       bash tools/install.sh --check\n'
+    fi
+    printf '==========================================\n'
+    return 0
+}
+
+# folder|type|username|webhook_url for every active child bot (one per line)
+db_probe_children() {
+    CFG_FILE="$ROOT_DIR/config.php" "$PHP_BIN" -r '
+$c = @include getenv("CFG_FILE");
+if (!is_array($c)) exit;
+$md = $c["manager_db"] ?? "";
+if ($md === "" || !is_file($md)) exit;
+try {
+    $s = new PDO("sqlite:$md", null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+    foreach ($s->query("SELECT folder, type, bot_username, webhook_url FROM bots WHERE status = \"active\" ORDER BY id") as $r) {
+        echo $r["folder"]."|".$r["type"]."|".$r["bot_username"]."|".$r["webhook_url"]."\n";
+    }
+} catch (Throwable $e) {}' 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------
+# report_logs - "what went wrong, from every place it can be written"
+# Read-only. Only problems are shown; INFO/DEBUG traffic is never printed.
+#   $1 = how many days back to look (default 7)
+# ---------------------------------------------------------------
+report_logs() {
+    local days="${1:-7}" n total=0 lines f src
+    local any_log=0
+
+    printf '\n==========================================\n'
+    printf '  📜  Errors in the last %s days\n' "$days"
+    printf '==========================================\n'
+
+    # ---- [1] the application's own log (src/Logger.php -> data/logs/) ----
+    printf '\n  [1] Application log   data/logs/*.log (last %s days)\n' "$days"
+    if ! ls "$ROOT_DIR/data/logs"/*.log >/dev/null 2>&1; then
+        printf '      (no log file - the bot has never logged anything)\n'
+        any_log=0
+    else
+        any_log=1
+        # file mtime is the honest filter here: the file name is a date, and
+        # Logger only keeps the newest 10 of them anyway
+        lines="$(find "$ROOT_DIR/data/logs" -maxdepth 1 -name '*.log' -mtime "-$days" \
+                     -exec grep -hE '\] \[(ERROR|WARN|CRITICAL|FATAL)\]' {} + 2>/dev/null | tail -n 40 || true)"
+        n="$(printf '%s\n' "$lines" | grep -c . 2>/dev/null || true)"
+        n="${n:-0}"
+        if [ "$n" -gt 0 ] 2>/dev/null; then
+            printf '%s\n' "$lines" | sed 's/^/      /'
+            total=$((total + n))
+        else
+            printf '      (nothing at WARN/ERROR level in the last %s days)\n' "$days"
+        fi
+    fi
+
+    # ---- [2] web server error log ----
+    printf '\n  [2] Web server errors\n'
+    local found_ws=0
+    for f in /var/log/apache2/error.log /var/log/nginx/error.log /var/log/httpd/error_log; do
+        [ -r "$f" ] || continue
+        found_ws=1
+        any_log=1
+        src="$(basename "$f")"
+        lines="$(grep -aE '\[[a-z_0-9]+:(error|warn|crit|alert|emerg)\]|PHP (Fatal error|Parse error|Warning)' "$f" 2>/dev/null | tail -n 30 || true)"
+        n="$(printf '%s\n' "$lines" | grep -c . 2>/dev/null || true)"
+        n="${n:-0}"
+        if [ "$n" -gt 0 ] 2>/dev/null; then
+            printf '      %s:\n' "$src"
+            printf '%s\n' "$lines" | sed 's/^/        /'
+            total=$((total + n))
+        else
+            printf '      %s: clean\n' "$src"
+        fi
+    done
+    [ "$found_ws" = "0" ] && printf '      (no readable web-server error log)\n'
+
+    # ---- [3] deliveries Telegram made that came back wrong ----
+    printf '\n  [3] Webhook requests that failed (access log)\n'
+    local found_acc=0
+    for f in /var/log/apache2/access.log /var/log/nginx/access.log; do
+        [ -r "$f" ] || continue
+        found_acc=1
+        any_log=1
+        src="$(basename "$f")"
+        lines="$(grep -aE '(bot\.php|/bots/)[^"]*" (4|5)[0-9]{2}' "$f" 2>/dev/null | tail -n 30 || true)"
+        n="$(printf '%s\n' "$lines" | grep -c . 2>/dev/null || true)"
+        n="${n:-0}"
+        if [ "$n" -gt 0 ] 2>/dev/null; then
+            printf '      %s - Telegram reached us but we answered wrongly:\n' "$src"
+            printf '%s\n' "$lines" | sed 's/^/        /'
+            total=$((total + n))
+        else
+            printf '      %s: every webhook delivery answered 2xx/3xx\n' "$src"
+        fi
+    done
+    [ "$found_acc" = "0" ] && printf '      (no readable access log)\n'
+
+    # ---- [4] PHP's own error_log ----
+    printf '\n  [4] PHP error_log   (last 20 lines)\n'
+    local pe
+    pe="$("$PHP_BIN" -r 'echo (string)ini_get("error_log");' 2>/dev/null || true)"
+    if [ -n "$pe" ] && [ -r "$pe" ] && [ -s "$pe" ]; then
+        any_log=1
+        lines="$(tail -n 20 "$pe")"
+        printf '%s\n' "$lines" | sed 's/^/      /'
+        n="$(printf '%s\n' "$lines" | grep -c . 2>/dev/null || true)"
+        total=$((total + ${n:-0}))
+    else
+        printf '      (empty or unset)\n'
+    fi
+
+    # ---- [5] what Telegram itself saw ----
+    printf '\n  [5] Telegram webhook status\n'
+    local tok wi url pend edate errmsg
+    tok="$(cfg_get main_token)"
+    if [ -z "$tok" ] || ! printf '%s' "$tok" | grep -Eq '^[0-9]+:[A-Za-z0-9_-]{30,}$'; then
+        printf '      (no usable main_token in config.php)\n'
+    else
+        wi="$(TG_TOKEN="$tok" "$PHP_BIN" -r '
+$t = getenv("TG_TOKEN");
+$j = @json_decode((string)@file_get_contents("https://api.telegram.org/bot".$t."/getWebhookInfo"), true);
+if (empty($j["ok"])) { echo "OFFLINE"; exit; }
+$r = $j["result"];
+echo "url=".($r["url"] ?? "")."\n";
+echo "pending=".(int)($r["pending_update_count"] ?? 0)."\n";
+echo "edate=".(int)($r["last_error_date"] ?? 0)."\n";
+echo "msg=".($r["last_error_message"] ?? "")."\n";' 2>/dev/null || true)"
+        if [ "$wi" = "OFFLINE" ]; then
+            printf '      api.telegram.org did not answer\n'
+        else
+            url="$(printf '%s\n' "$wi" | sed -n 's/^url=//p')"
+            pend="$(printf '%s\n' "$wi" | sed -n 's/^pending=//p')"
+            edate="$(printf '%s\n' "$wi" | sed -n 's/^edate=//p')"
+            errmsg="$(printf '%s\n' "$wi" | sed -n 's/^msg=//p')"
+            any_log=1
+            printf '      url     : %s\n' "${url:-(none)}"
+            printf '      queued  : %s\n' "${pend:-0}"
+            if [ -n "$errmsg" ]; then
+                printf '      last err: %s\n' "$errmsg"
+                [ -n "$edate" ] && printf '      at      : %s\n' "$(date -d "@$edate" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "$edate")"
+                total=$((total + 1))
+            else
+                printf '      last err: none - Telegram has no complaint\n'
+            fi
+        fi
+    fi
+
+    # ---- summary ----
+    printf '\n==========================================\n'
+    if [ "$total" = "0" ]; then
+        if [ "$any_log" = "0" ]; then
+            printf '  ⚠️  No logs at all - this bot has never received an update.\n'
+            printf '     Check the webhook with:  bash tools/install.sh --check\n'
+        else
+            printf '  ✅ No errors found in the last %s days.\n' "$days"
+        fi
+    else
+        printf '  ⚠️  %s error/warning line(s) above - start with the [FAIL] items\n' "$total"
+        printf '     from the health check, then re-read this report.\n'
+    fi
+    printf '==========================================\n'
+    return 0
+}
+
+# ==================================================================
+# MODES - the installer doubles as the post-install checker
+#   bash tools/install.sh                 full install (ends with both reports)
+#   bash tools/install.sh --check         read-only health check + error logs
+#   bash tools/install.sh --logs          only the error logs
+#   bash tools/install.sh --logs --days=3 only the last 3 days
+# ==================================================================
+MODE="install"
+LOG_DAYS=7
+for _arg in "$@"; do
+    case "$_arg" in
+        --check|check)        MODE="check" ;;
+        --logs|--log|logs)    MODE="logs" ;;
+        --days=*)             LOG_DAYS="${_arg#--days=}" ;;
+        -h|--help)
+            echo "Usage: bash tools/install.sh [--check | --logs [--days=N]]"
+            echo ""
+            echo "  (no option)   install / update everything"
+            echo "  --check       verify every part of the system, change nothing"
+            echo "  --logs        show every error the bot logged, change nothing"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $_arg"
+            echo "Usage: bash tools/install.sh [--check | --logs [--days=N]]"
+            exit 2
+            ;;
+    esac
+done
+unset _arg
+
+if [ "$MODE" = "check" ] || [ "$MODE" = "logs" ]; then
+    # A report must never be cut short by one failing probe, and it must never
+    # ask a question - it is meant to be run on a server that is already down.
+    set +e
+    if [ "$MODE" = "check" ]; then
+        report_health
+        report_logs "$LOG_DAYS"
+        if [ "$HC_FAIL" = "0" ]; then exit 0; else exit 1; fi
+    fi
+    report_logs "$LOG_DAYS"
+    exit 0
+fi
+
 # ---------- 0) fresh server preflight ----------
 # Think about a brand new Debian/Ubuntu box: no base tools, no web server, no
 # database - and the steps below assume all three exist. So they go first, one
@@ -449,21 +1203,49 @@ if ! [[ "$SUPER_ADMIN" =~ ^[0-9]{5,}$ ]]; then
 fi
 
 # 4) base URL
+# This used to only print a warning for a non-https address and carry on, so an
+# install could finish "green" while Telegram could never deliver a single
+# update (it later reports "Wrong response from the webhook: 404"). Every child
+# bot's webhook, the certificate request and the vhost are all derived from this
+# one value, so it has to be right before anything is built from it.
 echo ""
 echo "========================================="
 echo "  🌐 Project base URL (base_url)"
 echo "========================================="
-printf '    URL (e.g. https://domain.com/botsaz):\n'
-read -r -p "    > " BASE_URL
-if [ -z "$BASE_URL" ]; then
-    BASE_URL="http://localhost/botsaz-faxima"
-    echo "   ⚠️  Using the default: $BASE_URL"
-fi
-BASE_URL="$(echo "$BASE_URL" | sed 's:/*$::')"
-if ! [[ "$BASE_URL" =~ ^https:// ]]; then
-    echo "   ⚠️  The URL is not https - Telegram rejects http webhooks and the bot will NOT run!"
-    echo "   (If you have a domain + SSL, make sure to use exactly that.)"
-fi
+printf '    Full public address of this project, e.g.\n'
+printf '        https://example.com\n'
+printf '    (no trailing slash; add a path only if you really serve it under one)\n'
+while true; do
+    read -r -p "    > " BASE_URL
+    BASE_URL="$(printf '%s' "$BASE_URL" | sed 's:/*$::')"
+    if [ -z "$BASE_URL" ]; then
+        echo "   [X] The address is required - continue without it is not possible."
+        continue
+    fi
+    if [ "$BASE_URL" = "${BASE_URL#https://}" ]; then
+        if [ "$BASE_URL" != "${BASE_URL#http://}" ]; then
+            # http:// is only tolerable on this machine itself, where no real
+            # Telegram webhook is expected to work anyway (README: use ngrok)
+            _hostpart="$(printf '%s' "$BASE_URL" | sed -E 's#^https?://##' | cut -d/ -f1 | cut -d: -f1)"
+            case "$_hostpart" in
+                localhost|127.0.0.1|::1)
+                    echo "   ⚠️  Local address - a real Telegram webhook needs a public https domain."
+                    break
+                    ;;
+            esac
+            echo "   [X] http:// - Telegram rejects http webhooks, the bot would never run."
+            echo "       Use https:// instead (the next step issues the certificate),"
+            echo "       or on a local machine use http://localhost/..."
+            continue
+        fi
+        _hostpart="$(printf '%s' "$BASE_URL" | sed -E 's#^[A-Za-z][A-Za-z0-9+.-]*://##' | cut -d/ -f1 | cut -d: -f1)"
+        echo "   [X] Missing the scheme - write the whole address, starting with https://"
+        echo "       example: https://${_hostpart}"
+        continue
+    fi
+    break
+done
+echo "   ✔ $BASE_URL"
 
 # ---------- 4b) SSL certificate for the domain found in base_url ----------
 # Telegram only accepts a webhook over https, so as soon as a real domain is
@@ -543,6 +1325,11 @@ echo ""
 echo "==========================================="
 echo "  🌍 Web server vhost + SSL"
 echo "==========================================="
+
+# DocumentRoot reachability and ServerName conflicts are decided by the shared
+# helpers at the top of this file (docroot_reachable / drop_vhost_conflicts), so
+# that `install.sh --check` can ask exactly the same questions months later.
+
 configure_vhost() {
     local host cert_ok=0 fpm_sock="" s
     host="$(printf '%s' "$BASE_URL" | sed -E 's#^[A-Za-z][A-Za-z0-9+.-]*://##' | cut -d/ -f1 | cut -d: -f1)"
@@ -570,6 +1357,11 @@ configure_vhost() {
         if ! ask_yes "   Create the Apache vhost for $host -> $ROOT_DIR ?"; then
             echo "   vhost skipped"
             return 0
+        fi
+        # a vhost pointing at an unreachable directory is worse than none:
+        # Apache starts, reports success, and 403s every request
+        if ! docroot_reachable "$ROOT_DIR"; then
+            echo "   ⚠️  Writing the vhost anyway - it cannot answer until the path above is fixed."
         fi
         $SUDO mkdir -p /etc/apache2/sites-available 2>/dev/null || true
         {
@@ -605,6 +1397,9 @@ configure_vhost() {
             $SUDO a2enmod ssl rewrite headers >/dev/null 2>&1 || true
         fi
         if has_cmd a2ensite; then $SUDO a2ensite botsaz >/dev/null 2>&1 || true; fi
+        # before testing/reloading: any duplicate ServerName must go away now,
+        # otherwise Apache keeps answering from the other DocumentRoot
+        drop_vhost_conflicts "$host" "$ap_conf" apply
         # config test FIRST - a bad vhost must never take a running server down
         local ap_out="" ap_rc=1
         if has_cmd apache2ctl; then
@@ -891,42 +1686,22 @@ echo "✅ Setting the webhook..."
 WEBHOOK_URL="${BASE_URL}/bot.php"
 $PHP_BIN "$ROOT_DIR/tools/set_webhook.php" "$WEBHOOK_URL" || echo "⚠️  Webhook not set (the URL is probably not https/public). Set it manually later."
 
-# 9) template files check
-echo ""
-echo "✅ Checking template files..."
-tpl_ok=1
-for f in "templates/faxima/config.php" "templates/mirza/config.php" "templates/faxima/index.php" "templates/mirza/index.php"; do
-    if [ -f "$ROOT_DIR/$f" ]; then
-        echo "   ✔ $f"
-    else
-        echo "   ❌ $f not found!"
-        tpl_ok=0
-    fi
-done
-
-# 10) final check: is the bot really running?
-echo ""
-echo "✅ Final bot check..."
-MAIN_TOKEN="$MAIN_TOKEN" EXPECT_URL="$WEBHOOK_URL" $PHP_BIN -r '
-$tok = (string) getenv("MAIN_TOKEN");
-$expect = (string) getenv("EXPECT_URL");
-$api = "https://api.telegram.org/bot".$tok."/";
-$me = @json_decode((string) @file_get_contents($api."getMe"), true);
-if (empty($me["ok"])) { echo "BOT_DOWN:token\n"; exit(2); }
-$wh = @json_decode((string) @file_get_contents($api."getWebhookInfo"), true);
-$url = (string) ($wh["result"]["url"] ?? "");
-if ($url === "") { echo "BOT_DOWN:webhook\n"; exit(3); }
-echo "BOT_UP @".$me["result"]["username"]." webhook=".$url."\n";' && bot_up=1 || bot_up=0
+# 9) verify EVERYTHING and show every error the bot has produced
+# These are the same two reports `bash tools/install.sh --check` prints later, so
+# what you read here is exactly what you can re-run at any moment afterwards.
+report_health
+report_logs 7
 
 echo ""
 echo "========================================="
-if [ "$bot_up" = "1" ] && [ "$tpl_ok" = "1" ]; then
+if [ "$HC_FAIL" = "0" ] && [ "$bot_up" = "1" ]; then
     echo "  ✅ Install finished and the bot is running!"
 else
-    echo "  ⚠️  Install finished but the bot is not up yet:"
-    [ "$bot_up" != "1" ] && echo "     - Webhook not set: fix https/domain first, then run:"
+    echo "  ⚠️  Install finished - now fix the [FAIL] lines printed above."
+    [ "$bot_up" != "1" ] && echo "     - The main bot was not verified. Once config.php is correct run:"
     [ "$bot_up" != "1" ] && echo "       php tools/set_webhook.php ${BASE_URL}/bot.php"
-    [ "$tpl_ok" != "1" ] && echo "     - Template files are incomplete (clone the repo fully)."
+    [ "$HC_FAIL" != "0" ] && echo "     - Repeat this whole report at any time with:"
+    [ "$HC_FAIL" != "0" ] && echo "       bash tools/install.sh --check"
 fi
 echo "========================================="
 echo ""
