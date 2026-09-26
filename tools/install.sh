@@ -315,6 +315,186 @@ issue_ssl() {
 }
 issue_ssl
 
+# ---------- 5b) web server vhost + SSL (Apache or nginx) ----------
+# One vhost serves EVERY bot: Manager::webhookUrl() builds child webhooks as
+#     <base_url>/bots/<folder>/<entry>
+# so the main bot and every faxima/mirza child hang off this same domain and
+# this same DocumentRoot. Configure it once and all of them can deliver
+# commands to Telegram.
+#
+# AllowOverride All and mod_rewrite are not cosmetic here - the project's
+# .htaccess files are what block /config.php, /src, /tools, /templates and
+# /data. Without them the database file and the source code become publicly
+# downloadable, and the child webhook paths would 404.
+echo ""
+echo "==========================================="
+echo "  🌍 Web server vhost + SSL"
+echo "==========================================="
+configure_vhost() {
+    local host cert_ok=0 fpm_sock="" s
+    host="$(printf '%s' "$BASE_URL" | sed -E 's#^[A-Za-z][A-Za-z0-9+.-]*://##' | cut -d/ -f1 | cut -d: -f1)"
+    [ -z "$host" ] && host="localhost"
+
+    if [ -f "/etc/letsencrypt/live/$host/fullchain.pem" ] && [ -f "/etc/letsencrypt/live/$host/privkey.pem" ]; then
+        cert_ok=1
+        echo "   ✔ Let's Encrypt certificate found for $host"
+    else
+        echo "   ⚠️  No certificate for $host yet - only the HTTP block will be written."
+        echo "      Re-run this installer once SSL succeeds to add the HTTPS block."
+    fi
+
+    # nginx must be pointed at the real php-fpm socket; the path differs per version
+    for s in /run/php/*.sock /var/run/php/*.sock; do
+        if [ -S "$s" ]; then fpm_sock="$s"; break; fi
+    done
+
+    if has_cmd apache2 || has_cmd httpd; then
+        local ap_conf="/etc/apache2/sites-available/botsaz.conf"
+        if [ -f "$ap_conf" ]; then
+            echo "   ✔ Apache vhost already exists ($ap_conf) - left untouched."
+            return 0
+        fi
+        if ! ask_yes "   Create the Apache vhost for $host -> $ROOT_DIR ?"; then
+            echo "   vhost skipped"
+            return 0
+        fi
+        $SUDO mkdir -p /etc/apache2/sites-available 2>/dev/null || true
+        {
+            echo "<VirtualHost *:80>"
+            echo "    ServerName $host"
+            echo "    DocumentRoot \"$ROOT_DIR\""
+            echo "    <Directory \"$ROOT_DIR\">"
+            echo "        Options Indexes FollowSymLinks"
+            echo "        AllowOverride All"
+            echo "        Require all granted"
+            echo "    </Directory>"
+            echo "</VirtualHost>"
+        } | $SUDO tee "$ap_conf" > /dev/null
+        if [ "$cert_ok" = "1" ]; then
+            {
+                echo "<VirtualHost *:443>"
+                echo "    ServerName $host"
+                echo "    DocumentRoot \"$ROOT_DIR\""
+                echo "    SSLEngine on"
+                echo "    SSLCertificateFile      /etc/letsencrypt/live/$host/fullchain.pem"
+                echo "    SSLCertificateKeyFile   /etc/letsencrypt/live/$host/privkey.pem"
+                echo "    SSLCertificateChainFile /etc/letsencrypt/live/$host/chain.pem"
+                echo "    <Directory \"$ROOT_DIR\">"
+                echo "        Options Indexes FollowSymLinks"
+                echo "        AllowOverride All"
+                echo "        Require all granted"
+                echo "    </Directory>"
+                echo "</VirtualHost>"
+            } | $SUDO tee -a "$ap_conf" > /dev/null
+        fi
+        if has_cmd a2enmod; then
+            # rewrite powers .htaccess, ssl powers :443
+            $SUDO a2enmod ssl rewrite headers >/dev/null 2>&1 || true
+        fi
+        if has_cmd a2ensite; then $SUDO a2ensite botsaz >/dev/null 2>&1 || true; fi
+        # config test FIRST - a bad vhost must never take a running server down
+        local ap_out="" ap_rc=1
+        if has_cmd apache2ctl; then
+            ap_out="$($SUDO apache2ctl configtest 2>&1)" && ap_rc=0 || ap_rc=1
+        elif has_cmd apachectl; then
+            ap_out="$($SUDO apachectl configtest 2>&1)" && ap_rc=0 || ap_rc=1
+        else
+            ap_out="apache2ctl/apachectl not found"
+        fi
+        if [ "$ap_rc" = "0" ]; then
+            if $SUDO systemctl reload apache2 >/dev/null 2>&1 \
+                || $SUDO systemctl reload httpd >/dev/null 2>&1 \
+                || $SUDO service apache2 reload >/dev/null 2>&1; then
+                echo "   ✔ Apache vhost installed and reloaded"
+            else
+                echo "   ⚠️  Vhost written but no reload command worked - reload Apache manually."
+            fi
+        else
+            echo "   ⚠️  Apache config test failed - undoing the vhost so the server keeps running:"
+            printf '%s\n' "$ap_out" | head -n 5
+            if has_cmd a2dissite; then $SUDO a2dissite -f botsaz >/dev/null 2>&1 || true; fi
+            $SUDO rm -f "$ap_conf"
+        fi
+        return 0
+    fi
+
+    if has_cmd nginx; then
+        local ng_conf="/etc/nginx/sites-available/botsaz.conf"
+        if [ -f "$ng_conf" ]; then
+            echo "   ✔ nginx vhost already exists ($ng_conf) - left untouched."
+            return 0
+        fi
+        if ! ask_yes "   Create the nginx vhost for $host -> $ROOT_DIR ?"; then
+            echo "   vhost skipped"
+            return 0
+        fi
+        if [ -z "$fpm_sock" ]; then
+            echo "   ⚠️  No PHP-FPM socket under /run/php - install php-fpm or PHP will not execute."
+        fi
+        $SUDO mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled 2>/dev/null || true
+
+        # the application block is reused for :80 (no cert yet) and :443 (cert present)
+        _nginx_app() {
+            echo "    root \"$ROOT_DIR\";"
+            echo "    index index.php index.html;"
+            echo "    client_max_body_size 64m;"
+            echo "    location / { try_files \$uri \$uri/ /index.php?\$query_string; }"
+            if [ -n "$fpm_sock" ]; then
+                echo "    location ~ \.php\$ {"
+                echo "        include snippets/fastcgi-php.conf;"
+                echo "        fastcgi_pass unix:$fpm_sock;"
+                echo "    }"
+            fi
+            echo "    location ~ /\.ht { deny all; }"
+        }
+        {
+            echo "# Managed by botsaz install.sh - do not edit by hand"
+            if [ "$cert_ok" = "1" ]; then
+                echo "server {"
+                echo "    listen 80;"
+                echo "    listen [::]:80;"
+                echo "    server_name $host;"
+                echo "    return 301 https://$host\$request_uri;"
+                echo "}"
+                echo "server {"
+                echo "    listen 443 ssl;"
+                echo "    listen [::]:443 ssl;"
+                echo "    server_name $host;"
+                echo "    ssl_certificate     /etc/letsencrypt/live/$host/fullchain.pem;"
+                echo "    ssl_certificate_key /etc/letsencrypt/live/$host/privkey.pem;"
+                _nginx_app
+                echo "}"
+            else
+                echo "server {"
+                echo "    listen 80;"
+                echo "    listen [::]:80;"
+                echo "    server_name $host;"
+                _nginx_app
+                echo "}"
+            fi
+        } | $SUDO tee "$ng_conf" > /dev/null
+        $SUDO ln -sf "$ng_conf" /etc/nginx/sites-enabled/botsaz.conf 2>/dev/null || true
+        # never reload nginx on a broken config - roll back instead
+        local ng_out="" ng_rc=1
+        ng_out="$($SUDO nginx -t 2>&1)" && ng_rc=0 || ng_rc=1
+        if [ "$ng_rc" = "0" ]; then
+            if $SUDO systemctl reload nginx >/dev/null 2>&1 || $SUDO service nginx reload >/dev/null 2>&1; then
+                echo "   ✔ nginx vhost installed and reloaded"
+            else
+                echo "   ⚠️  Vhost written but nginx could not be reloaded - reload it manually."
+            fi
+        else
+            echo "   ⚠️  nginx config test failed - undoing the vhost so the server keeps running:"
+            printf '%s\n' "$ng_out" | head -n 5
+            $SUDO rm -f /etc/nginx/sites-enabled/botsaz.conf "$ng_conf"
+        fi
+        return 0
+    fi
+
+    echo "   ⚠️  Neither Apache nor nginx is installed - skipping the vhost."
+}
+configure_vhost
+
 # 5) MySQL credentials + real connection / CREATE DATABASE test
 echo ""
 echo "========================================="
