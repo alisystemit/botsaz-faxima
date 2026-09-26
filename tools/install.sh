@@ -75,6 +75,102 @@ apt_install() {
     hash -r 2>/dev/null || true
 }
 
+# ---------- 0) fresh server preflight ----------
+# Think about a brand new Debian/Ubuntu box: no base tools, no web server, no
+# database - and the steps below assume all three exist. So they go first, one
+# question at a time. On an already-configured server every check here finds
+# what it needs and this block changes nothing.
+preflight_fresh_server() {
+    echo "✅ Fresh-server preflight (base packages, web server, database)..."
+
+    if ! has_cmd apt-get; then
+        echo "   ⚠️  apt-get not found - this installer targets Debian/Ubuntu."
+        echo "      Install PHP 8.1+, a MySQL server and a web server yourself, then re-run."
+        return 0
+    fi
+    if [ "$(id -u)" -ne 0 ] && ! has_cmd sudo; then
+        echo "   ⚠️  Neither root nor sudo is available - nothing can be installed automatically."
+        return 0
+    fi
+
+    # --- 1) base packages everything else depends on ---------------------
+    local base_pkgs="ca-certificates curl wget git unzip gnupg lsb-release software-properties-common locales"
+    local missing="" p
+    for p in $base_pkgs; do
+        dpkg -s "$p" >/dev/null 2>&1 || missing="$missing $p"
+    done
+    if [ -n "$missing" ]; then
+        echo "   ⚠️  Missing base packages:$missing"
+        if ask_yes "   Install them? (needed before anything else on a fresh server)"; then
+            apt_install $missing || true
+        fi
+    fi
+
+    # --- 2) web server ----------------------------------------------------
+    if ! has_cmd apache2 && ! has_cmd nginx; then
+        echo "   ⚠️  No web server - Telegram cannot reach the webhook without one."
+        local pick=""
+        printf '   Install: [1] Apache (default)   [2] nginx   [3] none\n'
+        read -r -p "   > " pick || true
+        case "$pick" in
+            2) if ask_yes "   Install nginx?"; then apt_install nginx || true; fi ;;
+            3) echo "   no web server installed" ;;
+            *) if ask_yes "   Install Apache?"; then apt_install apache2 || true; fi ;;
+        esac
+    fi
+
+    # --- 3) database ------------------------------------------------------
+    local db_bin=""
+    if has_cmd mysql; then db_bin="mysql"; elif has_cmd mariadb; then db_bin="mariadb"; fi
+    if [ -z "$db_bin" ]; then
+        echo "   ⚠️  No MySQL/MariaDB - nothing could store the bots' data."
+        if ask_yes "   Install the MySQL server? (required)"; then
+            apt_install mysql-server || apt_install mariadb-server || true
+        fi
+        if has_cmd mysql; then db_bin="mysql"; elif has_cmd mariadb; then db_bin="mariadb"; fi
+    fi
+    if [ -n "$db_bin" ]; then
+        echo "   ⏳ Starting and enabling the database service..."
+        $SUDO systemctl enable --now mysql  >/dev/null 2>&1 \
+            || $SUDO systemctl enable --now mariadb >/dev/null 2>&1 \
+            || $SUDO service mysql start >/dev/null 2>&1 \
+            || $SUDO service mariadb start >/dev/null 2>&1 || true
+
+        # A fresh Debian/Ubuntu install puts MySQL root behind auth_socket, which
+        # refuses a TCP login with an empty password. The credentials step below
+        # would fail for a reason nobody can see, so ask for a password now and
+        # hand it to that step - which then reuses it instead of asking twice.
+        if ! "$db_bin" -h127.0.0.1 -uroot -e "SELECT 1" >/dev/null 2>&1; then
+            echo "   ⚠️  MySQL root cannot log in over TCP yet (fresh installs use auth_socket)."
+            local rootpw="" esc=""
+            read -r -s -p "   Set a password for MySQL root now (Enter to skip): " rootpw || true
+            echo ""
+            if [ -n "$rootpw" ]; then
+                esc="$rootpw"
+                esc="${esc//\\/\\\\}"   # \  -> \\
+                esc="${esc//\'/\'\'}"   # '  -> ''
+                # 127.0.0.1 first, while socket auth still works: if a TCP-facing
+                # root account already exists it must get the same password,
+                # otherwise it would win the host match and still reject login.
+                $SUDO "$db_bin" -e "ALTER USER 'root'@'127.0.0.1' IDENTIFIED BY '$esc';" >/dev/null 2>&1 || true
+                if $SUDO "$db_bin" -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '$esc';" >/dev/null 2>&1 \
+                    || $SUDO "$db_bin" -e "SET PASSWORD FOR 'root'@'localhost' = PASSWORD('$esc');" >/dev/null 2>&1; then
+                    echo "   ✔ MySQL root password set"
+                    DB_PREFILL_PASS="$rootpw"
+                else
+                    echo "   ⚠️  Could not set it automatically - run this yourself:"
+                    echo "      sudo mysql -e \"ALTER USER 'root'@'localhost' IDENTIFIED BY 'YOUR_PASSWORD';\""
+                fi
+            else
+                echo "   ⚠️  Left as-is - the credentials step will ask you again."
+            fi
+        else
+            echo "   ✔ MySQL root accepts TCP logins"
+        fi
+    fi
+}
+preflight_fresh_server
+
 # ---------- 0) prerequisite: PHP ----------
 echo "✅ Checking PHP..."
 install_php_if_needed() {
@@ -150,6 +246,35 @@ if [ -n "$missing_pkgs" ]; then
     fi
 fi
 echo "   Extensions ✔ (curl, mbstring, pdo_mysql, mysqli, sqlite3)"
+
+# ---------- 0) prerequisite: the PHP module for the chosen web server ----------
+# The extensions above only help the CLI. Without the matching SAPI the web
+# server hands .php files to the browser as plain text, so the webhook URL
+# would return the source code (or a download) instead of answering Telegram.
+echo "✅ Checking the PHP web-server module..."
+if has_cmd apache2 || has_cmd httpd; then
+    if dpkg -s libapache2-mod-php >/dev/null 2>&1; then
+        echo "   Apache PHP module ✔"
+    elif ask_yes "   Install libapache2-mod-php so Apache can execute PHP?"; then
+        if apt_install libapache2-mod-php; then
+            echo "   Apache PHP module installed ✔"
+        else
+            echo "   ⚠️  Could not install libapache2-mod-php - Apache will not run PHP."
+        fi
+    fi
+elif has_cmd nginx; then
+    if dpkg -s php-fpm >/dev/null 2>&1; then
+        echo "   nginx PHP-FPM ✔"
+    elif ask_yes "   Install php-fpm so nginx can execute PHP?"; then
+        if apt_install php-fpm; then
+            echo "   nginx PHP-FPM installed ✔"
+        else
+            echo "   ⚠️  Could not install php-fpm - nginx will not run PHP."
+        fi
+    fi
+else
+    echo "   ⚠️  No Apache/nginx detected - skipping the PHP web-server module."
+fi
 
 # ---------- 0) optional: phpMyAdmin ----------
 # Installs the web UI for MySQL. It is optional and it asks first, because a
@@ -500,6 +625,12 @@ echo ""
 echo "========================================="
 echo "  🗄️  MySQL database credentials"
 echo "========================================="
+# If the fresh-server preflight had to create a MySQL root password, it is
+# handed over here: pressing Enter reuses it, so the password is typed once.
+DB_PW_HINT=""
+if [ -n "${DB_PREFILL_PASS:-}" ]; then
+    DB_PW_HINT=" [press Enter to reuse the one set during server setup]"
+fi
 while true; do
     read -r -p "    DB Host [127.0.0.1]: " DB_HOST
     DB_HOST=${DB_HOST:-127.0.0.1}
@@ -507,7 +638,8 @@ while true; do
     DB_PORT=${DB_PORT:-3306}
     read -r -p "    DB User [root]: " DB_USER
     DB_USER=${DB_USER:-root}
-    read -r -s -p "    DB Password: " DB_PASS
+    read -r -s -p "    DB Password${DB_PW_HINT}: " DB_PASS
+    DB_PASS="${DB_PASS:-${DB_PREFILL_PASS:-}}"
     echo ""
     read -r -p "    DB Prefix [botsaz_]: " DB_PREFIX
     DB_PREFIX=${DB_PREFIX:-botsaz_}
