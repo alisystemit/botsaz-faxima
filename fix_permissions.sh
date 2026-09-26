@@ -20,12 +20,12 @@ echo "--- Fix 1: /root directory permissions ---"
 CURRENT=$(stat -c '%a' /root)
 echo "Current /root mode: $CURRENT"
 if [ "$CURRENT" = "710" ]; then
-    chmod o+x /root
-    echo "✔ chmod o+x /root → now $(stat -c '%a' /root)"
+    chmod 711 /root
+    echo "✔ chmod 711 /root → now $(stat -c '%a' /root)"
 else
-    echo "⚠️  /root mode is $CURRENT (expected 710)"
-    chmod o+x /root
-    echo "✔ chmod o+x /root → now $(stat -c '%a' /root)"
+    echo "⚠️  /root mode is $CURRENT (expected 700 or 701)"
+    chmod 711 /root
+    echo "✔ chmod 711 /root → now $(stat -c '%a' /root)"
 fi
 
 # ===== FIX 2: data/ directory ownership =====

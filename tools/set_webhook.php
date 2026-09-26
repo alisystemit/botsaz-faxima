@@ -15,7 +15,7 @@ $botPhp = $root . '/bot.php';
 if (!is_readable($botPhp)) {
     fwrite(STDERR, "❌ bot.php قابل خواندن نیست ($botPhp)\n");
     fwrite(STDERR, "   دلیل احتمالی: /root دسترسی execute نداره\n");
-    fwrite(STDERR, "   حل: chmod o+x /root\n");
+    fwrite(STDERR, "   حل: chmod 711 /root\n");
     fwrite(STDERR, "   یا: bash tools/install.sh برای فیکس خودکار\n");
     exit(1);
 }

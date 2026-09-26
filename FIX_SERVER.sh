@@ -14,7 +14,7 @@ echo ""
 # ---- 1. /root permissions ----
 echo "[1/6] Fixing /root permissions..."
 _current=$(stat -c '%a' /root)
-chmod o+x /root
+chmod 711 /root
 echo "   ✔ /root: $_current → $(stat -c '%a' /root)"
 
 # ---- 2. data/ ownership ----

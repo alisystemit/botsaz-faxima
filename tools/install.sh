@@ -172,12 +172,15 @@ _docroot_blocker() {
             1|3|5|7) ;;
             *) printf '%s' "$p"; return 0 ;;
         esac
-        # Extra check: if /root is 701 or 700, Apache still can't reliably
-        # stat files inside it (needs read to resolve paths, not just execute)
-        if [ "$p" = "/root" ] && [ "$perm" != "711" ] && [ "$perm" != "755" ] && [ "$perm" != "705" ]; then
-            printf '%s' "$p"
-            return 0
-        fi
+        # No special case for /root. There used to be one, rejecting every
+        # mode except 711/755/705, and it was wrong in both directions: it
+        # called 701 "not traversable" - a mode that grants exactly the bit
+        # this loop is testing - and the fix it then printed, chmod o+x, is a
+        # no-op on a mode that already has o+x, so the reader was sent in a
+        # circle. Walking into a directory needs x only; r is for listing it,
+        # which Apache never does to a parent. When x is present but Apache
+        # still refuses, that disagreement is a fact about something else
+        # (ACL, group, service) and webuser_blocker below reports it.
         p="$(dirname "$p")"
     done
     return 0
@@ -785,12 +788,38 @@ echo "WHERR=".($r["last_error_message"] ?? "")."\n";' 2>/dev/null || true)"
                     probe_missing="$(wh_probe "${base_url%/}/.botsaz-no-such-file")"
                     if [ "$probe_missing" = "403" ] || [ "$DOCROOT_OK" != "1" ]; then
                         wh_ok=0
-                        h_fail "HTTP 403 at $expected - Apache cannot even reach the project path"
+                        h_fail "HTTP 403 at $expected - Apache never reaches the project"
                         h_note "this is Apache's own answer, so it outranks any mode-bit walk above"
                         h_note "the secret has nothing to do with it; Telegram sees exactly this 403"
                         h_note "which component is closed - every one of them, with owner and mode:"
                         show_path_chain "${ROOT_DIR}/bot.php"
                         h_note "namei -l ${ROOT_DIR}/bot.php   and   sudo -u $(apache_run_user) test -x $ROOT_DIR"
+                        # namei only prints mode bits, and this very server was
+                        # seen with a fully traversable chain on screen while
+                        # Apache was answering AH00035 for the same path. So
+                        # walk the evidence instead of guessing from the bits:
+                        # the disk, then the account, then everything above it.
+                        local _blk_disk _blk_acct
+                        _blk_disk="$(_docroot_blocker "$ROOT_DIR")"
+                        if [ -n "$_blk_disk" ]; then
+                            h_note "verdict: '$_blk_disk' really is closed on disk - section 5 printed the chmod for it"
+                        else
+                            _blk_acct="$(webuser_blocker "$ROOT_DIR")" || _blk_acct=""
+                            if [ -n "$_blk_acct" ]; then
+                                h_note "verdict: every mode bit allows it, yet $(apache_run_user) cannot search '$_blk_acct'"
+                                h_note "so it is an ACL, a group grant, or a restriction on the service - not a chmod:"
+                                h_note "  getfacl -p / /root ${ROOT_DIR}"
+                                h_note "  sudo -u $(apache_run_user) test -x ${ROOT_DIR} && echo yes || echo no"
+                            else
+                                h_note "verdict: the path AND the account both say yes, yet Apache answers 403."
+                                h_note "then the refusal is not on disk at all - it is on the Apache process,"
+                                h_note "or the request never reaches this project. In order of likelihood:"
+                                h_note "  cat /sys/module/apparmor/parameters/enabled ; aa-status 2>&1 | head -20"
+                                h_note "  dmesg | grep -i 'apparmor.*DENIED' | tail"
+                                h_note "  apachectl -S      (which vhost really answers this name?)"
+                                h_note "  grep -rn 'Require\\|Deny\\|Allow' /etc/apache2/sites-enabled/ ${ROOT_DIR}/.htaccess"
+                            fi
+                        fi
                     else
                         wh_ok=1
                         h_ok "webhook answers HTTP 403 (secret rejected, route is alive) at $expected"
@@ -1008,7 +1037,37 @@ report_logs() {
             total=$((total + n))
             acc_bad=1
         else
-            printf '      %s: every webhook delivery answered 2xx/3xx\n' "$src"
+            # A quiet access log is not evidence of health. Apache refuses the
+            # request during the path walk - BEFORE any delivery line is
+            # written - so a server that 403s every single call keeps an
+            # immaculate access.log. Printing "every webhook delivery
+            # answered 2xx/3xx" over an outage would make this the one
+            # reassuring sentence in a report that exists to expose exactly
+            # that outage, and error.log above would be contradicting it in
+            # the same run. So ask the URL what it answers right now, and let
+            # the silence explain itself when the answer is not a 2xx.
+            local live_now live_base
+            live_base="$(cfg_get base_url || true)"
+            live_now="-"
+            if [ -n "$live_base" ]; then
+                live_now="$(wh_probe "${live_base%/}/bot.php" || true)"
+                live_now="${live_now:-0}"   # never leave the status empty: 0 says "nothing answered"
+            fi
+            case "$live_now" in
+                2*|3*)
+                    printf '      %s: every webhook delivery answered 2xx/3xx (and it answers %s right now)\n' "$src" "$live_now"
+                    ;;
+                -)
+                    printf '      %s: every webhook delivery answered 2xx/3xx\n' "$src"
+                    ;;
+                *)
+                    printf '      %s: no failure is RECORDED, but %s/bot.php answers HTTP %s right now\n' "$src" "${live_base%/}" "$live_now"
+                    printf '                Apache refuses the request before it logs one, so this log is\n'
+                    printf '                silent by construction - the refusal is written in error.log,\n'
+                    printf '                which is where the [FAIL] lines above came from.\n'
+                    total=$((total + 1))
+                    ;;
+            esac
         fi
     done
     [ "$found_acc" = "0" ] && printf '      (no readable access log)\n'
