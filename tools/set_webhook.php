@@ -9,6 +9,17 @@ require_once $root.'/src/Manager.php';
 
 $url = $argv[1] ?? (rtrim($cfg['base_url'], '/') . '/bot.php');
 
+// ===== بررسی دسترسی مسیر (مشکل رایج: /root permission denied) =====
+// اگر bot.php را نمی‌توان بخوانی، وبهوک هیچ‌وقت کار نمی‌کنه
+$botPhp = $root . '/bot.php';
+if (!is_readable($botPhp)) {
+    fwrite(STDERR, "❌ bot.php قابل خواندن نیست ($botPhp)\n");
+    fwrite(STDERR, "   دلیل احتمالی: /root دسترسی execute نداره\n");
+    fwrite(STDERR, "   حل: chmod o+x /root\n");
+    fwrite(STDERR, "   یا: bash tools/install.sh برای فیکس خودکار\n");
+    exit(1);
+}
+
 // ===== گاردهای تشخیصی قبل از فراخوانی تلگرام =====
 // قبلاً فقط JSON خامِ 404 چاپ می‌شد و معلوم نبود چرا شکست خورده.
 $token = (string)($cfg['main_token'] ?? '');

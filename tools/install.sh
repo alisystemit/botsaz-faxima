@@ -172,6 +172,12 @@ _docroot_blocker() {
             1|3|5|7) ;;
             *) printf '%s' "$p"; return 0 ;;
         esac
+        # Extra check: if /root is 701 or 700, Apache still can't reliably
+        # stat files inside it (needs read to resolve paths, not just execute)
+        if [ "$p" = "/root" ] && [ "$perm" != "711" ] && [ "$perm" != "755" ] && [ "$perm" != "705" ]; then
+            printf '%s' "$p"
+            return 0
+        fi
         p="$(dirname "$p")"
     done
     return 0
@@ -1062,6 +1068,33 @@ for _arg in "$@"; do
     esac
 done
 unset _arg
+
+# ===== FIX: Auto-fix /root permissions before any check or install =====
+# The /root directory is typically drwx------ (700) which prevents
+# Apache (www-data) from traversing to the project. This causes
+# every request to return 403 and breaks the webhook completely.
+# This block runs BEFORE check/install to ensure the path is accessible.
+if [ "$(id -u)" -eq 0 ] && [ -d /root ]; then
+    _root_perm="$(stat -c '%a' /root 2>/dev/null)"
+    _others_digit="${_root_perm: -1}"
+    case "$_others_digit" in
+        1|3|5|7) ;;  # others can traverse - OK
+        *)
+            if [ "$MODE" = "check" ]; then
+                echo "   ⚠️  /root has mode $_root_perm (others cannot traverse)."
+                echo "      Run: chmod o+x /root"
+                echo "      Or: bash tools/install.sh (to auto-fix)"
+            elif [ "$MODE" = "install" ]; then
+                echo ""
+                echo "========================================="
+                echo "  🔧 Auto-fix: /root permissions"
+                echo "========================================="
+                chmod o+x /root
+                echo "   ✔ chmod o+x /root (was $_root_perm, now $(stat -c '%a' /root))"
+            fi
+            ;;
+    esac
+fi
 
 if [ "$MODE" = "check" ] || [ "$MODE" = "logs" ]; then
     # A report must never be cut short by one failing probe, and it must never
@@ -2029,6 +2062,22 @@ if [ -n "$_cfg_base" ] && [ "$_cfg_base" != "$BASE_URL" ]; then
 fi
 WEBHOOK_URL="${BASE_URL}/bot.php"
 $PHP_BIN "$ROOT_DIR/tools/set_webhook.php" "$WEBHOOK_URL" || echo "⚠️  Webhook not set (the URL is probably not https/public). Set it manually later."
+
+# ===== FIX: data/ ownership and Apache restart =====
+# If the project is under /root, Apache (www-data) needs write access to data/
+# and the vhost needs to be properly configured.
+if [ "$(id -u)" -eq 0 ] && [ -d "$ROOT_DIR/data" ]; then
+    if [ "$(stat -c '%U:%G' "$ROOT_DIR/data")" != "www-data:www-data" ]; then
+        chown -R www-data:www-data "$ROOT_DIR/data" 2>/dev/null && \
+            echo "   ✔ chown -R www-data:www-data $ROOT_DIR/data" || \
+            echo "   ⚠️  Could not chown data/ - run manually"
+    fi
+fi
+# Ensure Apache is running with the correct config
+if has_cmd systemctl && systemctl is-active --quiet apache2 2>/dev/null; then
+    systemctl restart apache2 2>/dev/null && echo "   ✔ Apache restarted" || \
+        echo "   ⚠️  Apache restart failed - reload manually"
+fi
 
 # 9) verify EVERYTHING and show every error the bot has produced
 # These are the same two reports `bash tools/install.sh --check` prints later, so

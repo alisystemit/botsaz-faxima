@@ -30,6 +30,29 @@ echo "=========================================\n";
 echo "  🏥 ربات‌ساز سلامت‌رسان\n";
 echo "=========================================\n\n";
 
+// ===== ۰. بررسی دسترسی /root (مهم‌ترین مشکل رایج) =====
+// وقتی پروژه در /root هست، Apache نمی‌تونه ازش رد بشه
+// و همه درخواست‌ها 403 برگردونده می‌شن
+echo "[0] بررسی دسترسی /root...\n";
+if (is_dir('/root')) {
+    $rootMode = fileperms('/root');
+    $rootOctal = substr(sprintf('%o', $rootMode), -4);
+    $rootOthers = decoct($rootMode & 0007);
+    $isUnderRoot = (strpos(__DIR__, '/root/') === 0);
+    
+    // اگر /root هیچ execute برای others نداشته باشه، یا فقط execute-1 باشد و پروژه زیرش باشد
+    if ($rootOthers == '0') {
+        $errors[] = "/root دسترسی execute نداره (mode $rootOctal) - Apache نمی‌تونه ازش رد بشه";
+        $errors[] = "  حل: chmod o+x /root  (یا bash tools/install.sh برای فیکس خودکار)";
+    } elseif ($rootOthers == '1' && $isUnderRoot) {
+        // execute-only بدون read، Apache ممکنه مشکل داشته باشه
+        $warnings[] = "/root فقط execute داره (mode $rootOctal) - بهتره chmod o+x بزنید";
+        $warnings[] = "  حل: chmod o+x /root  (یا bash tools/install.sh)";
+    } else {
+        $ok[] = "/root قابل دسترسیه (mode $rootOctal)";
+    }
+}
+
 // ===== ۱. بررسی config.php =====
 echo "[1] بررسی config.php...\n";
 if (!empty($cfg['main_token']) && $cfg['main_token'] !== 'PUT_MAIN_BOT_TOKEN_HERE') {
