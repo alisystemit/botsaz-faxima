@@ -91,7 +91,6 @@ class Logger
         while (count($files) > self::MAX_FILES) {
             @unlink(array_pop($files));
         }
-    }
 
         // بررسی اندازه فایل فعلی
         $current = self::LOG_DIR . date('Y-m-d') . '.log';
