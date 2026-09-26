@@ -109,7 +109,9 @@ install_php_if_needed
 # ---------- 0) prerequisite: PHP extensions ----------
 echo "✅ Checking PHP extensions..."
 # pairs: extension_name:apt_package_name
-EXT_PKGS="curl:php-curl mbstring:php-mbstring pdo_mysql:php-mysql sqlite3:php-sqlite3"
+# mysqli is listed too: the child templates open MySQL through mysqli (with an
+# explicit port), so a missing mysqli breaks bot builds later on.
+EXT_PKGS="curl:php-curl mbstring:php-mbstring pdo_mysql:php-mysql mysqli:php-mysql sqlite3:php-sqlite3"
 missing_pkgs=""
 for pair in $EXT_PKGS; do
     ext="${pair%%:*}"
@@ -147,7 +149,44 @@ if [ -n "$missing_pkgs" ]; then
         exit 1
     fi
 fi
-echo "   Extensions ✔ (curl, mbstring, pdo_mysql, sqlite3)"
+echo "   Extensions ✔ (curl, mbstring, pdo_mysql, mysqli, sqlite3)"
+
+# ---------- 0) optional: phpMyAdmin ----------
+# Installs the web UI for MySQL. It is optional and it asks first, because a
+# publicly reachable phpMyAdmin is an attack surface - the installer says so.
+install_phpmyadmin() {
+    # already there?
+    if has_cmd phpmyadmin || [ -d /usr/share/phpmyadmin ]; then
+        echo "✅ phpMyAdmin already installed ✔"
+        return 0
+    fi
+    if ! can_apt; then
+        echo "⚠️  apt is not available - skipping phpMyAdmin."
+        return 0
+    fi
+    if ! ask_yes "   Install phpMyAdmin? (optional web UI for MySQL - keep it access-restricted)"; then
+        echo "   phpMyAdmin skipped"
+        return 0
+    fi
+    echo "   ⏳ Installing phpMyAdmin..."
+    # Pre-seed debconf so the package never blocks on an interactive question.
+    # We deliberately do NOT let it reconfigure a web server here - step 6 wires
+    # the vhost itself, which keeps the script deterministic.
+    if command -v debconf-set-selections >/dev/null 2>&1; then
+        printf '%s\n' \
+            'phpmyadmin phpmyadmin/reconfigure-webserver select none' \
+            'phpmyadmin phpmyadmin/mysql-admin-install boolean false' \
+            'phpmyadmin phpmyadmin/mysql/app-pass password' \
+            'phpmyadmin phpmyadmin/app-password-confirm password' \
+            | $SUDO debconf-set-selections || true
+    fi
+    if DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y phpmyadmin; then
+        echo "   phpMyAdmin installed ✔ (served at /phpmyadmin once the vhost exists)"
+    else
+        echo "   ⚠️  phpMyAdmin package failed to install - skipping it (not fatal)."
+    fi
+}
+install_phpmyadmin
 
 # ---------- 0) prerequisite: system tools ----------
 for cmd in git curl; do
