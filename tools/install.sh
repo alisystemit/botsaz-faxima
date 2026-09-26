@@ -67,6 +67,16 @@ ask_yes() { # $1 = question text (default: yes)
     [[ "$ans" =~ ^[Nn] ]] && return 1 || return 0
 }
 
+# Same shape, opposite default. Reserved for anything that widens access or
+# changes permissions: an empty answer (or a closed stdin) must mean NO there,
+# which is exactly what ask_yes cannot give.
+ask_no() { # $1 = question text (default: no)
+    local ans
+    printf '%s\n' "$1"
+    read -r -p "   [y/N]: " ans || ans=""
+    [[ "$ans" =~ ^[Yy] ]] && return 0 || return 1
+}
+
 apt_install() {
     echo "   ⏳ Installing with apt (sudo may ask for a password)..."
     $SUDO apt-get update -qq
@@ -90,37 +100,76 @@ apt_install() {
 # "Permission denied ... search permissions are missing" on every request - a
 # bot that answers nothing while every check around it still looks green.
 DOCROOT_OK=1
-docroot_reachable() {
-    local p="$1" perm last
-    if [ ! -d "$p" ]; then
-        echo "   ❌ DocumentRoot does not exist: $p"
-        DOCROOT_OK=0
-        return 1
-    fi
-    p="${p%/}"
+
+# First ancestor of $1 that the web-server user cannot walk through, printed
+# without a trailing newline (empty when the whole chain is traversable).
+# Split out from the reporting below so the repair path can simply ask again
+# after fixing it instead of printing the whole explanation twice.
+_docroot_blocker() {
+    local p="${1%/}" perm last
+    if [ ! -d "$p" ]; then printf '%s' "$p"; return 0; fi
     while [ -n "$p" ] && [ "$p" != "/" ]; do
         perm="$(stat -c '%a' "$p" 2>/dev/null)" || return 0
         last="${perm: -1}"          # the "others" digit: odd means +x
         case "$last" in
             1|3|5|7) ;;
-            *)
-                echo "   ❌ $p is not traversable by the web-server user (mode $perm)."
-                echo "      This is exactly what a project under /root runs into: Apache"
-                echo "      cannot reach it, so every request is 403 and Telegram never"
-                echo "      gets a reply. Fix it before the vhost can answer (as root):"
-                echo "        allow the path:  chmod o+x '$p'"
-                echo "        then make data writable:"
-                echo "                          chown -R www-data:www-data '${1%/}/data'"
-                echo "        or move it out:  mkdir -p /var/www && cp -a '${1%/}' /var/www/ \\"
-                echo "                          && chown -R www-data:www-data /var/www/$(basename "${1%/}")/data"
-                echo "                          (then point DocumentRoot there and re-run this installer)"
-                DOCROOT_OK=0
-                return 1
-                ;;
+            *) printf '%s' "$p"; return 0 ;;
         esac
         p="$(dirname "$p")"
     done
     return 0
+}
+
+# $1 = DocumentRoot.  $2 = "apply" lets the INSTALL path repair the permissions
+# in place; --check never passes it and therefore stays strictly read-only.
+docroot_reachable() {
+    local p="$1" bad perm
+    if [ ! -d "$p" ]; then
+        echo "   ❌ DocumentRoot does not exist: $p"
+        DOCROOT_OK=0
+        return 1
+    fi
+    bad="$(_docroot_blocker "$p")"
+    [ -n "$bad" ] || return 0
+    perm="$(stat -c '%a' "$bad" 2>/dev/null)"
+    echo "   ❌ $bad is not traversable by the web-server user (mode $perm)."
+    echo "      This is exactly what a project under /root runs into: Apache"
+    echo "      cannot reach it, so every request is 403 and Telegram never"
+    echo "      gets a reply. Fix it before the vhost can answer (as root):"
+    echo "        allow the path:  chmod o+x '$bad'"
+    echo "        then make data writable:"
+    echo "                          chown -R www-data:www-data '${p%/}/data'"
+    echo "        or move it out:  mkdir -p /var/www && cp -a '${p%/}' /var/www/ \\"
+    echo "                          && chown -R www-data:www-data /var/www/$(basename "${p%/}")/data"
+    echo "                          (then point DocumentRoot there and re-run this installer)"
+    DOCROOT_OK=0
+
+    # Widening access to /root is security-relevant, so this uses ask_no: the
+    # question defaults to NO, the commands are already on screen, and a
+    # closed stdin can only ever answer NO. Reaching this line at all needs
+    # the "apply" argument, which --check does not pass.
+    if [ "${2:-}" = "apply" ] && [ -t 0 ] \
+        && ask_no "   Fix these permissions now (chmod o+x + chown data)?"; then
+        if $SUDO chmod o+x "$bad"; then
+            echo "   ✔ chmod o+x '$bad'"
+            if [ -d "${p%/}/data" ]; then
+                if $SUDO chown -R www-data:www-data "${p%/}/data"; then
+                    echo "   ✔ chown -R www-data:www-data '${p%/}/data'"
+                else
+                    echo "   ⚠️  chown data/ failed - run it by hand (logs need it)."
+                fi
+            fi
+            if [ -z "$(_docroot_blocker "$p")" ]; then
+                DOCROOT_OK=1
+                echo "   ✔ www-data can reach '$p' now"
+                return 0
+            fi
+            echo "   ⚠️  still blocked after chmod - check the path printed above."
+        else
+            echo "   ⚠️  chmod failed - run the commands above by hand."
+        fi
+    fi
+    return 1
 }
 
 # Does any OTHER enabled vhost claim the same ServerName?
@@ -442,7 +491,7 @@ report_health() {
 
     # ---------- 7) DNS ----------
     printf '\n  --- 7) DNS ---\n'
-    local ip=""
+    local ip="" aaaa=""
     if [ -z "$host" ]; then
         h_warn "no hostname - cannot check DNS"
     else
@@ -454,6 +503,31 @@ report_health() {
             h_warn "$host resolves to $ip (local only) - a public webhook cannot use that"
         else
             h_ok "$host resolves to $ip"
+        fi
+        # An AAAA record is not decoration: Telegram speaks IPv6 too, and if it
+        # lands on another machine the webhook 404s THERE while every probe made
+        # from this server still looks green - two different DocumentRoots
+        # answering the same URL within the same second.
+        if has_cmd getent; then
+            aaaa="$(getent ahostsv6 "$host" 2>/dev/null | awk '{print $1}' | grep -v '^::ffff:' | head -n1)" || aaaa=""
+        fi
+        if [ -z "$aaaa" ] && has_cmd dig; then
+            aaaa="$(dig +short "$host" AAAA 2>/dev/null | grep -E '^[0-9a-fA-F:]+:[0-9a-fA-F:]+$' | head -n1)" || aaaa=""
+        fi
+        if ! has_cmd getent && ! has_cmd dig; then
+            h_warn "cannot check for an AAAA record (need getent or dig)"
+        elif [ -z "$aaaa" ]; then
+            h_ok "no AAAA record - Telegram reaches this server over IPv4 ($ip)"
+        elif ! has_cmd ip; then
+            h_warn "$host has AAAA $aaaa - confirm it points at this server"
+        elif ip -6 -o addr show 2>/dev/null | grep -qF "$aaaa"; then
+            h_ok "AAAA $aaaa is configured on this server - IPv6 reaches us too"
+        else
+            h_warn "$host has AAAA $aaaa, which is NOT an address of this server"
+            h_note "Telegram would then reach a different machine: our own probe gets"
+            h_note "403 from this vhost while Telegram gets 404 from another one."
+            h_note "getent ahosts $host"
+            h_note "curl -6 -sI https://$host/ -o /dev/null -w '%{http_code}\\n'"
         fi
     fi
 
@@ -1406,7 +1480,7 @@ configure_vhost() {
         fi
         # a vhost pointing at an unreachable directory is worse than none:
         # Apache starts, reports success, and 403s every request
-        if ! docroot_reachable "$ROOT_DIR"; then
+        if ! docroot_reachable "$ROOT_DIR" apply; then
             echo "   ⚠️  Writing the vhost anyway - it cannot answer until the path above is fixed."
         fi
         $SUDO mkdir -p /etc/apache2/sites-available 2>/dev/null || true
