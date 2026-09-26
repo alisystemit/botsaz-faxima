@@ -8,11 +8,40 @@
 
 set -e
 
+# ===== سازگاری با زبان فارسی / UTF-8 =====
+# اگر locale ترمینال UTF-8 نباشد، متن فارسی به‌صورت mojibake (گاربل) دیده می‌شود.
+# توجه: پیام این بلوک عمداً انگلیسی/ASCII است؛ اگر فارسی خراب باشد، خودِ این
+# هشدار فارسی هم خوانا نیست و باید به زبانی نوشته شود که همیشه سالم می‌ماند.
+_eff_lc="${LC_ALL:-${LANG:-}}"
+case "$_eff_lc" in
+    *.[Uu][Tt][Ff]-8*|*.[Uu][Tt][Ff]8*|*[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*)
+        ;;                                  # locale از قبل UTF-8 است (en_US.UTF-8 / C.UTF-8)
+    *)
+        _utf8_locale=""
+        if command -v locale >/dev/null 2>&1; then
+            # هر دو شکل خروجی locale -a:  C.UTF-8 و C.utf8
+            _utf8_locale="$(locale -a 2>/dev/null | grep -iE '^(C|en_US|fa_IR)\.UTF-?8$' | head -n1 || true)"
+        fi
+        if [ -n "$_utf8_locale" ]; then
+            export LC_ALL="$_utf8_locale"
+            export LANG="$_utf8_locale"
+        else
+            echo "!! WARNING: current locale is NOT UTF-8 - Persian text may look garbled."
+            echo "   Fix it first, then re-run this installer:"
+            echo "     sudo apt-get install -y locales"
+            echo "     sudo locale-gen en_US.UTF-8"
+            echo "     export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8"
+            echo ""
+        fi
+        ;;
+esac
+unset _eff_lc _utf8_locale
+
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PHP_BIN="php"
 
 echo "========================================="
-echo "  🔧 نصب ربات‌ساز فاکسیما/میرزا"
+echo "  [SETUP] نصب ربات‌ساز فاکسیما/میرزا"
 echo "========================================="
 echo ""
 
@@ -29,12 +58,16 @@ can_apt() {
 
 ask_yes() { # $1 = متن سؤال (پیش‌فرض بله)
     local ans
-    read -r -p "$1 [Y/n]: " ans
+    # چرا این‌طور؟ متن فارسی (RTL) داخل read -p باعث می‌شود الگوریتم bidi نویسه‌ها را
+    # جابه‌جا کند، مکان‌نما در جای اشتباهی بنشیند و [Y/n] وسط متن فارسی به‌هم بریزد.
+    # راه‌حل: سؤال در خطِ خودش (RTL درست رندر می‌شود) و پرامپتِ ورودی کاملاً ASCII.
+    printf '%s\n' "$1"
+    read -r -p "   [Y/n]: " ans
     [[ "$ans" =~ ^[Nn] ]] && return 1 || return 0
 }
 
 apt_install() {
-    echo "   ⏳ نصب با apt (ممکن است sudo پسورد بخواهد)..."
+    echo "   [..] نصب با apt (ممکن است sudo پسورد بخواهد)..."
     $SUDO apt-get update -qq
     # shellcheck disable=SC2068
     $SUDO apt-get install -y $@
@@ -50,21 +83,21 @@ install_php_if_needed() {
             echo "   PHP $($PHP_BIN -r 'echo PHP_VERSION;') ✓"
             return 0
         fi
-        echo "   ⚠️  نسخه PHP قدیمی است: $($PHP_BIN -r 'echo PHP_VERSION;') (نیاز: 8.1+)"
+        echo "   [!]  نسخه PHP قدیمی است: $($PHP_BIN -r 'echo PHP_VERSION;') (نیاز: 8.1+)"
     else
-        echo "   ⚠️  PHP پیدا نشد."
+        echo "   [!]  PHP پیدا نشد."
     fi
     if can_apt && ask_yes "   نصب/ارتقای خودکار PHP با اکستنشن‌های لازم؟"; then
         apt_install php php-cli php-curl php-mbstring php-mysql php-sqlite3 php-xml php-zip
     fi
     if ! has_cmd "$PHP_BIN"; then
-        echo "❌ PHP در دسترس نیست. دستی نصب کن:"
+        echo "[X] PHP در دسترس نیست. دستی نصب کن:"
         echo "   sudo apt install php php-cli php-curl php-mbstring php-mysql php-sqlite3"
         exit 1
     fi
     PHP_VER=$($PHP_BIN -r "echo PHP_VERSION_ID;")
     if [ "$PHP_VER" -lt 80100 ]; then
-        echo "❌ نسخه PHP کمتر از 8.1 است: $($PHP_BIN -r 'echo PHP_VERSION;')"
+        echo "[X] نسخه PHP کمتر از 8.1 است: $($PHP_BIN -r 'echo PHP_VERSION;')"
         echo "   روی Ubuntu قدیمی از مخزن ondrej/php نسخه 8.2+ نصب کن."
         exit 1
     fi
@@ -81,14 +114,14 @@ for pair in $EXT_PKGS; do
     ext="${pair%%:*}"
     pkg="${pair##*:}"
     if ! $PHP_BIN -m | grep -qi "^${ext}$"; then
-        echo "   ⚠️  اکستنشن ${ext} نیست."
+        echo "   [!]  اکستنشن ${ext} نیست."
         missing_pkgs="$missing_pkgs $pkg"
     fi
 done
 # این دو معمولاً داخلی‌اند؛ اگر نباشند نصب خراب است
 for ext in openssl json; do
     if ! $PHP_BIN -m | grep -qi "^${ext}$"; then
-        echo "❌ اکستنشن حیاتی ${ext} در PHP نیست — نصب PHP را تعمیر کن."
+        echo "[X] اکستنشن حیاتی ${ext} در PHP نیست — نصب PHP را تعمیر کن."
         exit 1
     fi
 done
@@ -97,7 +130,7 @@ if [ -n "$missing_pkgs" ]; then
         # shellcheck disable=SC2086
         apt_install $missing_pkgs
     else
-        echo "❌ اکستنشن‌های لازم نصب نیست. دستی نصب کن:"
+        echo "[X] اکستنشن‌های لازم نصب نیست. دستی نصب کن:"
         echo "   sudo apt install$missing_pkgs"
         exit 1
     fi
@@ -108,7 +141,7 @@ if [ -n "$missing_pkgs" ]; then
         if ! $PHP_BIN -m | grep -qi "^${ext}$"; then still_missing="$still_missing $ext"; fi
     done
     if [ -n "$still_missing" ]; then
-        echo "❌ هنوز این اکستنشن‌ها نیستند:$still_missing"
+        echo "[X] هنوز این اکستنشن‌ها نیستند:$still_missing"
         echo "   وب‌سرور/CLI ممکن است php.ini جدا داشته باشند؛ بررسی کن."
         exit 1
     fi
@@ -118,11 +151,11 @@ echo "   اکستنشن‌ها ✓ (curl, mbstring, pdo_mysql, sqlite3)"
 # ---------- ۰) پیش‌نیاز: ابزارهای سیستمی ----------
 for cmd in git curl; do
     if ! has_cmd "$cmd"; then
-        echo "   ⚠️  ابزار $cmd نیست."
+        echo "   [!]  ابزار $cmd نیست."
         if can_apt && ask_yes "   نصب خودکار $cmd؟"; then
             apt_install "$cmd"
         else
-            echo "❌ بدون $cmd ادامه نمی‌دهم. نصبش کن و دوباره اجرا کن."
+            echo "[X] بدون $cmd ادامه نمی‌دهم. نصبش کن و دوباره اجرا کن."
             exit 1
         fi
     fi
@@ -131,55 +164,58 @@ done
 # ۲) توکن ربات اصلی
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  🔑 توکن ربات اصلی (ربات‌ساز)"
+echo "  [KEY] توکن ربات اصلی (ربات‌ساز)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 while true; do
-    read -r -p "    توکن از @BotFather: " MAIN_TOKEN
+    printf '    توکن از @BotFather:\n'
+    read -r -p "    > " MAIN_TOKEN
     if [[ "$MAIN_TOKEN" =~ ^[0-9]{6,12}:[A-Za-z0-9_-]{35}$ ]]; then break; fi
-    echo "   ❌ فرمت توکن اشتباه است (باید شبیه 123456:ABC... ۳۵ کاراکتری باشد). دوباره:"
+    printf '   [X] فرمت توکن اشتباه است (باید شبیه 123456:ABC... ۳۵ کاراکتری باشد). دوباره:\n'
 done
 # بررسی زنده بودن توکن (فقط هشدار؛ اگر شبکه قطع بود ادامه می‌دهیم)
-echo "   ⏳ بررسی توکن در تلگرام..."
+echo "   [..] بررسی توکن در تلگرام..."
 if ! MAIN_TOKEN="$MAIN_TOKEN" $PHP_BIN -r '
 $tok = (string) getenv("MAIN_TOKEN");
 $j = @json_decode((string) @file_get_contents("https://api.telegram.org/bot".$tok."/getMe"), true);
 if (empty($j["ok"])) { fwrite(STDERR, "getMe failed\n"); exit(1); }
-echo "   🤖 @".$j["result"]["username"]." ✓\n";'; then
-    echo "   ⚠️  تلگرام جواب نداد (توکن اشتباه است یا اینترنت/فیلتر مشکل دارد)."
+echo "   [BOT] @".$j["result"]["username"]." ✓\n";'; then
+    echo "   [!]  تلگرام جواب نداد (توکن اشتباه است یا اینترنت/فیلتر مشکل دارد)."
     ask_yes "   با همین توکن ادامه بدهم؟" || exit 1
 fi
 
 # ۳) آیدی سوپرادمین
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  👤 آیدی عددی سوپرادمین"
+echo "  [ID] آیدی عددی سوپرادمین"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-read -r -p "    آیدی عددی ادمین (از @userinfobot): " SUPER_ADMIN
+printf '    آیدی عددی ادمین (از @userinfobot):\n'
+read -r -p "    > " SUPER_ADMIN
 if ! [[ "$SUPER_ADMIN" =~ ^[0-9]{5,}$ ]]; then
-    echo "❌ آیدی عددی معتبر وارد کنید."
+    printf '   [X] آیدی عددی معتبر وارد کنید.\n'
     exit 1
 fi
 
 # ۴) آدرس وبسایت
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  🌐 آدرس پایه پروژه (base_url)"
+echo "  [URL] آدرس پایه پروژه (base_url)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-read -r -p "    آدرس (مثلا https://domain.com/botsaz): " BASE_URL
+printf '    آدرس (مثلا https://domain.com/botsaz):\n'
+read -r -p "    > " BASE_URL
 if [ -z "$BASE_URL" ]; then
     BASE_URL="http://localhost/botsaz-faxima"
-    echo "   ⚠️  استفاده از پیش‌فرض: $BASE_URL"
+    echo "   [!]  استفاده از پیش‌فرض: $BASE_URL"
 fi
 BASE_URL="$(echo "$BASE_URL" | sed 's:/*$::')"
 if ! [[ "$BASE_URL" =~ ^https:// ]]; then
-    echo "   ⚠️  آدرس https نیست — تلگرام وبهوک http را قبول نمی‌کند و ربات اجرا نمی‌شود!"
+    echo "   [!]  آدرس https نیست — تلگرام وبهوک http را قبول نمی‌کند و ربات اجرا نمی‌شود!"
     echo "   (اگر دامنه + SSL داری، حتماً همان را بزن.)"
 fi
 
 # ۵) مشخصات MySQL + تست واقعی اتصال و دسترسی ساخت دیتابیس
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  🗄️  مشخصات دیتابیس MySQL"
+echo "  [DB]  مشخصات دیتابیس MySQL"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 while true; do
     read -r -p "    DB Host [127.0.0.1]: " DB_HOST
@@ -194,7 +230,7 @@ while true; do
     DB_PREFIX=${DB_PREFIX:-botsaz_}
     if ! [[ "$DB_PORT" =~ ^[0-9]+$ ]]; then DB_PORT=3306; fi
 
-    echo "   ⏳ تست اتصال و دسترسی CREATE DATABASE..."
+    echo "   [..] تست اتصال و دسترسی CREATE DATABASE..."
     if DBH="$DB_HOST" DBP="$DB_PORT" DBU="$DB_USER" DBPW="$DB_PASS" $PHP_BIN -r '
 try {
     $pdo = new PDO("mysql:host=".getenv("DBH").";port=".(int)getenv("DBP").";charset=utf8mb4",
@@ -208,10 +244,10 @@ try {
         echo "   اتصال + دسترسی ساخت دیتابیس ✓"
         break
     fi
-    echo "   ❌ اتصال یا دسترسی دیتابیس مشکل دارد (خطا بالا)."
+    echo "   [X] اتصال یا دسترسی دیتابیس مشکل دارد (خطا بالا)."
     echo "   ربات‌ساز برای هر ربات فرزند یک دیتابیس جدا می‌سازد؛ بدون این دسترسی جلو نمی‌رود."
     if ask_yes "   مشخصات را دوباره وارد می‌کنی؟ (نه = ادامه بدون دیتابیس تأییدشده)"; then continue; fi
-    echo "   ⚠️  بدون تأیید دیتابیس ادامه می‌دهم — ساخت ربات فرزند احتمالاً خطا می‌دهد."
+    echo "   [!]  بدون تأیید دیتابیس ادامه می‌دهم — ساخت ربات فرزند احتمالاً خطا می‌دهد."
     break
 done
 SECRET_KEY=$($PHP_BIN -r 'echo bin2hex(random_bytes(16));')
@@ -221,7 +257,7 @@ SECRET_KEY=$($PHP_BIN -r 'echo bin2hex(random_bytes(16));')
 # خاص مثل $ ' \ " در توکن/پسورد باعث خرابی یا تزریق در کانفیگ نشود.
 echo ""
 if [ -f "$ROOT_DIR/config.php" ]; then
-    echo "[⚠️] config.php از قبل وجود دارد — بازنویسی نشد. برای تغییر، دستی ویرایش کن."
+    echo "[!] config.php از قبل وجود دارد — بازنویسی نشد. برای تغییر، دستی ویرایش کن."
 else
     echo "[✓] ساخت config.php..."
     CFG_OUT="$ROOT_DIR/config.php" \
@@ -268,7 +304,7 @@ $PHP_BIN "$ROOT_DIR/tools/install.php"
 echo ""
 echo "[✓] ست وبهوک..."
 WEBHOOK_URL="${BASE_URL}/bot.php"
-$PHP_BIN "$ROOT_DIR/tools/set_webhook.php" "$WEBHOOK_URL" || echo "⚠️  وبهوک ست نشد (احتمالاً آدرس https/عمومی نیست). بعداً دستی بزن."
+$PHP_BIN "$ROOT_DIR/tools/set_webhook.php" "$WEBHOOK_URL" || echo "[!]  وبهوک ست نشد (احتمالاً آدرس https/عمومی نیست). بعداً دستی بزن."
 
 # ۹) بررسی template ها
 echo ""
@@ -278,7 +314,7 @@ for f in "templates/faxima/config.php" "templates/mirza/config.php" "templates/f
     if [ -f "$ROOT_DIR/$f" ]; then
         echo "   ✓ $f"
     else
-        echo "   ❌ $f یافت نشد!"
+        echo "   [X] $f یافت نشد!"
         tpl_ok=0
     fi
 done
@@ -300,16 +336,16 @@ echo "BOT_UP @".$me["result"]["username"]." webhook=".$url."\n";' && bot_up=1 ||
 echo ""
 echo "========================================="
 if [ "$bot_up" = "1" ] && [ "$tpl_ok" = "1" ]; then
-    echo "  ✅ نصب کامل شد و ربات اجراست!"
+    echo "  [OK] نصب کامل شد و ربات اجراست!"
 else
-    echo "  ⚠️  نصب انجام شد ولی ربات هنوز بالا نیست:"
+    echo "  [!]  نصب انجام شد ولی ربات هنوز بالا نیست:"
     [ "$bot_up" != "1" ] && echo "     - وبهوک ست نیست: اول https/دامنه را درست کن بعد بزن:"
     [ "$bot_up" != "1" ] && echo "       php tools/set_webhook.php ${BASE_URL}/bot.php"
     [ "$tpl_ok" != "1" ] && echo "     - فایل‌های قالب ناقص‌اند (ریپو را کامل clone کن)."
 fi
 echo "========================================="
 echo ""
-echo "📌 برای استفاده:"
+echo "[i] برای استفاده:"
 echo "   1. ربات اصلی را در تلگرام /start بزنید"
 echo "   2. آیدی شما به عنوان سوپرادمین ثبت شد"
 echo "   3. برای هر کاربر: ابتدا درخواست بده، بعد ادمین تأیید کند"
