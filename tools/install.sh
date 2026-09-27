@@ -1963,40 +1963,19 @@ setup_app_db_account() {
     fi
 }
 
-preflight_fresh_server() {
-    echo "✅ Fresh-server preflight (base packages, web server, database)..."
-
-    if ! has_cmd apt-get; then
-        echo "   ⚠️  apt-get not found - this installer targets Debian/Ubuntu."
-        echo "      Install PHP 8.1+, a MySQL server and a web server yourself, then re-run."
-        return 0
-    fi
-    if [ "$(id -u)" -ne 0 ] && ! has_cmd sudo; then
-        echo "   ⚠️  Neither root nor sudo is available - nothing can be installed automatically."
-        return 0
-    fi
-
-    # --- 1) base packages everything else depends on ---------------------
-    local base_pkgs="ca-certificates curl wget git unzip gnupg lsb-release software-properties-common locales"
-    local missing="" p
-    for p in $base_pkgs; do
-        dpkg -s "$p" >/dev/null 2>&1 || missing="$missing $p"
-    done
-    if [ -n "$missing" ]; then
-        echo "   ⚠️  Missing base packages:$missing"
-        if ask_yes "   Install them? (needed before anything else on a fresh server)"; then
-            apt_install $missing || true
-        fi
-    fi
-
-    # --- 2) web server ----------------------------------------------------
-    local ws_apache=0 ws_nginx=0
+# ---------- web-server coexistence: one serves, the other yields ----------
+# Exactly ONE server may hold port 80/443. The loser is STOPPED and DISABLED
+# - never purged. Uninstalling the other stack destroys working setups (its
+# vhosts, snippets, certbot hooks) for a conflict a disable already solves,
+# and a later apt install can silently drag it back anyway.
+# Sets the global PICKED (nginx|apache|none) for the install steps that follow.
+ensure_single_webserver() {
+    local ws_apache=0 ws_nginx=0 pick=""
     has_cmd apache2 && ws_apache=1
     has_cmd nginx && ws_nginx=1
 
     if [ "$ws_apache" -eq 0 ] && [ "$ws_nginx" -eq 0 ]; then
         echo "   ⚠️  No web server - Telegram cannot reach the webhook without one."
-        local pick=""
         printf '   Install: [1] Apache (default)   [2] nginx   [3] none\n'
         read -r -p "   > " pick || true
         case "$pick" in
@@ -2034,73 +2013,69 @@ preflight_fresh_server() {
         esac
     fi
 
-    # --- Handle the chosen web server: install chosen, REMOVE other ---
     if [ "$PICKED" = "nginx" ]; then
-        # Stop and remove Apache if it exists
         if [ "$ws_apache" -eq 1 ]; then
-            warn "   Stopping and removing Apache (port conflict with nginx)..."
+            warn "   Stopping and disabling Apache (it must yield port 80 to nginx)..."
             $SUDO systemctl stop apache2 2>/dev/null || true
             $SUDO systemctl disable apache2 2>/dev/null || true
-            local apkg="apache2 apache2-bin apache2-data apache2-utils"
-            apkg="$apkg $(dpkg -l 'libapache2-mod-php*' 2>/dev/null | awk '$1=="ii"{print $2}')"
-            # apt_remove, not a raw apt-get: it already applies $SUDO (a bare
-            # apt-get only works when the installer itself is running as root),
-            # and the list comes from dpkg instead of naming a PHP version.
-            # apt aborts the WHOLE command on a package it cannot locate, so
-            # "libapache2-mod-php8.5" on a box that ships 8.3 would leave every
-            # other package in the list installed - and nothing would say so.
-            apt_remove $apkg || true
-            # Nuclear option: if the apache2 binary is still on PATH, force the
-            # package out - apt refuses while some dependency still wants it.
-            if has_cmd apache2; then
-                warn "   apache2 still exists after the purge - trying dpkg --remove..."
-                $SUDO dpkg --remove --force-depends apache2 apache2-bin apache2-utils 2>/dev/null || true
-            fi
-            if has_cmd apache2; then
-                warn "   Apache is still installed - nginx will not get port 80."
-                warn "   Finish it by hand: sudo apt-get purge apache2 apache2-bin apache2-utils libapache2-mod-php"
+            if systemctl is-active --quiet apache2 2>/dev/null; then
+                warn "   Apache still running - stop it by hand: sudo systemctl stop apache2"
             else
-                ok "   Apache removed"
+                ok "   Apache stopped and disabled (packages and configs kept)"
             fi
+            echo "      To fully remove it later: sudo apt-get purge apache2 apache2-bin apache2-utils 'libapache2-mod-php*'"
         fi
         # Install nginx if not present (use --no-install-recommends to avoid pulling apache2)
         if [ "$ws_nginx" -eq 0 ]; then
             ok "   Installing nginx..."
             apt_install_nr nginx || true
         fi
-        # Double-check: make sure Apache didn't sneak in as a dependency
+        # An apache2 binary may exist without running (e.g. dragged in as a
+        # dependency) - it owns no port, so leave the packages alone and only
+        # make sure it stays down instead of purging the stack.
         if has_cmd apache2; then
-            warn "   Apache snuck in as a dependency - removing..."
-            apt_remove apache2 apache2-bin apache2-data apache2-utils libapache2-mod-php 2>/dev/null || true
-            has_cmd apache2 && warn "   Apache still present - purge manually" || ok "   Apache removed"
+            if systemctl is-active --quiet apache2 2>/dev/null; then
+                warn "   Apache appeared as a dependency and is RUNNING - yielding ports to nginx..."
+                $SUDO systemctl stop apache2 2>/dev/null || true
+            fi
+            $SUDO systemctl disable apache2 2>/dev/null || true
+            ok "   Apache disabled (packages kept - purge manually if you ever want it gone)"
         fi
         $SUDO systemctl enable --now nginx 2>/dev/null || true
         ok "   nginx is ready"
 
     elif [ "$PICKED" = "apache" ]; then
-        # Stop and remove nginx if it exists
         if [ "$ws_nginx" -eq 1 ]; then
-            warn "   Stopping and removing nginx (port conflict with Apache)..."
+            warn "   Stopping and disabling nginx (it must yield port 80 to Apache)..."
             $SUDO systemctl stop nginx 2>/dev/null || true
             $SUDO systemctl disable nginx 2>/dev/null || true
-            apt_remove nginx nginx-common || true
-            if has_cmd nginx; then
-                warn "   nginx is still installed - Apache will not get port 80."
-                warn "   Finish it by hand: sudo apt-get purge nginx nginx-common"
+            if systemctl is-active --quiet nginx 2>/dev/null; then
+                warn "   nginx still running - stop it by hand: sudo systemctl stop nginx"
             else
-                ok "   nginx removed"
+                ok "   nginx stopped and disabled (packages and vhosts kept)"
             fi
+            echo "      To fully remove it later: sudo apt-get purge nginx nginx-common"
         fi
         # Install Apache if not present
         if [ "$ws_apache" -eq 0 ]; then
             ok "   Installing Apache..."
             apt_install apache2 || true
         fi
+        # Same rule mirrored: a lingering nginx binary that is not running
+        # owns no port - keep it down, do not uninstall it.
+        if has_cmd nginx; then
+            if systemctl is-active --quiet nginx 2>/dev/null; then
+                warn "   nginx is RUNNING although Apache was chosen - yielding ports..."
+                $SUDO systemctl stop nginx 2>/dev/null || true
+            fi
+            $SUDO systemctl disable nginx 2>/dev/null || true
+            ok "   nginx disabled (packages kept - purge manually if you ever want it gone)"
+        fi
         $SUDO systemctl enable --now apache2 2>/dev/null || true
         ok "   Apache is ready"
 
     else
-        # none - stop and disable both
+        # none - stop and disable both (packages stay for later use)
         warn "   No web server selected."
         if [ "$ws_apache" -eq 1 ]; then
             $SUDO systemctl stop apache2 2>/dev/null || true
@@ -2115,6 +2090,38 @@ preflight_fresh_server() {
         warn "   Telegram cannot reach the webhook without a web server!"
         warn "   You can add one later with: bash tools/install.sh"
     fi
+}
+
+preflight_fresh_server() {
+    echo "✅ Fresh-server preflight (base packages, web server, database)..."
+
+    if ! has_cmd apt-get; then
+        echo "   ⚠️  apt-get not found - this installer targets Debian/Ubuntu."
+        echo "      Install PHP 8.1+, a MySQL server and a web server yourself, then re-run."
+        return 0
+    fi
+    if [ "$(id -u)" -ne 0 ] && ! has_cmd sudo; then
+        echo "   ⚠️  Neither root nor sudo is available - nothing can be installed automatically."
+        return 0
+    fi
+
+    # --- 1) base packages everything else depends on ---------------------
+    local base_pkgs="ca-certificates curl wget git unzip gnupg lsb-release software-properties-common locales"
+    local missing="" p
+    for p in $base_pkgs; do
+        dpkg -s "$p" >/dev/null 2>&1 || missing="$missing $p"
+    done
+    if [ -n "$missing" ]; then
+        echo "   ⚠️  Missing base packages:$missing"
+        if ask_yes "   Install them? (needed before anything else on a fresh server)"; then
+            apt_install $missing || true
+        fi
+    fi
+
+    # --- 2) web server: exactly one serves, the other only yields ---
+    # (implemented in ensure_single_webserver() above so it stays testable;
+    # PICKED is global on purpose - the install steps below read it.)
+    ensure_single_webserver
 
     # --- 3) database ------------------------------------------------------
     local db_bin=""
@@ -3298,16 +3305,23 @@ fi
 # nginx path: a new vhost needs (at most) a reload, but php-fpm needs a real
 # restart - both for a freshly written systemd drop-in AND for php.ini changes
 # (pcre.jit=0 above is not picked up by running workers otherwise).
-# Also: if nginx was chosen but Apache snuck in as a dependency, remove it.
-if has_cmd nginx; then
-    # Safety: remove Apache if it snuck in as a certbot/PHP dependency
-    if has_cmd apache2 || has_cmd apachectl || [ -f /etc/apache2/apache2.conf ]; then
-        warn "   Apache present after nginx install - removing..."
-        $SUDO systemctl stop apache2 2>/dev/null || true
+# Also: while nginx is the server that actually SERVES, any Apache beside it
+# must be kept down - stopped and disabled, never uninstalled (never purge:
+# those packages and configs may belong to another setup on this box).
+if has_cmd nginx && systemctl is-active --quiet nginx 2>/dev/null; then
+    # Coexistence guard: nginx SERVES this box, so any apache2 stack beside
+    # it must stay down - stop it if running, disable it so it also loses
+    # the boot race. NEVER purge: those packages and configs may belong to
+    # another setup on this box (that is exactly how working installs die).
+    if has_cmd apache2 || has_cmd httpd || [ -f /etc/apache2/apache2.conf ]; then
+        if systemctl is-active --quiet apache2 2>/dev/null || systemctl is-active --quiet httpd 2>/dev/null; then
+            warn "   Apache is running beside serving nginx - yielding ports to nginx..."
+            $SUDO systemctl stop apache2 2>/dev/null || true
+            $SUDO systemctl stop httpd 2>/dev/null || true
+        fi
         $SUDO systemctl disable apache2 2>/dev/null || true
-        apt_remove apache2 apache2-bin apache2-data apache2-utils libapache2-mod-php 2>/dev/null || true
-        $SUDO apt-get purge -y apache2 apache2-bin apache2-data apache2-utils libapache2-mod-php 2>/dev/null || true
-        has_cmd apache2 && warn "   Apache still present - purge manually" || ok "   Apache removed"
+        $SUDO systemctl disable httpd 2>/dev/null || true
+        ok "   Apache stack disabled (packages and configs kept - purge manually if ever wanted)"
     fi
     if $SUDO systemctl reload nginx 2>/dev/null || $SUDO service nginx reload 2>/dev/null; then
         echo "   ✔ nginx reloaded"
