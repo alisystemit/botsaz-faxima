@@ -108,6 +108,19 @@ apache_run_user() {
     if [ -f /etc/apache2/envvars ]; then
         u="$(sed -n 's/^[[:space:]]*export[[:space:]]\{1,\}APACHE_RUN_USER=//p' /etc/apache2/envvars | head -n1 | tr -d "\"'")"
     fi
+    # nginx + php-fpm: PHP runs as the POOL user, which need not be www-data.
+    # Read it from the pool config so the impersonation tests below ask as the
+    # account that really executes bot.php - otherwise a custom pool user gets
+    # a green report while PHP itself cannot read a single file.
+    if [ -z "$u" ] && ! has_cmd apache2 && ! has_cmd httpd && has_cmd nginx; then
+        local _pf=""
+        for _pf in /etc/php/*/fpm/pool.d/www.conf /etc/php/*/fpm/pool.d/*.conf; do
+            [ -f "$_pf" ] || continue
+            u="$(sed -n 's/^[[:space:]]*user[[:space:]]*=[[:space:]]*//p' "$_pf" | head -n1 | tr -d "\"'")"
+            [ -n "$u" ] && break
+        done
+        unset _pf
+    fi
     printf '%s' "${u:-www-data}"
 }
 
@@ -170,8 +183,31 @@ show_path_chain() { # $1 = file path
 # reporting them cannot see the sandbox the server actually runs in.
 #   echoes the reason (empty = nothing hides the path)
 #   0 = answered, 3 = cannot tell
+# Why ONE unit is checked here is wrong on nginx: there PHP runs in php-fpm,
+# a DIFFERENT unit with its own sandbox. nginx serving statics while php-fpm
+# 403s every bot.php is exactly the split symptom - so every unit that can
+# touch the path is asked. Echoes "unit:reason" (empty = nothing hides it).
+_unit_sandbox_blocker() { # $1 = unit, $2 = path
+    local unit="$1" p="$2" v="" d=""
+    v="$(systemctl show "$unit" -p ProtectHome --value 2>/dev/null)" || v=""
+    case "$v" in
+        yes|true|1|on)
+            printf '%s:ProtectHome=%s' "$unit" "$v"
+            return 0 ;;
+    esac
+    v="$(systemctl show "$unit" -p InaccessiblePaths --value 2>/dev/null)" || v=""
+    for d in $v; do
+        case "$p" in
+            "$d"|"$d"/*)
+                printf '%s:InaccessiblePaths=%s' "$unit" "$d"
+                return 0 ;;
+        esac
+    done
+    return 0
+}
+
 systemd_sandbox_blocker() { # $1 = project path
-    local p="$1" v="" f d hit unit=""
+    local p="$1" v="" f d hit unit="" _sb_units="" _sb_u="" _sb_hit=""
     # ProtectHome only guards these three roots; a project in /var/www can
     # never be hidden this way, so do not pretend it can.
     case "$p" in
@@ -183,19 +219,37 @@ systemd_sandbox_blocker() { # $1 = project path
     # would reimplement systemd's merge rules and get them subtly wrong on
     # exactly the servers this check exists for.
     if has_cmd systemctl; then
-        if systemctl show apache2 -p LoadState --value 2>/dev/null | grep -qx loaded; then
-            unit="apache2"
-        elif systemctl show httpd -p LoadState --value 2>/dev/null | grep -qx loaded; then
-            unit="httpd"
-        elif systemctl show nginx -p LoadState --value 2>/dev/null | grep -qx loaded; then
-            unit="nginx"
+        for _sb_u in apache2 httpd nginx; do
+            if systemctl show "$_sb_u" -p LoadState --value 2>/dev/null | grep -qx loaded; then
+                _sb_units="$_sb_units $_sb_u"
+            fi
+        done
+        # With nginx, PHP runs in php-fpm - its own unit, its own sandbox.
+        for _sb_u in $(systemctl list-units --type=service --all --no-legend 2>/dev/null | awk '{print $1}' | grep -E '^php[0-9.]*-fpm\.service$' || true); do
+            _sb_u="${_sb_u%.service}"
+            if systemctl show "$_sb_u" -p LoadState --value 2>/dev/null | grep -qx loaded; then
+                _sb_units="$_sb_units $_sb_u"
+            fi
+        done
+        if [ -n "$_sb_units" ]; then
+            for _sb_u in $_sb_units; do
+                _sb_hit="$(_unit_sandbox_blocker "$_sb_u" "$p")"
+                if [ -n "$_sb_hit" ]; then
+                    printf '%s' "$_sb_hit"
+                    unset _sb_units _sb_u _sb_hit
+                    return 0
+                fi
+            done
+            unset _sb_units _sb_u _sb_hit
+            return 0
         fi
+        unset _sb_units _sb_u _sb_hit
     fi
     if [ -n "$unit" ]; then
         v="$(systemctl show "$unit" -p ProtectHome --value 2>/dev/null)" || v=""
         case "$v" in
             yes|true|1|on)
-                printf 'ProtectHome=%s' "$v"
+                printf '%s:ProtectHome=%s' "$unit" "$v"
                 return 0 ;;
         esac
         # ProtectHome can be off while an explicit entry hides the path just
@@ -205,7 +259,7 @@ systemd_sandbox_blocker() { # $1 = project path
         for d in $v; do
             case "$p" in
                 "$d"|"$d"/*)
-                    printf 'InaccessiblePaths=%s' "$d"
+                    printf '%s:InaccessiblePaths=%s' "$unit" "$d"
                     return 0 ;;
             esac
         done
@@ -362,47 +416,60 @@ docroot_reachable() {
 # next apt upgrade; a drop-in survives it.
 # ==================================================================
 fix_apache_systemd_hardening() { # $1 = "apply" to write, else dry-run report
-    local mode="${1:-}" unit="" blk="" dropdir dropfile u
+    local mode="${1:-}" dropdir dropfile u blk="" changed=0 _units=""
     case "$ROOT_DIR" in
         /root|/root/*|/home|/home/*) ;;
         *) return 0 ;;
     esac
     has_cmd systemctl || return 0
-    if systemctl show apache2 -p LoadState --value 2>/dev/null | grep -qx loaded; then
-        unit="apache2"
-    elif systemctl show httpd -p LoadState --value 2>/dev/null | grep -qx loaded; then
-        unit="httpd"
-    elif systemctl show nginx -p LoadState --value 2>/dev/null | grep -qx loaded; then
-        unit="nginx"
-    else
-        return 0
-    fi
-    blk="$(systemd_sandbox_blocker "$ROOT_DIR")" || blk=""
-    [ -z "$blk" ] && return 0
-    dropdir="/etc/systemd/system/${unit}.service.d"
-    dropfile="$dropdir/botsaz.conf"
-    if [ -f "$dropfile" ] && grep -q '^ProtectHome=false' "$dropfile" 2>/dev/null; then
-        return 0
-    fi
-    if [ "$mode" != "apply" ]; then
-        echo "   ❌ $unit systemd sandbox blocks $ROOT_DIR ($blk)."
-        echo "      chmod cannot fix this - run: sudo bash tools/fix_systemd_apache.sh"
-        return 0
-    fi
-    echo "   ⏳ $unit is sandboxed ($blk) - writing persistent override..."
-    $SUDO mkdir -p "$dropdir" 2>/dev/null || true
-    printf '[Service]\nInaccessiblePaths=\nProtectHome=false\n' | $SUDO tee "$dropfile" >/dev/null
-    echo "   ✔ wrote $dropfile"
-    $SUDO systemctl daemon-reload 2>/dev/null || true
-    $SUDO systemctl restart "$unit" 2>/dev/null && echo "   ✔ $unit restarted with new sandboxing" || \
-        echo "   ⚠️  $unit restart failed - restart manually"
-    # php-fpm units need the same drop-in on nginx setups
+    # Every unit that can touch the path: the web server itself plus php-fpm
+    # (with nginx, PHP runs there - an nginx-only drop-in would leave bot.php
+    # sandboxed while statics look fine).
+    for u in apache2 httpd nginx; do
+        if systemctl show "$u" -p LoadState --value 2>/dev/null | grep -qx loaded; then
+            _units="$_units $u"
+        fi
+    done
     for u in $(systemctl list-unit-files --type=service --no-legend 2>/dev/null | awk '{print $1}' | grep -E '^php[0-9.]*-fpm\.service$' || true); do
         u="${u%.service}"
-        $SUDO mkdir -p "/etc/systemd/system/${u}.service.d" 2>/dev/null || true
-        printf '[Service]\nInaccessiblePaths=\nProtectHome=false\n' | $SUDO tee "/etc/systemd/system/${u}.service.d/botsaz.conf" >/dev/null
-        $SUDO systemctl restart "$u" 2>/dev/null || true
+        if systemctl show "$u" -p LoadState --value 2>/dev/null | grep -qx loaded; then
+            _units="$_units $u"
+        fi
     done
+    for u in $_units; do
+        blk="$(_unit_sandbox_blocker "$u" "$ROOT_DIR")"
+        [ -z "$blk" ] && continue
+        dropdir="/etc/systemd/system/${u}.service.d"
+        dropfile="$dropdir/botsaz.conf"
+        if [ -f "$dropfile" ] && grep -q '^ProtectHome=false' "$dropfile" 2>/dev/null; then
+            continue
+        fi
+        if [ "$mode" != "apply" ]; then
+            echo "   ❌ $u systemd sandbox blocks $ROOT_DIR ($blk)."
+            echo "      chmod cannot fix this - run: sudo bash tools/fix_systemd_apache.sh"
+            continue
+        fi
+        echo "   ⏳ $u is sandboxed ($blk) - writing persistent override..."
+        $SUDO mkdir -p "$dropdir" 2>/dev/null || true
+        printf '[Service]\nInaccessiblePaths=\nProtectHome=false\n' | $SUDO tee "$dropfile" >/dev/null
+        echo "   ✔ wrote $dropfile"
+        changed=1
+    done
+    unset _units
+    if [ "$changed" = "1" ]; then
+        $SUDO systemctl daemon-reload 2>/dev/null || true
+        for u in apache2 httpd nginx; do
+            $SUDO systemctl cat "$u" >/dev/null 2>&1 || continue
+            [ -f "/etc/systemd/system/${u}.service.d/botsaz.conf" ] || continue
+            $SUDO systemctl restart "$u" 2>/dev/null && echo "   ✔ $u restarted with new sandboxing" || \
+                echo "   ⚠️  $u restart failed - restart manually"
+        done
+        for u in $(systemctl list-units --type=service --all --no-legend 2>/dev/null | awk '{print $1}' | grep -E '^php[0-9.]*-fpm\.service$' || true); do
+            u="${u%.service}"
+            [ -f "/etc/systemd/system/${u}.service.d/botsaz.conf" ] || continue
+            $SUDO systemctl restart "$u" 2>/dev/null && echo "   ✔ $u restarted with new sandboxing" || true
+        done
+    fi
     return 0
 }
 
@@ -417,17 +484,14 @@ fix_apache_systemd_hardening() { # $1 = "apply" to write, else dry-run report
 drop_vhost_conflicts() {
     local host="$1" mine="$2" apply="${3:-}" link tgt base minebase esc
     VHOST_CONFLICTS=0
-    [ -d /etc/apache2/sites-enabled ] || return 0
+    # ---- Apache conflicts ----
+    [ -d /etc/apache2/sites-enabled ] || true
     esc="$(printf '%s' "$host" | sed 's/[.[\*^$\\/]/\\&/g')"
     minebase="$(basename "${mine%.conf}")"
     for link in /etc/apache2/sites-enabled/*; do
         [ -e "$link" ] || continue
         base="$(basename "$link")"
         base="${base%.conf}"
-        # Never treat our own vhost as a competitor. readlink -f is not
-        # dependable (it silently fails on filesystems without symlinks), so the
-        # NAME is compared too - otherwise a broken readlink would make the
-        # installer disable the very vhost it just wrote.
         tgt="$(readlink -f "$link" 2>/dev/null || true)"
         [ -n "$tgt" ] || tgt="$link"
         if [ "$base" = "$minebase" ] || [ "$tgt" = "$mine" ] || [ "$link" = "$mine" ]; then
@@ -448,6 +512,28 @@ drop_vhost_conflicts() {
             echo "        sudo a2dissite $base && sudo systemctl reload apache2"
         fi
     done
+    # ---- nginx conflicts ----
+    if [ -d /etc/nginx/sites-enabled ]; then
+        for link in /etc/nginx/sites-enabled/*; do
+            [ -e "$link" ] || continue
+            base="$(basename "$link")"
+            base="${base%.conf}"
+            if [ "$base" = "$minebase" ] || [ "$base" = "botsaz" ]; then
+                continue
+            fi
+            if grep -qE "server_name[[:space:]]+${esc};" "$link" 2>/dev/null; then
+                VHOST_CONFLICTS=$((VHOST_CONFLICTS + 1))
+                echo "   ⚠️  Another enabled nginx vhost also claims $host:"
+                echo "        $link"
+                if [ "$apply" = "apply" ]; then
+                    echo "      Removing nginx conflict..."
+                    $SUDO rm -f "$link" 2>/dev/null || true
+                else
+                    echo "      Disable it with: sudo rm $link && sudo systemctl reload nginx"
+                fi
+            fi
+        done
+    fi
     return 0
 }
 
@@ -697,6 +783,23 @@ report_health() {
                 h_note "sudo a2enmod rewrite && sudo systemctl reload apache2"
             fi
         fi
+        # nginx serves statics itself; PHP only runs if php-fpm behind it is alive.
+        # Without this, a dead php-fpm looks like a healthy server until every
+        # webhook answers 502 - which no other check would connect to php-fpm.
+        if [ "$ws" = "nginx" ]; then
+            local _fpm_svc=""
+            if has_cmd systemctl; then
+                _fpm_svc="$(systemctl list-units --type=service --all --no-legend 2>/dev/null | awk '{print $1}' | grep -E '^php[0-9.]*-fpm\.service$' | head -n1 || true)"
+            fi
+            if [ -z "$_fpm_svc" ]; then
+                h_fail "no php-fpm service found - nginx serves statics but PHP never executes"
+            elif systemctl is-active --quiet "$_fpm_svc" 2>/dev/null; then
+                h_ok "$_fpm_svc is running"
+            else
+                h_fail "$_fpm_svc is not running - sudo systemctl start $_fpm_svc"
+            fi
+            unset _fpm_svc
+        fi
     fi
 
     # ---------- 3) project files ----------
@@ -797,19 +900,23 @@ report_health() {
             h_warn "cannot ask systemd whether it hides $ROOT_DIR from the web server"
             h_note "if that service runs under ProtectHome, every request is 403 while"
             h_note "all the checks above still pass - verify with:"
-            h_note "  systemctl show apache2 -p ProtectHome --value"
+            h_note "  systemctl show apache2 nginx 'php*-fpm' -p ProtectHome --value"
         elif [ -n "$_sb" ]; then
+            # _sb looks like "unit:reason" (e.g. php8.2-fpm:ProtectHome=yes),
+            # so the manual fix below names the RIGHT unit, not always apache2.
+            local _sb_unit="${_sb%%:*}"
+            [ -n "$_sb_unit" ] || _sb_unit="apache2"
             h_fail "systemd keeps the web server out of $ROOT_DIR ($_sb)"
             h_note "this is why every permission check passed and requests still failed:"
-            h_note "those run outside the service sandbox, Apache runs inside it"
+            h_note "those run outside the service sandbox, $_sb_unit runs inside it"
             h_note "install mode writes the drop-in for you; by hand it is:"
-            h_note "  sudo mkdir -p /etc/systemd/system/apache2.service.d"
-            h_note "  printf '[Service]\nInaccessiblePaths=\nProtectHome=false\n' | sudo tee /etc/systemd/system/apache2.service.d/botsaz.conf"
-            h_note "  sudo systemctl daemon-reload && sudo systemctl restart apache2"
+            h_note "  sudo mkdir -p /etc/systemd/system/${_sb_unit}.service.d"
+            h_note "  printf '[Service]\nInaccessiblePaths=\nProtectHome=false\n' | sudo tee /etc/systemd/system/${_sb_unit}.service.d/botsaz.conf"
+            h_note "  sudo systemctl daemon-reload && sudo systemctl restart $_sb_unit"
         else
             h_ok "systemd does not hide $ROOT_DIR from the web server"
         fi
-        unset _sb _sb_rc
+        unset _sb _sb_rc _sb_unit
 
         if [ -d /etc/apache2/sites-enabled ]; then
             drop_vhost_conflicts "$host" "/etc/apache2/sites-available/botsaz.conf"
@@ -857,6 +964,76 @@ report_health() {
                     h_note "fix: once the certificate exists, run bash tools/install.sh again"
                 fi
             fi
+        elif has_cmd nginx && [ -f /etc/nginx/sites-available/botsaz.conf ]; then
+            # nginx-only server: same questions as the Apache branch above, but
+            # answered from the nginx syntax (server_name/root/listen/ssl_certificate).
+            local own_n="/etc/nginx/sites-available/botsaz.conf"
+            local own_ne="/etc/nginx/sites-enabled/botsaz.conf"
+            if [ ! -e "$own_ne" ]; then
+                h_fail "$own_n exists but is not enabled - sudo ln -s $own_n $own_ne && sudo systemctl reload nginx"
+            else
+                local ng_h="" ng_root="" ng_sock="" ng_fpm="" _nf _dup
+                ng_h="$(sed -n 's/^[[:space:]]*server_name[[:space:]]\{1,\}\([^;[:space:]]*\).*/\1/p' "$own_n" | head -n1)"
+                ng_root="$(sed -n 's/^[[:space:]]*root[[:space:]]\{1,\}"\?\([^";]*\)"\?;.*/\1/p' "$own_n" | head -n1)"
+                if [ "$ng_h" = "$host" ]; then
+                    h_ok "our nginx vhost claims $host itself"
+                else
+                    h_fail "our nginx vhost claims '${ng_h:-no server_name}' but base_url is '$host'"
+                    h_note "re-run bash tools/install.sh to rewrite it (a backup is taken first)"
+                fi
+                if [ "$ng_root" = "$ROOT_DIR" ]; then
+                    h_ok "our nginx vhost serves $ROOT_DIR"
+                else
+                    h_fail "our nginx vhost serves '${ng_root:-no root}' instead of $ROOT_DIR"
+                    h_note "Telegram delivers to a DocumentRoot that is not this project"
+                fi
+                if grep -qE 'listen[[:space:]]+(\[::\]:)?443 ssl' "$own_n"; then
+                    if grep -q "letsencrypt/live/$host/" "$own_n"; then
+                        h_ok "HTTPS block present and its certificate belongs to $host"
+                    else
+                        h_fail "HTTPS block present but its certificate belongs to another domain"
+                    fi
+                else
+                    h_fail "no listen 443 ssl block - https://$host cannot be answered at all"
+                    h_note "fix: once the certificate exists, run bash tools/install.sh again"
+                fi
+                # another enabled server with the same name wins by file order
+                _dup=""
+                for _nf in /etc/nginx/sites-enabled/*; do
+                    [ -e "$_nf" ] || continue
+                    case "$_nf" in *botsaz.conf) continue ;; esac
+                    if grep -Eq "server_name[^;]*[[:space:]]$(printf '%s' "$host" | sed 's/[.[\*^$\\/]/\\&/g')([;[:space:]]|$)" "$_nf" 2>/dev/null; then
+                        _dup="$_dup $(basename "$_nf")"
+                    fi
+                done
+                if [ -z "$_dup" ]; then
+                    h_ok "no other nginx server competes for $host"
+                else
+                    h_fail "other nginx server(s) also claim $host:$_dup - first file wins, Telegram may 404"
+                    h_note "sudo rm /etc/nginx/sites-enabled/default (if unused) && sudo systemctl reload nginx"
+                fi
+                unset _nf _dup
+                # PHP only runs if the baked-in socket still exists
+                ng_sock="$(sed -n 's/^[[:space:]]*fastcgi_pass[[:space:]]\{1,\}unix:\([^;]*\);.*/\1/p' "$own_n" | head -n1)"
+                if [ -z "$ng_sock" ]; then
+                    h_fail "no fastcgi_pass socket in $own_n - PHP never executes (502 for every bot)"
+                elif [ -S "$ng_sock" ]; then
+                    h_ok "php-fpm socket $ng_sock exists"
+                else
+                    h_fail "php-fpm socket $ng_sock is missing - every PHP request is 502"
+                    h_note "the PHP version changed after the vhost was written: re-run bash tools/install.sh"
+                fi
+                # ...and the service behind the socket has to be alive
+                ng_fpm="$(systemctl list-units --type=service --all --no-legend 2>/dev/null | awk '{print $1}' | grep -E '^php[0-9.]*-fpm\.service$' | head -n1 || true)"
+                if [ -z "$ng_fpm" ]; then
+                    h_warn "no php-fpm service found - nginx cannot execute PHP"
+                elif systemctl is-active --quiet "$ng_fpm" 2>/dev/null; then
+                    h_ok "$ng_fpm is running"
+                else
+                    h_fail "$ng_fpm is not running - sudo systemctl start $ng_fpm"
+                fi
+                unset ng_h ng_root ng_sock ng_fpm
+            fi
         fi
     else
         h_warn "no hostname in base_url - cannot inspect the vhost"
@@ -868,7 +1045,13 @@ report_health() {
     if [ -z "$host" ]; then
         h_warn "no hostname - cannot check the certificate"
     elif [ ! -f "$cert" ]; then
-        h_warn "no Let's Encrypt certificate for $host - certbot --apache -d $host --non-interactive"
+        if has_cmd apache2 || has_cmd httpd; then
+            h_warn "no Let's Encrypt certificate for $host - certbot --apache -d $host --non-interactive"
+        elif has_cmd nginx; then
+            h_warn "no Let's Encrypt certificate for $host - certbot --nginx -d $host --non-interactive"
+        else
+            h_warn "no Let's Encrypt certificate for $host - install a web server and run certbot"
+        fi
     else
         endd="$(openssl x509 -enddate -noout -in "$cert" 2>/dev/null | cut -d= -f2 || true)"
         t_end="$(date -d "$endd" +%s 2>/dev/null || true)"
@@ -1683,7 +1866,7 @@ preflight_fresh_server() {
         printf '   Install: [1] Apache (default)   [2] nginx   [3] none\n'
         read -r -p "   > " pick || true
         case "$pick" in
-            2) if ask_yes "   Install nginx?"; then apt_install nginx || true; fi ;;
+            2) if ask_yes "   Install nginx?"; then apt_install nginx || true; $SUDO systemctl enable --now nginx 2>/dev/null || true; fi ;;
             3) echo "   no web server installed" ;;
             *) if ask_yes "   Install Apache?"; then apt_install apache2 || true; fi ;;
         esac
@@ -1868,6 +2051,8 @@ elif has_cmd nginx; then
         echo "   nginx PHP-FPM ✔"
     elif ask_yes "   Install php-fpm so nginx can execute PHP?"; then
         if apt_install php-fpm; then
+            $SUDO systemctl enable --now php8.2-fpm 2>/dev/null || true
+            $SUDO systemctl enable --now php8.1-fpm 2>/dev/null || true
             echo "   nginx PHP-FPM installed ✔"
         else
             echo "   ⚠️  Could not install php-fpm - nginx will not run PHP."
@@ -2246,13 +2431,47 @@ configure_vhost() {
 
     if has_cmd nginx; then
         local ng_conf="/etc/nginx/sites-available/botsaz.conf"
+        # Like the Apache branch: repair the path BEFORE any early return, and
+        # never wave a stale vhost through blindly. In particular a re-run
+        # after the certificate arrived must ADD the :443 block - the old code
+        # returned here and left plain HTTP forever, so Telegram kept failing
+        # with nothing in the run explaining why.
+        docroot_reachable "$ROOT_DIR" apply || true
+        local cur_host="" has_443=0 need_write=0 why="" bak=""
         if [ -f "$ng_conf" ]; then
-            echo "   ✔ nginx vhost already exists ($ng_conf) - left untouched."
+            cur_host="$(sed -n 's/^[[:space:]]*server_name[[:space:]]\{1,\}\([^;[:space:]]*\).*/\1/p' "$ng_conf" | head -n1)"
+            if grep -qE 'listen[[:space:]]+(\[::\]:)?443 ssl' "$ng_conf"; then has_443=1; fi
+            if [ "$cur_host" != "$host" ]; then
+                need_write=1
+                why="it serves '${cur_host:-no server_name}' but base_url is '$host'"
+            elif [ "$cert_ok" = "1" ] && [ "$has_443" = "0" ]; then
+                need_write=1
+                why="it has no HTTPS block although a certificate for $host exists"
+            elif [ "$cert_ok" = "1" ] && ! grep -q "letsencrypt/live/$host/" "$ng_conf"; then
+                need_write=1
+                why="its certificate belongs to another domain, not $host"
+            fi
+        fi
+        if [ -f "$ng_conf" ] && [ "$need_write" = "0" ]; then
+            echo "   ✔ nginx vhost already exists ($ng_conf) and matches $host - left untouched."
             return 0
         fi
-        if ! ask_yes "   Create the nginx vhost for $host -> $ROOT_DIR ?"; then
+        if [ "$need_write" = "1" ]; then
+            echo "   ⚠️  the existing vhost has to be updated: $why"
+            if ! ask_yes "   Rewrite $ng_conf (a backup is taken first)?"; then
+                echo "   ⚠️  vhost left as it is - it will keep answering '${cur_host:-?}', not $host."
+                return 0
+            fi
+            bak="$ng_conf.bak.$(date +%Y%m%d%H%M%S)"
+            if $SUDO cp -a "$ng_conf" "$bak" 2>/dev/null; then
+                echo "   backup: $bak"
+            fi
+        elif ! ask_yes "   Create the nginx vhost for $host -> $ROOT_DIR ?"; then
             echo "   vhost skipped"
             return 0
+        fi
+        if [ "$DOCROOT_OK" != "1" ]; then
+            echo "   ⚠️  Writing the vhost anyway - it cannot answer until the path above is fixed."
         fi
         if [ -z "$fpm_sock" ]; then
             echo "   ⚠️  No PHP-FPM socket under /run/php - install php-fpm or PHP will not execute."
@@ -2260,7 +2479,10 @@ configure_vhost() {
         $SUDO mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled 2>/dev/null || true
 
         # the application block is reused for :80 (no cert yet) and :443 (cert present)
+        # Include mime.types for correct MIME types on static files
         _nginx_app() {
+            echo "    include /etc/nginx/mime.types;"
+            echo "    default_type application/octet-stream;"
             echo "    root \"$ROOT_DIR\";"
             echo "    index index.php index.html;"
             echo "    client_max_body_size 64m;"
@@ -2276,34 +2498,44 @@ configure_vhost() {
             echo "    location ~ ^/bots/.*config\.php$ { deny all; return 404; }"
             if [ -n "$fpm_sock" ]; then
                 echo "    location ~ \.php\$ {"
+                echo "        try_files \$uri =404;"
                 echo "        include snippets/fastcgi-php.conf;"
                 echo "        fastcgi_pass unix:$fpm_sock;"
                 echo "        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;"
-                echo "    }"
+                echo "        fastcgi_index index.php;"
             fi
             echo "    location ~ /\.ht { deny all; return 404; }"
+        }
+        # SSL settings for the HTTPS server block
+        _nginx_ssl_settings() {
+            echo "    ssl_protocols TLSv1.2 TLSv1.3;"
+            echo "    ssl_ciphers HIGH:!aNULL:!MD5;"
+            echo "    ssl_prefer_server_ciphers on;"
+            echo "    ssl_session_cache shared:SSL:10m;"
+            echo "    ssl_session_timeout 10m;"
         }
         {
             echo "# Managed by botsaz install.sh - do not edit by hand"
             if [ "$cert_ok" = "1" ]; then
                 echo "server {"
-                echo "    listen 80;"
-                echo "    listen [::]:80;"
+                echo "    listen 80 default_server;"
+                echo "    listen [::]:80 default_server;"
                 echo "    server_name $host;"
                 echo "    return 301 https://$host\$request_uri;"
                 echo "}"
                 echo "server {"
-                echo "    listen 443 ssl;"
-                echo "    listen [::]:443 ssl;"
+                echo "    listen 443 ssl default_server;"
+                echo "    listen [::]:443 ssl default_server;"
                 echo "    server_name $host;"
                 echo "    ssl_certificate     /etc/letsencrypt/live/$host/fullchain.pem;"
                 echo "    ssl_certificate_key /etc/letsencrypt/live/$host/privkey.pem;"
+                _nginx_ssl_settings
                 _nginx_app
                 echo "}"
             else
                 echo "server {"
-                echo "    listen 80;"
-                echo "    listen [::]:80;"
+                echo "    listen 80 default_server;"
+                echo "    listen [::]:80 default_server;"
                 echo "    server_name $host;"
                 _nginx_app
                 echo "}"
@@ -2314,10 +2546,13 @@ configure_vhost() {
         local ng_out="" ng_rc=1
         ng_out="$($SUDO nginx -t 2>&1)" && ng_rc=0 || ng_rc=1
         if [ "$ng_rc" = "0" ]; then
-            if $SUDO systemctl reload nginx >/dev/null 2>&1 || $SUDO service nginx reload >/dev/null 2>&1; then
-                echo "   ✔ nginx vhost installed and reloaded"
+            # Start nginx if not running, reload if running
+            if ! systemctl is-active --quiet nginx 2>/dev/null; then
+                $SUDO systemctl start nginx 2>/dev/null || $SUDO service nginx start 2>/dev/null || true
+                echo "   ✔ nginx started"
             else
-                echo "   ⚠️  Vhost written but nginx could not be reloaded - reload it manually."
+                $SUDO systemctl reload nginx >/dev/null 2>&1 || $SUDO service nginx reload >/dev/null 2>&1 || true
+                echo "   ✔ nginx vhost installed and reloaded"
             fi
         else
             echo "   ⚠️  nginx config test failed - undoing the vhost so the server keeps running:"
@@ -2589,6 +2824,22 @@ if has_cmd systemctl && systemctl is-active --quiet apache2 2>/dev/null; then
     systemctl restart apache2 2>/dev/null && echo "   ✔ Apache restarted" || \
         echo "   ⚠️  Apache restart failed - reload manually"
 fi
+# nginx path: a new vhost needs (at most) a reload, but php-fpm needs a real
+# restart - both for a freshly written systemd drop-in AND for php.ini changes
+# (pcre.jit=0 above is not picked up by running workers otherwise).
+if has_cmd nginx; then
+    if $SUDO systemctl reload nginx 2>/dev/null || $SUDO service nginx reload 2>/dev/null; then
+        echo "   ✔ nginx reloaded"
+    else
+        echo "   ⚠️  nginx reload failed - reload manually"
+    fi
+    for _fpm in $(systemctl list-units --type=service --all --no-legend 2>/dev/null | awk '{print $1}' | grep -E '^php[0-9.]*-fpm\.service$' || true); do
+        if $SUDO systemctl restart "$_fpm" 2>/dev/null; then
+            echo "   ✔ $_fpm restarted"
+        fi
+    done
+    unset _fpm
+fi
 
 # ===== Post-restart: prove the server answers, then re-register the webhook ==
 # Why this exists: step 8 called set_webhook BEFORE fix_apache_systemd_hardening
@@ -2614,8 +2865,10 @@ for _i in 1 2 3 4 5 6; do
     if [ "$_warm" = "200" ] || [ "$_warm" = "403" ]; then break; fi
     sleep 1
 done
+_ws_label="Apache"
+if ! has_cmd apache2 && ! has_cmd httpd && has_cmd nginx; then _ws_label="nginx/php-fpm"; fi
 if [ "$_warm" = "200" ] || [ "$_warm" = "403" ]; then
-    echo "   ✔ Apache answers HTTP $_warm on ${BASE_URL%/}/bot.php after restart"
+    echo "   ✔ $_ws_label answers HTTP $_warm on ${BASE_URL%/}/bot.php after restart"
     if $PHP_BIN "$ROOT_DIR/tools/set_webhook.php" "${BASE_URL%/}/bot.php" 2>/dev/null; then
         echo "   ✔ Webhook re-confirmed against the live server"
     else
