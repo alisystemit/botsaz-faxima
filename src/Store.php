@@ -423,5 +423,44 @@ class Store
         }
     }
 
+    // ---- settings (key-value برای تنظیمات ران‌تایم مثل ساعت بکاپ) ----
+    // جدول اگر نباشد ساخته می‌شود؛ پس روی دیتابیس‌های قدیمی هم بدون مایگریشن کار می‌کند.
+    public function getSetting(string $key, ?string $default = null): ?string
+    {
+        $this->ensureSettingsTable();
+        $st = $this->pdo->prepare("SELECT v FROM settings WHERE k=?");
+        $st->execute([$key]);
+        $r = $st->fetch(PDO::FETCH_ASSOC);
+        return $r ? (string)$r['v'] : $default;
+    }
+
+    public function setSetting(string $key, string $value): void
+    {
+        $this->ensureSettingsTable();
+        if ($this->driver === 'mysql') {
+            $st = $this->pdo->prepare("INSERT INTO settings (k, v) VALUES (?, ?) ON DUPLICATE KEY UPDATE v=VALUES(v)");
+        } else {
+            $st = $this->pdo->prepare("INSERT OR REPLACE INTO settings (k, v) VALUES (?, ?)");
+        }
+        $st->execute([$key, $value]);
+    }
+
+    private function ensureSettingsTable(): void
+    {
+        if ($this->driver === 'mysql') {
+            $this->pdo->exec("CREATE TABLE IF NOT EXISTS settings (
+                k VARCHAR(60) PRIMARY KEY,
+                v TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+        } else {
+            $this->pdo->exec("CREATE TABLE IF NOT EXISTS settings (
+                k TEXT PRIMARY KEY,
+                v TEXT DEFAULT '',
+                updated_at TEXT DEFAULT (datetime('now'))
+            )");
+        }
+    }
+
     public function getPdo(): PDO { return $this->pdo; }
 }
