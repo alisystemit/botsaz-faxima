@@ -2591,16 +2591,12 @@ issue_ssl() {
         echo "   🔒 Certificate issued for $host ✔"
         echo "      Renewal is automatic (certbot installs its own timer/cron)."
     else
-        # Name the same plugin the attempt above really used - a hint that
+        # Name the SAME plugin the attempt above really used - a hint that
         # always says --apache sends an nginx operator to a command that fails
         # (and the --check report already branches correctly, so the two would
         # disagree about the same server).
-        local redo="--webroot -w $ROOT_DIR" _redo_active=""
-        _redo_active="$(active_web_server)"
-        if [ "$_redo_active" = "nginx" ] || { [ -z "$_redo_active" ] && ! has_cmd apache2 && ! has_cmd httpd && has_cmd nginx; }; then redo="--nginx"
-        elif has_cmd apache2 || has_cmd httpd; then redo="--apache"
-        fi
-        unset _redo_active
+        local redo="--webroot -w $ROOT_DIR"
+        [ "$_plugin" != "webroot" ] && redo="--$_plugin"
         echo "   ⚠️  Could not issue the certificate (exit $rc)."
         echo "      Usual causes: DNS not pointing here, port 80 blocked, or a local machine."
         echo "      Re-run it later with: sudo certbot $redo -d $host"
@@ -2897,7 +2893,13 @@ configure_vhost() {
         # Remove the stock default vhost so it doesn't win over our vhost.
         # Ubuntu's /etc/nginx/sites-enabled/default has its own server_name
         # and listen directives which can override ours.
-        if [ -f /etc/nginx/sites-enabled/default ]; then
+        # Remember where it pointed: this vhost is deleted again if the
+        # nginx -t below rejects it, and a sites-enabled/ left with nothing
+        # in it means the NEXT reload - certbot's renewal hook included -
+        # serves nobody while every check above still says "nginx running".
+        local stock_default_tgt=""
+        if [ -e /etc/nginx/sites-enabled/default ]; then
+            stock_default_tgt="$(readlink -f /etc/nginx/sites-enabled/default 2>/dev/null || true)"
             $SUDO rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
             echo "   ✔ Removed conflicting /etc/nginx/sites-enabled/default"
         fi
