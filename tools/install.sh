@@ -1747,6 +1747,11 @@ if [ "$(id -u)" -eq 0 ] && [ -d /root ]; then
                         sed -i 's#/root/botsaz-faxima#/var/www/botsaz-faxima#g' "$_vhost"
                         echo "   ✔ Updated DocumentRoot in $_vhost"
                     fi
+                    # CRITICAL: Update ROOT_DIR so all subsequent paths use /var/www
+                    if [ "$ROOT_DIR" = "/root/botsaz-faxima" ] || [ "$ROOT_DIR" = "/root/botsaz-faxima" ]; then
+                        ROOT_DIR="/var/www/botsaz-faxima"
+                        echo "   ✔ ROOT_DIR updated to: $ROOT_DIR"
+                    fi
                     echo "   ⚠️  Run: bash tools/install.sh --check"
                     echo "        to verify the move worked"
                 fi
@@ -2611,7 +2616,8 @@ configure_vhost() {
         return 0
     fi
 
-    if has_cmd nginx; then
+    if [ "$_vhost_active" = "nginx" ] || { [ -z "$_vhost_active" ] && has_cmd nginx; }; then
+        unset _vhost_active
         local ng_conf="/etc/nginx/sites-available/botsaz.conf"
         # Like the Apache branch: repair the path BEFORE any early return, and
         # never wave a stale vhost through blindly. In particular a re-run
