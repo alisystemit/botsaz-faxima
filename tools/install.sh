@@ -1794,48 +1794,55 @@ if [ "$(id -u)" -eq 0 ] && [ -d /root ]; then
             # If mode bits are fine but Apache still gets 403,
             # AppArmor is likely blocking Apache from /root.
             # Fix: move the project to /var/www/ where AppArmor allows access.
-            if [ "$MODE" = "install" ] && command -v aa-status >/dev/null 2>&1; then
-                if aa-status 2>/dev/null | grep -q 'apparmor module is loaded'; then
-                    echo ""
-                    echo "========================================="
-                    echo "  🔧 AppArmor detected - moving project"
-                    echo "========================================="
-                    echo "   AppArmor restricts Apache from /root."
-                    echo "   Moving project to /var/www/botsaz-faxima..."
-                    if [ ! -d /var/www/botsaz-faxima ]; then
-                        mkdir -p /var/www
-                        cp -a /root/botsaz-faxima /var/www/
-                        echo "   ✔ Copied to /var/www/botsaz-faxima"
-                    else
-                        echo "   ⚠️  /var/www/botsaz-faxima already exists"
-                    fi
-                    chown -R www-data:www-data /var/www/botsaz-faxima 2>/dev/null
-                    echo "   ✔ chown www-data:www-data /var/www/botsaz-faxima"
-                    # Update DocumentRoot in vhost
-                    _vhost="/etc/apache2/sites-available/botsaz.conf"
-                    if [ -f "$_vhost" ]; then
-                        sed -i 's#/root/botsaz-faxima#/var/www/botsaz-faxima#g' "$_vhost"
-                        echo "   ✔ Updated DocumentRoot in $_vhost"
-                    fi
-                    # CRITICAL: ROOT_DIR has to receive the same rewrite the vhost
-                    # above just got, or every path used afterwards still points
-                    # at /root while Apache is already serving /var/www.
-                    #
-                    # The old condition compared the SAME string twice (A || A),
-                    # so only the exact default could ever match. Take the exact
-                    # root and anything genuinely beneath it - with a path
-                    # boundary, so a sibling such as /root/botsaz-faxima-old is
-                    # never silently rewritten. Already-moved trees are left
-                    # alone, which is what makes a re-run safe.
-                    case "$ROOT_DIR" in
-                        /root/botsaz-faxima|/root/botsaz-faxima/*)
-                            ROOT_DIR="/var/www/botsaz-faxima${ROOT_DIR#/root/botsaz-faxima}"
-                            echo "   ✔ ROOT_DIR updated to: $ROOT_DIR"
-                            ;;
-                    esac
-                    echo "   ⚠️  Run: bash tools/install.sh --check"
-                    echo "        to verify the move worked"
+            # Also: nginx prefers serving from /var/www for security.
+            _aa_detected=0
+            if aa-status 2>/dev/null | grep -qiE 'apparmor.*(loaded|enabled|active|is enforced)'; then
+                _aa_detected=1
+            elif [ -f /sys/module/apparmor/parameters/enabled ] && [ "$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null)" = "1" ]; then
+                _aa_detected=1
+            elif command -v aa-status >/dev/null 2>&1 && aa-status 2>/dev/null | grep -q '^apparmor.*profile.*enforce'; then
+                _aa_detected=1
+            fi
+            if [ "$MODE" = "install" ] && [ "$_aa_detected" = "1" ]; then
+                echo ""
+                echo "========================================="
+                echo "  🔧 AppArmor detected - moving project"
+                echo "========================================="
+                echo "   AppArmor restricts Apache from /root."
+                echo "   Moving project to /var/www/botsaz-faxima..."
+                if [ ! -d /var/www/botsaz-faxima ]; then
+                    mkdir -p /var/www
+                    cp -a /root/botsaz-faxima /var/www/
+                    echo "   ✔ Copied to /var/www/botsaz-faxima"
+                else
+                    echo "   ⚠️  /var/www/botsaz-faxima already exists"
                 fi
+                chown -R www-data:www-data /var/www/botsaz-faxima 2>/dev/null
+                echo "   ✔ chown www-data:www-data /var/www/botsaz-faxima"
+                # Update DocumentRoot in vhost
+                _vhost="/etc/apache2/sites-available/botsaz.conf"
+                if [ -f "$_vhost" ]; then
+                    sed -i 's#/root/botsaz-faxima#/var/www/botsaz-faxima#g' "$_vhost"
+                    echo "   ✔ Updated DocumentRoot in $_vhost"
+                fi
+                # CRITICAL: ROOT_DIR has to receive the same rewrite the vhost
+                # above just got, or every path used afterwards still points
+                # at /root while Apache is already serving /var/www.
+                #
+                # The old condition compared the SAME string twice (A || A),
+                # so only the exact default could ever match. Take the exact
+                # root and anything genuinely beneath it - with a path
+                # boundary, so a sibling such as /root/botsaz-faxima-old is
+                # never silently rewritten. Already-moved trees are left
+                # alone, which is what makes a re-run safe.
+                case "$ROOT_DIR" in
+                    /root/botsaz-faxima|/root/botsaz-faxima/*)
+                        ROOT_DIR="/var/www/botsaz-faxima${ROOT_DIR#/root/botsaz-faxima}"
+                        echo "   ✔ ROOT_DIR updated to: $ROOT_DIR"
+                        ;;
+                esac
+                echo "   ⚠️  Run: bash tools/install.sh --check"
+                echo "        to verify the move worked"
             fi
         fi
     fi
