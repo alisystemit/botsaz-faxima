@@ -2325,7 +2325,7 @@ $cfg = array(
     "manager_db" => null,
     "php_bin" => (string) getenv("CFG_PHP_BIN"),
     "secret_key" => (string) getenv("SECRET_KEY"),
-    "db_backup" => array("enabled" => true, "times" => array("06:00", "18:00")),
+    "db_backup" => array("enabled" => true, "times" => array("03:00", "15:00")),
 );
 $out = "<?php\nreturn " . var_export($cfg, true) . ";\n";
 $out = str_replace("\x27manager_db\x27 => NULL,", "\x27manager_db\x27 => __DIR__ . \x27/data/botsaz.sqlite\x27,", $out);
