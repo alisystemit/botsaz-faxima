@@ -260,43 +260,70 @@ systemctl restart apache2 || systemctl restart nginx
 به `.htaccess` توجهی ندارد؛ باید همان قواعد را خودت در `server` تکرار کنی:
 
 ```nginx
+# خط ۸۰ فقط هدایت به HTTPS است. هرگز `default_server` نگذارید: سایتِ پیش‌فرضِ
+# خودِ nginx (`sites-enabled/default`) آن را دارد و دو default_server روی یک
+# پورت یعنی `nginx -t` کلاً رد می‌شود و هیچ‌کدام از سایت‌ها بالا نمی‌آیند.
 server {
-    listen 443 ssl default_server;
-    listen 80 default_server;
+    listen 80;
+    listen [::]:80;
+    server_name alibot.api-system.top;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
     server_name alibot.api-system.top;
 
-    root /root/botsaz-faxima;
-    index index.php;
+    ssl_certificate     /etc/letsencrypt/live/alibot.api-system.top/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/alibot.api-system.top/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
 
-    # --- Security: Block sensitive paths ---
-    location ~ ^/(tools|src|templates|data|docs)/ { deny all; }
-    location ~ ^/config\.php$ { deny all; }
-    location ~ ^/\.(env|git) { deny all; }
-
-    # --- Allow bots/<slug>/index.php and bots/<slug>/table.php ---
-    location ~ ^/bots/.*\.php$ {
-        try_files $uri =404;
-        fastcgi_pass unix:/run/php/php8.2-fpm.sock;
-        include fastcgi_params;
-        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
-    }
-
-    # --- Block sensitive bot files ---
-    location ~ ^/bots/.*\.(env|json|log|sqlite|sql|bak|txt|lock)$ { deny all; }
-
-    # --- MIME types ---
     include /etc/nginx/mime.types;
     default_type application/octet-stream;
+    root "/root/botsaz-faxima";
+    index index.php index.html;
+    client_max_body_size 64m;
+    autoindex off;
 
-    # --- SSL ---
-    ssl_certificate /etc/letsencrypt/live/alibot.api-system.top/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/alibot.api-system.top/privkey.pem;
-    ssl_session_cache shared:SSL:10m;
-    ssl_protocols TLSv1.2 TLSv1.3;
+    # مسیرهای ناشناخته به index.php برمی‌گردند؛ بدون این خط، `/` هیچ‌جا نمی‌رود
+    location / { try_files $uri $uri/ /index.php?$query_string; }
+
+    # --- مسدودسازی؛ معادلِ همان قواعد .htaccess ---
+    location ~ ^/(tools|src|templates|data|docs)/ { deny all; return 404; }
+    location ~ ^/config\.php$ { deny all; return 404; }
+    location ~ ^/(README[^/]*|composer\.(json|lock)|config\.example\.php)$ { deny all; return 404; }
+    # چالش http-01 را Let's Encrypt در هر تمدید می‌خواند؛ نباید بسته شود
+    location ~ ^/\.well-known/ { }
+        location ~ /\. { deny all; return 404; }
+
+    # --- فایل‌های حساسِ داخلِ bots/ ---
+    location ~ ^/bots/.*\.(env|json|log|sqlite|sql|bak|txt|lock)$ { deny all; return 404; }
+    location ~ ^/bots/(hash\.txt|info|error_log)$ { deny all; return 404; }
+    location ~ ^/bots/.*config\.php$ { deny all; return 404; }
+
+    # --- همهٔ .php باید به php-fpm برسد ---
+    # نکتهٔ کلیدی: bot.php (وبهوک اصلی) و index.php در ریشه‌اند. محدود کردنِ
+    # fastcgi به `/bots/` فقط باعث می‌شود nginx کدِ خامِ این دو را مثل یک فایلِ
+    # معمولی تحویل تلگرام بدهد؛ ربات بی‌صدا می‌ماند و سورس هم لو می‌رود.
+    location ~ \.php$ {
+        try_files $uri =404;
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:/run/php/php8.5-fpm.sock;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_index index.php;
+    }
+
+    location ~ /\.ht { deny all; return 404; }
 }
 ```
 
-و داخل `bots/` هم فایل‌های `config.php` / `*.log` / `*.json` / `*.lock` را deny کنی.
+> نسخهٔ PHP را با `php -v` چک کن؛ `fastcgi_pass` باید سوکتِ همان نسخه باشد.
+> خودِ `bash tools/install.sh` این بلوک را می‌سازد؛ اینجا فقط برای نصبِ دستی است.
 
 > ⚠️ **تداخل Apache و nginx:** اگر هر دو نصب باشند، فقط یکی باید روی پورت 80/443 فعال باشد. `install.sh` و `update.sh` هر دو این تداخل را تشخیص می‌دهند.
 

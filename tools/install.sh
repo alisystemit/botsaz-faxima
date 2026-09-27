@@ -1319,8 +1319,9 @@ report_health() {
                     && [ "$_now_ts" -gt "$wherrd" ]; then
                     _age=$((_now_ts - wherrd))
                     h_note "that error is ${_age}s old, and our own request to this same URL succeeded after it"
-                    h_note "so it describes an older moment: run --check again in a minute and it must clear"
-                    h_note "if it stays while the probe keeps answering 200, Telegram cannot reach us the way we reach ourselves"
+                    h_note "so it describes an older moment: Telegram clears it on the next SUCCESSFUL delivery, not with time"
+                    h_note "send the bot any message (/start), then re-run --check - if the bot answers, this line is gone"
+                    h_note "if it stays while the probe keeps answering 200 AND new messages get no reply, Telegram cannot reach us the way we reach ourselves"
                 fi
             fi
             if [ -n "$whurl" ] && [ "$whurl" != "$expected" ]; then
