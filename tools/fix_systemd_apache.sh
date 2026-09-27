@@ -116,4 +116,8 @@ done
 echo ""
 echo "تست:"
 echo "  systemctl show ${UNIT:-apache2} -p ProtectHome,InaccessiblePaths"
-echo "  curl -sI $(php -r '$c=@include \"'$ROOT_DIR'/config.php\"; echo rtrim(is_array($c)?($c[\"base_url\"]??\"\"):\"\", \"/\");' 2>/dev/null)/bot.php"
+# The php -r body is single-quoted, so a plain " already reaches PHP as a
+# literal quote - writing \" put a backslash in front of it and PHP parsed
+# that backslash as code: "Parse error: unexpected token \"", exit 255. The
+# hint printed an empty URL on every run.
+echo "  curl -sI $(php -r '$c=@include "'$ROOT_DIR'/config.php"; echo rtrim(is_array($c)?($c["base_url"]??""):"", "/");' 2>/dev/null)/bot.php"
