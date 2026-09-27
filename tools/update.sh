@@ -48,14 +48,17 @@ warn() { echo -e "${Y}⚠️${NC} $1"; }
 step() { echo -e "\n${B}━━━ $1 ━━━${NC}"; }
 
 # ===== تعیین ROOT_DIR =====
-# وقتی اسکریپت با 'bash -s' از stdin خوانده شود BASH_SOURCE تهی است و
-# dirname مسیر اشتباه می‌دهد - آن حالت را صریح رد می‌کنیم تا اسکریپت
-# هرگز در دایرکتوری اشتباه git اجرا نکند.
+# حالت ۱: bash tools/update.sh  → BASH_SOURCE[0] دقیق مسیر رو می‌ده
+# حالت ۲: ssh root@server 'bash -s' < tools/update.sh  → BASH_SOURCE تهی هست
+# حالت ۳: ./tools/update.sh   → BASH_SOURCE[0] = ./tools/update.sh
 if [ -z "${BASH_SOURCE[0]:-}" ] || [ ! -f "${BASH_SOURCE[0]}" ]; then
-    fail "Run this script from its file (bash tools/update.sh), not via stdin pipe."
-    exit 1
+    # از stdin خوانده شده - از مسیر فعلی استفاده کن
+    # باید از داخل پوشه پروژه اجرا شده باشد
+    ROOT_DIR="$(pwd)"
+    warn "Running from stdin - using PWD as ROOT_DIR: $ROOT_DIR"
+else
+    ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fi
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR" || exit 1
 
 # ===== ۰. پیش‌بینی =====
