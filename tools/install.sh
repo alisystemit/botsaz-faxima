@@ -2913,15 +2913,15 @@ configure_vhost() {
             if [ "$cert_ok" = "1" ]; then
                 # HTTP → HTTPS redirect
                 echo "server {"
-                echo "    listen 80;$_default_server;"
-                echo "    listen [::]:80;$_default_server;"
+                echo "    listen 80${_default_server};"
+                echo "    listen [::]:80${_default_server};"
                 echo "    server_name $host;"
                 echo "    return 301 https://$host\$request_uri;"
                 echo "}"
                 # HTTPS server
                 echo "server {"
-                echo "    listen 443 ssl;$_default_server;"
-                echo "    listen [::]:443 ssl;$_default_server;"
+                echo "    listen 443 ssl${_default_server};"
+                echo "    listen [::]:443 ssl${_default_server};"
                 echo "    server_name $host;"
                 echo "    ssl_certificate     /etc/letsencrypt/live/$host/fullchain.pem;"
                 echo "    ssl_certificate_key /etc/letsencrypt/live/$host/privkey.pem;"
@@ -2931,8 +2931,8 @@ configure_vhost() {
             else
                 # HTTP-only server (no SSL)
                 echo "server {"
-                echo "    listen 80;$_default_server;"
-                echo "    listen [::]:80;$_default_server;"
+                echo "    listen 80${_default_server};"
+                echo "    listen [::]:80${_default_server};"
                 echo "    server_name $host;"
                 _nginx_app
                 echo "}"
