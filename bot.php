@@ -7,6 +7,7 @@ require_once __DIR__ . '/src/BotApi.php';
 require_once __DIR__ . '/src/Store.php';
 require_once __DIR__ . '/src/Manager.php';
 require_once __DIR__ . '/src/Logger.php';
+require_once __DIR__ . '/src/DbBackup.php';
 
 $cfgFile = __DIR__ . '/config.php';
 if (!file_exists($cfgFile)) { http_response_code(500); echo json_encode(['ok'=>false,'error'=>'config.php missing']); exit; }
@@ -165,8 +166,8 @@ function mainMenu(array $u, array $supers, Store $store = null): string {
             [['text' => '🤖 ساخت ربات جدید'], ['text' => '📦 ربات‌های من']],
             [['text' => '📊 آمار'], ['text' => '📣 همگانی']],
             [['text' => '⏰ کرون'], ['text' => '👥 کاربران مجاز']],
-            [['text' => "📋 درخواست‌های جدید{$pendingText}"], ['text' => '📋 همه ربات‌ها']],
-            [['text' => 'ℹ️ راهنما']],
+            [['text' => '💾 بکاپ دیتابیس'], ['text' => "📋 درخواست‌های جدید{$pendingText}"]],
+            [['text' => '📋 همه ربات‌ها'], ['text' => 'ℹ️ راهنما']],
         ]);
     }
     return BotApi::kb([
@@ -340,6 +341,11 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
             BotApi::send($TOKEN, $chatId, "⏰ برای راه‌اندازی کرون، خط زیر را به crontab اضافه کنید:\n\n*/5 * * * * php /path/to/botsaz-faxima/tools/cron_dispatcher.php\n\nیا از «📋 درخواست‌ها» وضعیت کرون را ببینید.",
                 ['reply_markup' => BotApi::kb([[['text' => '🏠 منو'], ['text' => 'ℹ️ راهنما']]])]);
             return;
+
+        case '💾 بکاپ دیتابیس':
+            if (!$admin) { BotApi::send($TOKEN, $chatId, "⛔️ فقط ادمین."); return; }
+            showBackupPanel($cfg, $store, $TOKEN, $chatId);
+            return;
     }
 
     if ($admin) {
@@ -471,6 +477,21 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
     }
 
     switch ($step) {
+        case 'await_backup_times': {
+            if (!$admin) { $store->clearStep($uid); return; }
+            $parsed = DbBackup::parseTimes($text);
+            if (!$parsed['ok']) {
+                BotApi::send($TOKEN, $chatId, "⛔️ " . $parsed['error'] . "\nدوباره بفرست (مثلاً: <code>3,15</code>). برای انصراف: ❌ انصراف");
+                return;
+            }
+            $cur = DbBackup::settings($cfg, $store);
+            DbBackup::saveSettings($store, $cur['enabled'], $parsed['times']);
+            $store->clearStep($uid);
+            Logger::getInstance()->info('backup', "Admin {$uid} set backup times: " . implode(',', $parsed['times']));
+            showBackupPanel($cfg, $store, $TOKEN, $chatId);
+            return;
+        }
+
         case 'await_bot_token': {
             $token = trim($text);
             if (!preg_match('/^\d+:[\w\-]{20,}$/', $token)) {
@@ -918,10 +939,89 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
         return;
     }
 
+    // ===== بکاپ دیتابیس (فقط ادمین) =====
+    if (str_starts_with($data, 'backup:')) {
+        if (!$admin) { BotApi::send($TOKEN, $chatId, "⛔️ فقط ادمین."); return; }
+        $action = substr($data, 7);
+        $cur = DbBackup::settings($cfg, $store);
+        if ($action === 'toggle') {
+            $set = DbBackup::saveSettings($store, !$cur['enabled'], $cur['times']);
+            Logger::getInstance()->info('backup', "Admin {$uid} " . ($set['enabled'] ? 'enabled' : 'disabled') . " backups");
+            showBackupPanel($cfg, $store, $TOKEN, $chatId, $msgId);
+            return;
+        }
+        if ($action === 'preset2') {
+            DbBackup::saveSettings($store, true, ['03:00', '15:00']);
+            Logger::getInstance()->info('backup', "Admin {$uid} set backup preset: twice daily");
+            showBackupPanel($cfg, $store, $TOKEN, $chatId, $msgId);
+            return;
+        }
+        if ($action === 'preset1') {
+            DbBackup::saveSettings($store, true, ['03:00']);
+            Logger::getInstance()->info('backup', "Admin {$uid} set backup preset: once daily");
+            showBackupPanel($cfg, $store, $TOKEN, $chatId, $msgId);
+            return;
+        }
+        if ($action === 'custom') {
+            $store->setStep($uid, 'await_backup_times');
+            BotApi::send($TOKEN, $chatId, "🕐 ساعت‌های بکاپ را بفرست (به وقت سرور، حداکثر ۴ ساعت).\nمثلاً: <code>3,15</code> یعنی ۰۳:۰۰ و ۱۵:۰۰\nبرای انصراف: ❌ انصراف");
+            return;
+        }
+        if ($action === 'now') {
+            BotApi::send($TOKEN, $chatId, "⏳ بکاپ همه ربات‌ها شروع شد؛ بعد از اتمام همین‌جا نتیجه می‌آید...");
+            @set_time_limit(0);
+            $res = DbBackup::runDue($cfg, $store, true);
+            $lines = [];
+            foreach ($res['sent'] as $s) $lines[] = "✅ {$s}";
+            foreach ($res['failed'] as $f => $e) $lines[] = "❌ {$f}: " . htmlspecialchars($e);
+            if ($lines === []) $lines[] = "ربات فعالی با دیتابیس پیدا نشد.";
+            BotApi::send($TOKEN, $chatId, "💾 <b>نتیجه بکاپ دستی</b>\n" . implode("\n", $lines));
+            showBackupPanel($cfg, $store, $TOKEN, $chatId, $msgId);
+            return;
+        }
+        // refresh یا هر چیز دیگر → نمایش دوباره پنل
+        showBackupPanel($cfg, $store, $TOKEN, $chatId, $msgId);
+        return;
+    }
+
     if ($data === 'users:requests') {
         if (!$admin) { BotApi::send($TOKEN, $chatId, "⛔️ فقط ادمین."); return; }
         sendPendingRequests($store, $TOKEN, $chatId);
         return;
+    }
+}
+
+/** پنل بکاپ دیتابیس — وضعیت + دکمه‌های کنترل ساعت (فقط ادمین) */
+function showBackupPanel(array $cfg, Store $store, string $TOKEN, $chatId, int $msgId = 0): void
+{
+    $set = DbBackup::settings($cfg, $store);
+    $state = DbBackup::readState();
+    $status = $set['enabled'] ? '🟢 فعال' : '🔴 غیرفعال';
+    $times = implode(' و ', $set['times']);
+    $t = "💾 <b>بکاپ خودکار دیتابیس</b>\n\nوضعیت: {$status}\nساعت‌ها (به وقت سرور): <code>{$times}</code>\n";
+    $t .= "مقصد: دیتابیس هر ربات → ادمین همان ربات\n\n";
+    $bots = array_filter($store->allBots(), fn($b) => ($b['status'] ?? '') === 'active' && !empty($b['db_name']));
+    if ($bots === []) {
+        $t .= "ربات فعالی با دیتابیس ثبت نشده.\n";
+    } else {
+        foreach (array_slice($bots, 0, 20) as $b) {
+            $f = (string)$b['folder'];
+            $last = (string)($state[$f]['last_sent'] ?? '');
+            $t .= ($last === '' ? "⏳ {$f}: هنوز ارسال نشده\n" : "✅ {$f}: {$last}\n");
+        }
+    }
+    $t .= "\nکرون: <code>0 3,15 * * * php .../tools/backup_dispatcher.php</code>\n(کرون ۵دقیقه‌ای هم اسلات‌ها را خودش چک می‌کند)";
+    $kb = BotApi::ikb([
+        [['text' => $set['enabled'] ? '🔴 غیرفعال' : '🟢 فعال‌سازی', 'callback_data' => 'backup:toggle']],
+        [['text' => '2 بار در روز (۳ و ۱۵)', 'callback_data' => 'backup:preset2']],
+        [['text' => '1 بار در روز (۳ صبح)', 'callback_data' => 'backup:preset1']],
+        [['text' => '🕐 ساعت دلخواه', 'callback_data' => 'backup:custom']],
+        [['text' => '▶️ بکاپ الان', 'callback_data' => 'backup:now'], ['text' => '🔄 بروزرسانی', 'callback_data' => 'backup:refresh']],
+    ]);
+    if ($msgId > 0) {
+        BotApi::edit($TOKEN, $chatId, $msgId, $t, ['reply_markup' => $kb, 'parse_mode' => 'HTML']);
+    } else {
+        BotApi::send($TOKEN, $chatId, $t, ['reply_markup' => $kb]);
     }
 }
 
