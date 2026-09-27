@@ -94,6 +94,18 @@ apt_remove() {
     hash -r 2>/dev/null || true
 }
 
+# Install packages WITHOUT recommending web servers (avoids apache2 being
+# pulled in as a dependency when installing php*/nginx packages on Ubuntu.
+# Ubuntu's php metapackage depends on libapache2-mod-php which pulls in
+# the entire apache2 stack. --no-install-recommends avoids that trap.
+apt_install_nr() {
+    echo "   ⏳ Installing with apt --no-install-recommends (sudo may ask for a password)..."
+    $SUDO apt-get update -qq
+    # shellcheck disable=SC2068
+    $SUDO apt-get install -y --no-install-recommends $@
+    hash -r 2>/dev/null || true
+}
+
 # ==================================================================
 # SHARED: health check + error-log report
 # Everything below is defined BEFORE the installer starts, because
@@ -1997,29 +2009,26 @@ preflight_fresh_server() {
             warn "   Stopping and removing Apache (port conflict with nginx)..."
             $SUDO systemctl stop apache2 2>/dev/null || true
             $SUDO systemctl disable apache2 2>/dev/null || true
-            # apt_remove is a SHELL FUNCTION and already applies $SUDO itself.
-            # Calling it as `$SUDO apt_remove` makes sudo search PATH for a
-            # command called apt_remove; it is not there, so nothing is removed
-            # and `|| true` hides it behind an "Apache removed" message.
-            # Never put $SUDO in front of a shell function.
-            #
-            # The PHP module is discovered rather than hard-coded: apt-get
-            # aborts the ENTIRE list when it cannot locate one package, so a
-            # stale version number meant not a single package was removed.
             local apkg="apache2 apache2-bin apache2-data apache2-utils"
             apkg="$apkg $(dpkg -l 'libapache2-mod-php*' 2>/dev/null | awk '$1=="ii"{print $2}')"
             apt_remove $apkg || true
             if has_cmd apache2; then
                 warn "   Apache is still installed - nginx will not get port 80."
-                warn "   Finish it by hand: sudo apt-get purge apache2 apache2-bin apache2-utils"
+                warn "   Finish it by hand: sudo apt-get purge apache2 apache2-bin apache2-utils libapache2-mod-php"
             else
                 ok "   Apache removed"
             fi
         fi
-        # Install nginx if not present
+        # Install nginx if not present (use --no-install-recommends to avoid pulling apache2)
         if [ "$ws_nginx" -eq 0 ]; then
             ok "   Installing nginx..."
-            apt_install nginx || true
+            apt_install_nr nginx || true
+        fi
+        # Double-check: make sure Apache didn't sneak in as a dependency
+        if has_cmd apache2; then
+            warn "   Apache snuck in as a dependency - removing..."
+            apt_remove apache2 apache2-bin apache2-data apache2-utils libapache2-mod-php 2>/dev/null || true
+            has_cmd apache2 && warn "   Apache still present - purge manually" || ok "   Apache removed"
         fi
         $SUDO systemctl enable --now nginx 2>/dev/null || true
         ok "   nginx is ready"
@@ -2030,7 +2039,6 @@ preflight_fresh_server() {
             warn "   Stopping and removing nginx (port conflict with Apache)..."
             $SUDO systemctl stop nginx 2>/dev/null || true
             $SUDO systemctl disable nginx 2>/dev/null || true
-            # no $SUDO here for exactly the reason spelled out above
             apt_remove nginx nginx-common || true
             if has_cmd nginx; then
                 warn "   nginx is still installed - Apache will not get port 80."
@@ -2041,6 +2049,28 @@ preflight_fresh_server() {
         fi
         # Install Apache if not present
         if [ "$ws_apache" -eq 0 ]; then
+            ok "   Installing Apache..."
+            apt_install apache2 || true
+        fi
+        $SUDO systemctl enable --now apache2 2>/dev/null || true
+        ok "   Apache is ready"
+
+    else
+        # none - stop and disable both
+        warn "   No web server selected."
+        if [ "$ws_apache" -eq 1 ]; then
+            $SUDO systemctl stop apache2 2>/dev/null || true
+            $SUDO systemctl disable apache2 2>/dev/null || true
+            ok "   Apache stopped"
+        fi
+        if [ "$ws_nginx" -eq 1 ]; then
+            $SUDO systemctl stop nginx 2>/dev/null || true
+            $SUDO systemctl disable nginx 2>/dev/null || true
+            ok "   nginx stopped"
+        fi
+        warn "   Telegram cannot reach the webhook without a web server!"
+        warn "   You can add one later with: bash tools/install.sh"
+    fi
             ok "   Installing Apache..."
             apt_install apache2 || true
         fi
@@ -2130,7 +2160,7 @@ install_php_if_needed() {
         echo "   ⚠️  PHP not found."
     fi
     if can_apt && ask_yes "   Install/upgrade PHP automatically with the required extensions?"; then
-        apt_install php php-cli php-curl php-mbstring php-mysql php-sqlite3 php-xml php-zip
+        apt_install_nr php php-cli php-curl php-mbstring php-mysql php-sqlite3 php-xml php-zip
     fi
     if ! has_cmd "$PHP_BIN"; then
         echo "❌ PHP is not available. Install it manually:"
@@ -2203,7 +2233,7 @@ done
 if [ -n "$missing_pkgs" ]; then
     if can_apt && ask_yes "   Install the missing extensions automatically? ($missing_pkgs )"; then
         # shellcheck disable=SC2086
-        apt_install $missing_pkgs
+        apt_install_nr $missing_pkgs
     else
         echo "❌ Required extensions are not installed. Install them manually:"
         echo "   sudo apt install$missing_pkgs"
@@ -2237,7 +2267,7 @@ if [ "${PICKED:-}" = "nginx" ] || { [ -z "${PICKED:-}" ] && ! has_cmd apache2 &&
     if dpkg -s php-fpm >/dev/null 2>&1; then
         echo "   nginx PHP-FPM ✔"
     elif ask_yes "   Install php-fpm so nginx can execute PHP?"; then
-        if apt_install php-fpm; then
+        if apt_install_nr php-fpm; then
             # Enable whatever php-fpm version actually got installed - the
             # version differs per release (8.1/8.2/8.3/...), so a hardcoded
             # name enables nothing on most servers and PHP stays down.
@@ -2254,7 +2284,7 @@ elif has_cmd apache2 || has_cmd httpd; then
     if dpkg -s libapache2-mod-php >/dev/null 2>&1; then
         echo "   Apache PHP module ✔"
     elif ask_yes "   Install libapache2-mod-php so Apache can execute PHP?"; then
-        if apt_install libapache2-mod-php; then
+        if apt_install_nr libapache2-mod-php; then
             echo "   Apache PHP module installed ✔"
         else
             echo "   ⚠️  Could not install libapache2-mod-php - Apache will not run PHP."
@@ -2321,7 +2351,7 @@ install_phpmyadmin() {
             'phpmyadmin phpmyadmin/app-password-confirm password' \
             | $SUDO debconf-set-selections || true
     fi
-    if DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y phpmyadmin; then
+    if DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y --no-install-recommends phpmyadmin; then
         echo "   phpMyAdmin installed ✔ (served at /phpmyadmin once the vhost exists)"
     else
         echo "   ⚠️  phpMyAdmin package failed to install - skipping it (not fatal)."
