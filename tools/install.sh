@@ -347,144 +347,58 @@ docroot_reachable() {
 }
 
 # ==================================================================
-# systemd hardening - Apache/php-fpm cannot see /root even with 711
-# On Debian/Ubuntu the apache2 (and php*-fpm) units ship with sandboxing
-# like ProtectHome=true / ProtectSystem=strict / InaccessiblePaths=/root.
-# Then chmod 711 changes nothing: namei shows a traversable chain and
-# `sudo -u www-data test -x /root` prints yes, yet Apache still logs
-# AH00035 "search permissions are missing" and answers 403 to everything.
-# The persistent fix is a drop-in override, NOT a manual edit of
-# /lib/systemd/system/apache2.service (apt overwrites it on upgrade):
-#   /etc/systemd/system/apache2.service.d/override.conf:
+# systemd hardening apply - persistent drop-in for /root|/home projects
+# Detection lives in ONE place: systemd_sandbox_blocker() above (it reads
+# the MERGED `systemctl show` value, so drop-ins are honoured).
+# This function only WRITES the drop-in (install mode). --check never
+# calls it - it reports via systemd_sandbox_blocker in report_health.
+#   /etc/systemd/system/apache2.service.d/botsaz.conf:
 #     [Service]
 #     InaccessiblePaths=
 #     ProtectHome=false
-# $1 = "apply" actually writes the override (install mode);
-# anything else only reports (--check stays read-only).
+# Hand-editing /lib/systemd/system/apache2.service would be lost on the
+# next apt upgrade; a drop-in survives it.
 # ==================================================================
-systemd_unit_has_hardening() { # $1 = unit name -> 0 = blocks /root|/home
-    local unit="$1" show=""
-    has_cmd systemctl || return 1
-    show="$($SUDO systemctl show "$unit" -p ProtectHome,ProtectSystem,InaccessiblePaths,ReadWritePaths 2>/dev/null || true)"
-    [ -z "$show" ] && return 1
-    # ProtectHome=yes|true|read-only|tmpfs  -> /root and /home are hidden
-    if printf '%s\n' "$show" | grep -Eq '^ProtectHome=(yes|true|read-only|tmpfs)'; then
-        return 0
-    fi
-    # Explicit InaccessiblePaths=/root (or /home) entry
-    if printf '%s\n' "$show" | grep -Eq 'InaccessiblePaths=.*/(root|home)( |$)'; then
-        return 0
-    fi
-    return 1
-}
-
-systemd_override_present() { # $1 = unit name -> 0 = our drop-in exists
-    local unit="$1" f="/etc/systemd/system/${1}.service.d/override.conf"
-    [ -f "$f" ] || return 1
-    grep -q '^\[Service\]' "$f" 2>/dev/null || return 1
-    grep -q '^ProtectHome=false' "$f" 2>/dev/null || return 1
-    return 0
-}
-
-# Report-only check used by report_health (--check changes nothing).
-systemd_report_hardening() {
-    local u needs_fix=0
+fix_apache_systemd_hardening() { # $1 = "apply" to write, else dry-run report
+    local mode="${1:-}" unit="" blk="" dropdir dropfile u
     case "$ROOT_DIR" in
-        /root/*|/home/*) ;;
-        *) return 0 ;;  # project outside ProtectHome scope - nothing to say
-    esac
-    for u in apache2 httpd; do
-        has_cmd systemctl || break
-        $SUDO systemctl cat "$u" >/dev/null 2>&1 || continue
-        if systemd_unit_has_hardening "$u"; then
-            if systemd_override_present "$u"; then
-                h_ok "$u systemd override present (ProtectHome=false)"
-            else
-                h_fail "$u systemd hardening blocks $ROOT_DIR (ProtectHome/InaccessiblePaths)"
-                h_note "chmod 711 cannot fix this - the denial is in the service, not on disk:"
-                h_note "  systemctl show $u -p ProtectHome,InaccessiblePaths"
-                h_note "fix (persistent across apt upgrades):"
-                h_note "  sudo bash tools/fix_systemd_apache.sh"
-                h_note "or: sudo mkdir -p /etc/systemd/system/$u.service.d"
-                h_note "    printf '[Service]\\nInaccessiblePaths=\\nProtectHome=false\\n' | sudo tee /etc/systemd/system/$u.service.d/override.conf"
-                h_note "    sudo systemctl daemon-reload && sudo systemctl restart $u"
-            fi
-            needs_fix=1
-        fi
-    done
-    # php-fpm units matter for nginx setups (apache mod_php has no such unit)
-    for u in $(systemctl list-units --all --type=service --no-legend 2>/dev/null | awk '{print $1}' | grep -E '^php[0-9.]*-fpm\.service$' || true); do
-        if systemd_unit_has_hardening "$u"; then
-            if systemd_override_present "$u"; then
-                h_ok "$u systemd override present (ProtectHome=false)"
-            else
-                h_fail "$u systemd hardening blocks $ROOT_DIR"
-                h_note "  sudo bash tools/fix_systemd_apache.sh"
-            fi
-            needs_fix=1
-        fi
-    done
-    [ "$needs_fix" = "1" ] && return 1
-    return 0
-}
-
-# Write the drop-in override and reload systemd.
-# $1 = "apply" to actually write (install mode), else dry-run report.
-# $2 = unit short name (apache2). php-fpm units are auto-detected.
-fix_apache_systemd_hardening() {
-    local mode="${1:-}" unit svc dropdir dropfile changed=0 u
-    case "$ROOT_DIR" in
-        /root/*|/home/*) ;;
-        *) return 0 ;;  # not under ProtectHome - nothing to do
+        /root|/root/*|/home|/home/*) ;;
+        *) return 0 ;;
     esac
     has_cmd systemctl || return 0
-    for svc in apache2 httpd; do
-        $SUDO systemctl cat "$svc" >/dev/null 2>&1 || continue
-        unit="$svc"
-        if ! systemd_unit_has_hardening "$unit"; then
-            echo "   ✔ $unit systemd sandboxing does not block $ROOT_DIR"
-            continue
-        fi
-        if systemd_override_present "$unit"; then
-            echo "   ✔ $unit systemd override already present"
-            continue
-        fi
-        if [ "$mode" != "apply" ]; then
-            echo "   ❌ $unit systemd hardening blocks $ROOT_DIR (ProtectHome/InaccessiblePaths)."
-            echo "      chmod cannot fix this - run: sudo bash tools/fix_systemd_apache.sh"
-            continue
-        fi
-        dropdir="/etc/systemd/system/${unit}.service.d"
-        dropfile="$dropdir/override.conf"
-        echo "   ⏳ $unit is sandboxed (ProtectHome) - writing persistent override..."
-        $SUDO mkdir -p "$dropdir" 2>/dev/null || true
-        printf '[Service]\nInaccessiblePaths=\nProtectHome=false\n' | $SUDO tee "$dropfile" >/dev/null
-        echo "   ✔ wrote $dropfile"
-        changed=1
-    done
-    # same override for any installed php-fpm (nginx path)
-    for u in $(systemctl list-unit-files --type=service --no-legend 2>/dev/null | awk '{print $1}' | grep -E '^php[0-9.]*-fpm\.service$' || true); do
-        unit="${u%.service}"
-        systemd_unit_has_hardening "$unit" || continue
-        systemd_override_present "$unit" && continue
-        [ "$mode" != "apply" ] && continue
-        dropdir="/etc/systemd/system/${unit}.service.d"
-        dropfile="$dropdir/override.conf"
-        printf '[Service]\nInaccessiblePaths=\nProtectHome=false\n' | $SUDO tee "$dropfile" >/dev/null
-        echo "   ✔ wrote $dropfile"
-        changed=1
-    done
-    if [ "$changed" = "1" ]; then
-        $SUDO systemctl daemon-reload 2>/dev/null || true
-        for svc in apache2 httpd; do
-            $SUDO systemctl cat "$svc" >/dev/null 2>&1 || continue
-            $SUDO systemctl restart "$svc" 2>/dev/null && echo "   ✔ $svc restarted with new sandboxing" || \
-                echo "   ⚠️  $svc restart failed - restart manually"
-        done
-        for u in $(systemctl list-units --all --type=service --no-legend 2>/dev/null | awk '{print $1}' | grep -E '^php[0-9.]*-fpm\.service$' || true); do
-            $SUDO systemctl restart "$u" 2>/dev/null || true
-        done
+    if systemctl show apache2 -p LoadState --value 2>/dev/null | grep -qx loaded; then
+        unit="apache2"
+    elif systemctl show httpd -p LoadState --value 2>/dev/null | grep -qx loaded; then
+        unit="httpd"
+    else
+        return 0
     fi
+    blk="$(systemd_sandbox_blocker "$ROOT_DIR")" || blk=""
+    [ -z "$blk" ] && return 0
+    dropdir="/etc/systemd/system/${unit}.service.d"
+    dropfile="$dropdir/botsaz.conf"
+    if [ -f "$dropfile" ] && grep -q '^ProtectHome=false' "$dropfile" 2>/dev/null; then
+        return 0
+    fi
+    if [ "$mode" != "apply" ]; then
+        echo "   ❌ $unit systemd sandbox blocks $ROOT_DIR ($blk)."
+        echo "      chmod cannot fix this - run: sudo bash tools/fix_systemd_apache.sh"
+        return 0
+    fi
+    echo "   ⏳ $unit is sandboxed ($blk) - writing persistent override..."
+    $SUDO mkdir -p "$dropdir" 2>/dev/null || true
+    printf '[Service]\nInaccessiblePaths=\nProtectHome=false\n' | $SUDO tee "$dropfile" >/dev/null
+    echo "   ✔ wrote $dropfile"
+    $SUDO systemctl daemon-reload 2>/dev/null || true
+    $SUDO systemctl restart "$unit" 2>/dev/null && echo "   ✔ $unit restarted with new sandboxing" || \
+        echo "   ⚠️  $unit restart failed - restart manually"
+    # php-fpm units need the same drop-in on nginx setups
+    for u in $(systemctl list-unit-files --type=service --no-legend 2>/dev/null | awk '{print $1}' | grep -E '^php[0-9.]*-fpm\.service$' || true); do
+        u="${u%.service}"
+        $SUDO mkdir -p "/etc/systemd/system/${u}.service.d" 2>/dev/null || true
+        printf '[Service]\nInaccessiblePaths=\nProtectHome=false\n' | $SUDO tee "/etc/systemd/system/${u}.service.d/botsaz.conf" >/dev/null
+        $SUDO systemctl restart "$u" 2>/dev/null || true
+    done
     return 0
 }
 
@@ -1525,6 +1439,13 @@ if [ "$(id -u)" -eq 0 ] && [ -d /root ]; then
     unset _wu _blk _root_perm _try _before _after
 fi
 
+# ===== Auto-fix systemd sandbox (persistent drop-in) =====
+# chmod روی /root وقتی بی‌اثر است که انکار داخل سرویس باشد نه روی دیسک.
+# --check فقط گزارش می‌دهد (داخل report_health)؛ install می‌نویسد.
+if [ "$MODE" = "install" ] && [ "$(id -u)" -eq 0 ]; then
+    fix_apache_systemd_hardening apply || true
+fi
+
 if [ "$MODE" = "check" ] || [ "$MODE" = "logs" ]; then
     # A report must never be cut short by one failing probe, and it must never
     # ask a question - it is meant to be run on a server that is already down.
@@ -2529,6 +2450,9 @@ if [ -d "$ROOT_DIR/bots" ]; then
     fi
 fi
 # Ensure Apache is running with the correct config
+# NOTE: اگر پروژه زیر /root است و drop-in systemd تازه نوشته شده،
+# restart همین‌جا همان sandbox جدید را اعمال می‌کند.
+fix_apache_systemd_hardening apply || true
 if has_cmd systemctl && systemctl is-active --quiet apache2 2>/dev/null; then
     systemctl restart apache2 2>/dev/null && echo "   ✔ Apache restarted" || \
         echo "   ⚠️  Apache restart failed - reload manually"

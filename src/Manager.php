@@ -82,7 +82,7 @@ class Manager
         // 5. بررسی vendor/ (قالب‌ها vendor آماده دارند)
         $hasVendor = is_file($root . '/templates/faxima/vendor/autoload.php') || is_file($root . '/templates/mirza/vendor/autoload.php');
         if (!$hasVendor) {
-            return "vendor/autoload.php پیدا نشد - composer install را اجرا کنید";
+            return "vendor قالب‌ها روی سرور نیست (templates/*/vendor/autoload.php) - گیت را pull کنید، نه composer install";
         }
         return ""; // همه چیز OK
     }

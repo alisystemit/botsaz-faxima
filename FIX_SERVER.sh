@@ -57,13 +57,31 @@ if [ -f /etc/apache2/sites-available/botsaz.conf ]; then
     fi
 fi
 
-# ---- 6. Restart Apache ----
-echo "[6/7] Restarting Apache..."
+# ---- 6. systemd sandbox fix (PERSISTENT - survives apt upgrade) ----
+# chmod 711 بی‌اثر است وقتی انکار داخل سرویس است نه روی دیسک:
+# ProtectHome=true یا InaccessiblePaths=/root داخل mount namespace آپاچی،
+# /root را مخفی می‌کند. namei سبز است ولی error.log پر از AH00035 است.
+echo "[6/8] Fixing systemd sandbox (ProtectHome/InaccessiblePaths)..."
+_UNIT=""
+if systemctl show apache2 -p LoadState --value 2>/dev/null | grep -qx loaded; then _UNIT="apache2"; fi
+if [ -n "$_UNIT" ]; then
+    systemctl show "$_UNIT" -p ProtectHome,InaccessiblePaths 2>/dev/null || true
+    mkdir -p "/etc/systemd/system/${_UNIT}.service.d"
+    printf '[Service]\nInaccessiblePaths=\nProtectHome=false\n' > "/etc/systemd/system/${_UNIT}.service.d/botsaz.conf"
+    echo "   ✔ wrote /etc/systemd/system/${_UNIT}.service.d/botsaz.conf"
+    systemctl daemon-reload
+    echo "   ✔ daemon-reload done"
+else
+    echo "   (apache2 unit not found - skipping)"
+fi
+
+# ---- 7. Restart Apache ----
+echo "[7/8] Restarting Apache..."
 systemctl restart apache2 2>/dev/null || service apache2 restart 2>/dev/null
 echo "   ✔ Apache restarted"
 
-# ---- 7. AppArmor check ----
-echo "[7/7] Checking AppArmor..."
+# ---- 8. AppArmor check ----
+echo "[8/8] Checking AppArmor..."
 if command -v aa-status >/dev/null 2>&1; then
     if aa-status 2>/dev/null | grep -q 'apparmor module is loaded'; then
         echo "   ⚠️  AppArmor is ACTIVE - Apache may be blocked from /root"
