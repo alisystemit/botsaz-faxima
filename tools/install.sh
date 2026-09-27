@@ -2036,17 +2036,18 @@ preflight_fresh_server() {
             $SUDO systemctl disable apache2 2>/dev/null || true
             local apkg="apache2 apache2-bin apache2-data apache2-utils"
             apkg="$apkg $(dpkg -l 'libapache2-mod-php*' 2>/dev/null | awk '$1=="ii"{print $2}')"
-            # Use purge (not just remove) to eliminate config files
-            $SUDO apt-get purge -y $apkg 2>/dev/null || true
-            $SUDO apt-get autoremove -y 2>/dev/null || true
-            # Also remove any php packages that pulled apache in
-            $SUDO apt-get purge -y libapache2-mod-php8.5 libapache2-mod-php 2>/dev/null || true
-            $SUDO apt-get autoremove -y 2>/dev/null || true
-            # Nuclear option: if apache2 binary still exists, remove it
+            # apt_remove, not a raw apt-get: it already applies $SUDO (a bare
+            # apt-get only works when the installer itself is running as root),
+            # and the list comes from dpkg instead of naming a PHP version.
+            # apt aborts the WHOLE command on a package it cannot locate, so
+            # "libapache2-mod-php8.5" on a box that ships 8.3 would leave every
+            # other package in the list installed - and nothing would say so.
+            apt_remove $apkg || true
+            # Nuclear option: if the apache2 binary is still on PATH, force the
+            # package out - apt refuses while some dependency still wants it.
             if has_cmd apache2; then
-                warn "   apache2 still exists after apt purge - trying dpkg --remove..."
+                warn "   apache2 still exists after the purge - trying dpkg --remove..."
                 $SUDO dpkg --remove --force-depends apache2 apache2-bin apache2-utils 2>/dev/null || true
-                $SUDO apt-get remove -y --purge apache2* apache2-* 2>/dev/null || true
             fi
             if has_cmd apache2; then
                 warn "   Apache is still installed - nginx will not get port 80."
@@ -2305,8 +2306,8 @@ echo "✅ Checking the PHP web-server module..."
 # on nginx's busy port. That is exactly how a running nginx install ends up
 # with a dead apache2 beside it.
 if [ "${PICKED:-}" = "nginx" ] || { [ -z "${PICKED:-}" ] && ! has_cmd apache2 && ! has_cmd httpd && has_cmd nginx; }; then
-    local _php_ver="$(detect_php_version)"
-    local _fpm_pkg="php${_php_ver}-fpm"
+    _php_ver="$(detect_php_version)"
+    _fpm_pkg="php${_php_ver}-fpm"
     if dpkg -s "$_fpm_pkg" >/dev/null 2>&1; then
         echo "   nginx PHP-FPM ✔"
     elif ask_yes "   Install php-fpm so nginx can execute PHP?"; then
@@ -2347,8 +2348,8 @@ elif has_cmd apache2 || has_cmd httpd; then
         unset _po80
     fi
 elif has_cmd nginx; then
-    local _php_ver2="$(detect_php_version)"
-    local _fpm_pkg2="php${_php_ver2}-fpm"
+    _php_ver2="$(detect_php_version)"
+    _fpm_pkg2="php${_php_ver2}-fpm"
     if dpkg -s "$_fpm_pkg2" >/dev/null 2>&1; then
         echo "   nginx PHP-FPM ✔"
     elif ask_yes "   Install php-fpm so nginx can execute PHP?"; then
@@ -2534,15 +2535,36 @@ issue_ssl() {
         return 0
     fi
 
+    # ONE decision drives all three uses below: which plugin to install,
+    # which flag certbot runs with, and which command is printed when it
+    # fails. They used to be decided three separate ways, so an nginx box
+    # had python3-certbot-apache installed - which drags the FULL apache2
+    # stack in as a hard dependency (enabled at boot, then failing forever
+    # on nginx's busy port) - while an Apache box got no apache plugin at
+    # all and could never finish the http-01 challenge.
+    #
+    # The server that ANSWERS port 80 wins over an installed binary: a dead
+    # apache2 next to a live nginx means --apache can never complete it.
+    local _plugin="webroot" _plug_active=""
+    _plug_active="$(active_web_server 2>/dev/null || true)"
+    if [ "$_plug_active" = "nginx" ] || { [ -z "$_plug_active" ] && ! has_cmd apache2 && ! has_cmd httpd && has_cmd nginx; }; then
+        _plugin="nginx"
+    elif has_cmd apache2 || has_cmd httpd; then
+        _plugin="apache"
+    fi
+    unset _plug_active
+
     # certbot can be installed here too, so this step still works on its own
     if ! has_cmd certbot; then
         echo "   ⚠️  certbot is not installed."
         if can_apt && ask_yes "   Install certbot now? (required to issue the certificate)"; then
-            apt_install_nr certbot python3-certbot-nginx || true
-            # The plugin for the chosen server is already installed above.
-            # Do NOT install python3-certbot-apache here - it drags the
-            # FULL apache2 stack in as a dependency (enabled at boot,
-            # failing forever on nginx's busy port).
+            if [ "$_plugin" = "webroot" ]; then
+                apt_install_nr certbot || true
+            else
+                # Only the plugin that will actually run - the other one is
+                # what pulls the other web server onto this box.
+                apt_install_nr certbot "python3-certbot-$_plugin" || true
+            fi
         fi
     fi
     if ! has_cmd certbot; then
@@ -2557,19 +2579,13 @@ issue_ssl() {
 
     echo "   ⏳ Requesting a Let's Encrypt certificate for $host ..."
     echo "      The domain must already point to this server and port 80 must be reachable."
-    local rc=0 _ssl_active=""
-    _ssl_active="$(active_web_server)"
-    # The plugin must match the server that ANSWERS port 80 (http-01 challenge),
-    # not merely an installed binary - a dead apache2 next to a live nginx
-    # means --apache can never complete the challenge.
-    if [ "$_ssl_active" = "nginx" ] || { [ -z "$_ssl_active" ] && ! has_cmd apache2 && ! has_cmd httpd && has_cmd nginx; }; then
-        certbot --nginx -d "$host" --non-interactive --agree-tos --register-unsafely-without-email || rc=$?
-    elif has_cmd apache2 || has_cmd httpd; then
-        certbot --apache -d "$host" --non-interactive --agree-tos --register-unsafely-without-email || rc=$?
-    else
+    local rc=0
+    # The same decision as above, so the plugin installed is the plugin used.
+    if [ "$_plugin" = "webroot" ]; then
         certbot certonly --webroot -w "$ROOT_DIR" -d "$host" --non-interactive --agree-tos --register-unsafely-without-email || rc=$?
+    else
+        certbot "--$_plugin" -d "$host" --non-interactive --agree-tos --register-unsafely-without-email || rc=$?
     fi
-    unset _ssl_active
 
     if [ "$rc" = "0" ]; then
         echo "   🔒 Certificate issued for $host ✔"
