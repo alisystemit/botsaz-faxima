@@ -2960,6 +2960,13 @@ configure_vhost() {
             echo "   ⚠️  nginx config test failed - undoing the vhost so the server keeps running:"
             printf '%s\n' "$ng_out" | awk 'NR<=5'
             $SUDO rm -f /etc/nginx/sites-enabled/botsaz.conf "$ng_conf"
+            # Put back what was deleted above, or the box is left with an
+            # EMPTY sites-enabled/ - the next reload then serves nothing and
+            # certbot's renewal silently breaks along with it.
+            if [ -n "$stock_default_tgt" ] && [ -e "$stock_default_tgt" ]; then
+                $SUDO ln -sf "$stock_default_tgt" /etc/nginx/sites-enabled/default 2>/dev/null || true
+                echo "   ↩ stock /etc/nginx/sites-enabled/default restored - the server keeps answering"
+            fi
         fi
         return 0
     fi
