@@ -2773,7 +2773,9 @@ configure_vhost() {
             echo "    location ~ ^/bots/.*config\.php$ { deny all; return 404; }"
             if [ -n "$fpm_sock" ]; then
                 echo "    location ~ \.php\$ {"
-                echo "        try_files \$uri =404;"
+                # NOTE: do NOT repeat try_files here — snippets/fastcgi-php.conf
+                # already contains 'try_files \$uri =404;'. Repeating it causes:
+                #   nginx: [emerg] "try_files" directive is duplicate
                 echo "        include snippets/fastcgi-php.conf;"
                 echo "        fastcgi_pass unix:$fpm_sock;"
                 echo "        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;"
@@ -2790,26 +2792,32 @@ configure_vhost() {
             echo "    ssl_session_cache shared:SSL:10m;"
             echo "    ssl_session_timeout 10m;"
         }
-        # NO `default_server` on any listen line. Ubuntu's stock
-        # /etc/nginx/sites-enabled/default already claims it, and two
-        # default_server on one address make nginx refuse to load ANY config:
-        #   nginx: [emerg] a duplicate listen 80 default_server
-        # `nginx -t` then fails and the rollback below deletes the vhost we
-        # just wrote - an install would end with a warning and no site at all.
-        # It buys nothing here either: Telegram addresses us by Host header,
-        # which `server_name` already matches.
+        # Remove the stock default vhost so it doesn't win over our vhost.
+        # Ubuntu's /etc/nginx/sites-enabled/default has its own server_name
+        # and listen directives which can override ours.
+        if [ -f /etc/nginx/sites-enabled/default ]; then
+            $SUDO rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
+            echo "   ✔ Removed conflicting /etc/nginx/sites-enabled/default"
+        fi
+        # Also remove any .bak or .disabled vhosts that might claim the domain
+        $SUDO rm -f /etc/nginx/sites-enabled/botsaz.conf.bak 2>/dev/null || true
+        # Use default_server on our vhost — we removed the stock default above.
+        # This ensures our vhost wins when the Host header doesn't match any other server.
+        _default_server=" default_server"
         {
             echo "# Managed by botsaz install.sh - do not edit by hand"
             if [ "$cert_ok" = "1" ]; then
+                # HTTP → HTTPS redirect
                 echo "server {"
-                echo "    listen 80;"
-                echo "    listen [::]:80;"
+                echo "    listen 80;$_default_server;"
+                echo "    listen [::]:80;$_default_server;"
                 echo "    server_name $host;"
                 echo "    return 301 https://$host\$request_uri;"
                 echo "}"
+                # HTTPS server
                 echo "server {"
-                echo "    listen 443 ssl;"
-                echo "    listen [::]:443 ssl;"
+                echo "    listen 443 ssl;$_default_server;"
+                echo "    listen [::]:443 ssl;$_default_server;"
                 echo "    server_name $host;"
                 echo "    ssl_certificate     /etc/letsencrypt/live/$host/fullchain.pem;"
                 echo "    ssl_certificate_key /etc/letsencrypt/live/$host/privkey.pem;"
@@ -2817,9 +2825,10 @@ configure_vhost() {
                 _nginx_app
                 echo "}"
             else
+                # HTTP-only server (no SSL)
                 echo "server {"
-                echo "    listen 80;"
-                echo "    listen [::]:80;"
+                echo "    listen 80;$_default_server;"
+                echo "    listen [::]:80;$_default_server;"
                 echo "    server_name $host;"
                 _nginx_app
                 echo "}"
