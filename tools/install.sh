@@ -427,7 +427,7 @@ docroot_reachable() {
 fix_apache_systemd_hardening() { # $1 = "apply" to write, else dry-run report
     local mode="${1:-}" dropdir dropfile u blk="" changed=0 _units=""
     case "$ROOT_DIR" in
-        /root|/root/*|/home|/home/*) ;;
+        /root|/root/*|/home|/home/*|/var/www|/var/www/*) ;;
         *) return 0 ;;
     esac
     has_cmd systemctl || return 0
@@ -3015,6 +3015,72 @@ unset _warm _i
 # what you read here is exactly what you can re-run at any moment afterwards.
 report_health
 report_logs 7
+
+# ===== Install crontab entries =====
+# This is essential for child bots to work (cron_dispatcher runs every 5 min)
+# and for daily database backups.
+setup_crontab() {
+    echo ""
+    echo "========================================="
+    echo "  ⏰ Setting up crontab..."
+    echo "========================================="
+    
+    has_cmd crontab || { echo "   ⚠️  crontab not found - skipping"; return 0; }
+    
+    # Build the crontab content
+    local cron_content=""
+    local cron_line=""
+    
+    # Child bot cron dispatcher (every 5 minutes) - ESSENTIAL for bot functionality
+    cron_line="*/5 * * * * php $ROOT_DIR/tools/cron_dispatcher.php >/dev/null 2>&1"
+    echo "   ➕ Adding: $cron_line"
+    cron_content="${cron_content}${cron_line}\n"
+    
+    # Database backup (daily at 3:15 and 15:15) - if backup_dispatcher exists
+    if [ -f "$ROOT_DIR/tools/backup_dispatcher.php" ]; then
+        cron_line="0 3,15 * * * php $ROOT_DIR/tools/backup_dispatcher.php >/dev/null 2>&1"
+        echo "   ➕ Adding: $cron_line"
+        cron_content="${cron_content}${cron_line}\n"
+    fi
+    
+    # Weekly update check (Sundays at 6 AM) - optional
+    cron_line="0 6 * * 0 bash $ROOT_DIR/tools/update.sh >/dev/null 2>&1"
+    echo "   ➕ Adding: $cron_line"
+    cron_content="${cron_content}${cron_line}\n"
+    
+    # Write to crontab - preserve existing entries
+    local existing_crontab=""
+    existing_crontab=$(crontab -l 2>/dev/null || true)
+    
+    # Remove old botsaz entries first (avoid duplicates)
+    local new_crontab="$existing_crontab"
+    if [ -n "$existing_crontab" ]; then
+        new_crontab=$(echo -e "$existing_crontab" | grep -v 'cron_dispatcher.php' | grep -v 'backup_dispatcher.php' | grep -v 'update.sh' | grep -v '^$' || true)
+    fi
+    
+    # Add our entries
+    if [ -n "$new_crontab" ]; then
+        printf '%s\n' "$new_crontab" | crontab - 2>/dev/null || true
+    fi
+    echo -e "$cron_content" | crontab - 2>/dev/null || {
+        # Fallback: combine existing + new
+        printf '%s\n%s' "$new_crontab" "$cron_content" | crontab - 2>/dev/null || true
+    }
+    
+    # Verify
+    local installed=$(crontab -l 2>/dev/null | grep -c 'botsaz-faxima' || true)
+    if [ "$installed" -gt 0 ]; then
+        ok "   Crontab installed! ($installed entries)"
+    else
+        warn "   Could not install crontab - add manually:"
+        echo "      crontab -e"
+        echo "      Then add:"
+        echo "      */5 * * * * php $ROOT_DIR/tools/cron_dispatcher.php"
+    fi
+}
+
+# Set up crontab before the final messages
+setup_crontab
 
 echo ""
 echo "========================================="
