@@ -19,29 +19,36 @@ echo "   ✔ /root: $_current → $(stat -c '%a' /root)"
 
 # ---- 2. data/ ownership ----
 echo "[2/7] Fixing data/ ownership..."
-if [ -d /botsaz-faxima/data ]; then
-    chown -R www-data:www-data /botsaz-faxima/data
+if [ -d /root/botsaz-faxima/data ]; then
+    chown -R www-data:www-data /root/botsaz-faxima/data
     echo "   ✔ data/ → www-data:www-data"
 fi
 
 # ---- 3. bots/ ownership ----
 echo "[3/7] Fixing bots/ ownership..."
-if [ -d /botsaz-faxima/bots ]; then
-    chown www-data:www-data /botsaz-faxima/bots
+if [ -d /root/botsaz-faxima/bots ]; then
+    chown www-data:www-data /root/botsaz-faxima/bots
     echo "   ✔ bots/ → www-data:www-data"
 fi
 
 # ---- 4. PCRE JIT fix ----
 echo "[4/7] Fixing PCRE JIT..."
-_php_ini=$(php -r 'echo php_ini_loaded_file();' 2>/dev/null || echo '')
-if [ -n "$_php_ini" ] && [ -f "$_php_ini" ]; then
-    if ! grep -q '^pcre.jit=' "$_php_ini" 2>/dev/null; then
-        echo 'pcre.jit=0' >> "$_php_ini"
-        echo "   ✔ pcre.jit=0 added to $_php_ini"
-    else
-        echo "   ✔ pcre.jit already set"
+# Apache uses a different .ini than CLI - update BOTH
+_pcre_fixed=0
+for _ini in $(php -r 'echo php_ini_loaded_file();' 2>/dev/null) /etc/php/*/apache2/php.ini /etc/php/*/fpm/php.ini; do
+    [ -z "$_ini" ] && continue
+    [ ! -f "$_ini" ] && continue
+    if ! grep -q '^pcre.jit=' "$_ini" 2>/dev/null; then
+        echo 'pcre.jit=0' >> "$_ini"
+        echo "   ✔ pcre.jit=0 added to $_ini"
+        _pcre_fixed=1
+    elif ! grep -q '^pcre.jit=0' "$_ini" 2>/dev/null; then
+        sed -i "s/^pcre\.jit=.*/pcre.jit=0/" "$_ini"
+        echo "   ✔ pcre.jit=0 set in $_ini"
+        _pcre_fixed=1
     fi
-fi
+done
+[ "$_pcre_fixed" = "0" ] && echo "   ✔ pcre.jit=0 already set everywhere"
 
 # ---- 5. Apache vhost check ----
 echo "[5/7] Checking Apache vhost..."
@@ -50,8 +57,8 @@ if [ -f /etc/apache2/sites-available/botsaz.conf ]; then
     echo "   DocumentRoot: $_docroot"
     if echo "$_docroot" | grep -q '/var/www/html'; then
         echo "   ⚠️  Vhost points to /var/www/html - fixing..."
-        sed -i 's#/var/www/html#/botsaz-faxima#g' /etc/apache2/sites-available/botsaz.conf
-        echo "   ✔ Fixed DocumentRoot to /botsaz-faxima"
+        sed -i 's#/var/www/html#/root/botsaz-faxima#g' /etc/apache2/sites-available/botsaz.conf
+        echo "   ✔ Fixed DocumentRoot to /root/botsaz-faxima"
     else
         echo "   ✔ Vhost points to correct path"
     fi
