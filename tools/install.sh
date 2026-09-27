@@ -2833,15 +2833,19 @@ configure_vhost() {
         fi
         $SUDO mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled 2>/dev/null || true
 
-        # Sanitize fastcgi-php.conf: ensure no try_files inside it.
-        # The snippet is included inside "location ~ \.php$" which inherits
-        # try_files from the parent "location /" block. A duplicate
-        # try_files causes: nginx: [emerg] "try_files" directive is duplicate
-        if [ -f /etc/nginx/snippets/fastcgi-php.conf ]; then
-            if grep -q 'try_files' /etc/nginx/snippets/fastcgi-php.conf 2>/dev/null; then
-                $SUDO sed -i '/^[[:space:]]*try_files/d' /etc/nginx/snippets/fastcgi-php.conf 2>/dev/null || true
-                echo "   ✔ Sanitized fastcgi-php.conf (removed try_files duplicate)"
-            fi
+        # fastcgi-php.conf is distro-dependent: Ubuntu's ships its own
+        # try_files (duplicate-directive emerg if we add ours), other
+        # distros ship none (unguarded php execution if we don't). Editing
+        # that SYSTEM file to force one shape would hit every OTHER vhost
+        # including it - so our php block below is fully self-contained and
+        # never includes the snippet. If an older installer already deleted
+        # the snippet's guard, OUR vhost is still safe; other sites are not:
+        if [ -f /etc/nginx/snippets/fastcgi-php.conf ] \
+            && ! grep -q 'try_files' /etc/nginx/snippets/fastcgi-php.conf 2>/dev/null; then
+            echo "   ⚠️  snippets/fastcgi-php.conf lost its try_files guard (older installer)."
+            echo "      This vhost carries its own guard and is unaffected, but other"
+            echo "      sites using that snippet are unguarded - restore a pristine copy"
+            echo "      if you never customized it (apt-get install --reinstall nginx-common)."
         fi
 
         # the application block is reused for :80 (no cert yet) and :443 (cert present)
@@ -2878,10 +2882,13 @@ configure_vhost() {
             echo "    location ~ ^/bots/.*config\.php$ { deny all; return 404; }"
             if [ -n "$fpm_sock" ]; then
                 echo "    location ~ \.php\$ {"
-                # snippets/fastcgi-php.conf is sanitized before this
-                # (any try_files is removed) to avoid duplicate
-                # directive errors with the parent location / block
-                echo "        include snippets/fastcgi-php.conf;"
+                # Self-contained: fastcgi_params (unlike the distro snippet)
+                # carries no try_files of its own, so our guard below can
+                # never collide with it - on ANY distro, without touching
+                # system files. (No PATH_INFO splitting: nothing in this
+                # project reads PATH_INFO; all entries use query strings.)
+                echo "        try_files \$uri =404;"
+                echo "        include fastcgi_params;"
                 echo "        fastcgi_pass unix:$fpm_sock;"
                 echo "        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;"
                 echo "        fastcgi_index index.php;"
