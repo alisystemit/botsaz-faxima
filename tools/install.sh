@@ -133,6 +133,33 @@ apache_run_user() {
     printf '%s' "${u:-www-data}"
 }
 
+# Which web server actually SERVES right now? An installed-but-dead apache2
+# next to a running nginx must NOT win: writing the Apache vhost while nginx
+# holds :80 leaves Telegram talking to the wrong server, and installing
+# libapache2-mod-php drags apache2 back in as an apt dependency - re-enabled
+# at boot, failing forever on the busy port. Prints: apache2 | nginx | ""
+# (empty = none active or no systemctl; callers fall back to installed binaries).
+active_web_server() {
+    local a=0 n=0
+    has_cmd systemctl || return 0
+    if systemctl is-active --quiet apache2 2>/dev/null || systemctl is-active --quiet httpd 2>/dev/null; then a=1; fi
+    if systemctl is-active --quiet nginx 2>/dev/null; then n=1; fi
+    if [ "$a" = "1" ] && [ "$n" = "0" ]; then printf 'apache2'; return 0; fi
+    if [ "$n" = "1" ] && [ "$a" = "0" ]; then printf 'nginx'; return 0; fi
+    return 0
+}
+
+# Who listens on $1? Used to name the process behind "Address already in use"
+# (almost always the OTHER web server). Prints the process name or nothing.
+port_owner() { # $1 = port
+    local p="$1" line=""
+    has_cmd ss || return 0
+    line="$(ss -tlnp 2>/dev/null | grep -E "[:.]$p[[:space:]]" | head -n1 || true)"
+    [ -z "$line" ] && return 0
+    printf '%s' "$line" | sed -n 's/.*users:(("\([^"]*\)".*/\1/p' | head -n1
+    return 0
+}
+
 # What that account can REALLY do.
 # Why this exists: parsing mode bits said "/root/botsaz-faxima is reachable"
 # on a server where Apache was still logging AH00035 for the very same path a
@@ -2131,7 +2158,29 @@ echo "   Extensions ✔ (curl, mbstring, pdo_mysql, mysqli, sqlite3)"
 # server hands .php files to the browser as plain text, so the webhook URL
 # would return the source code (or a download) instead of answering Telegram.
 echo "✅ Checking the PHP web-server module..."
-if has_cmd apache2 || has_cmd httpd; then
+# PICKED (from preflight) and the actually-active server outrank installed
+# binaries here: offering libapache2-mod-php on an nginx box installs it AND
+# drags apache2 back in as a dependency - re-enabled at boot, failing forever
+# on nginx's busy port. That is exactly how a running nginx install ends up
+# with a dead apache2 beside it.
+if [ "${PICKED:-}" = "nginx" ] || { [ -z "${PICKED:-}" ] && ! has_cmd apache2 && ! has_cmd httpd && has_cmd nginx; }; then
+    if dpkg -s php-fpm >/dev/null 2>&1; then
+        echo "   nginx PHP-FPM ✔"
+    elif ask_yes "   Install php-fpm so nginx can execute PHP?"; then
+        if apt_install php-fpm; then
+            # Enable whatever php-fpm version actually got installed - the
+            # version differs per release (8.1/8.2/8.3/...), so a hardcoded
+            # name enables nothing on most servers and PHP stays down.
+            for _fpm_new in $(systemctl list-unit-files --type=service --no-legend 2>/dev/null | awk '{print $1}' | grep -E '^php[0-9.]*-fpm\.service$' || true); do
+                $SUDO systemctl enable --now "$_fpm_new" 2>/dev/null || true
+            done
+            unset _fpm_new
+            echo "   nginx PHP-FPM installed ✔"
+        else
+            echo "   ⚠️  Could not install php-fpm - nginx will not run PHP."
+        fi
+    fi
+elif has_cmd apache2 || has_cmd httpd; then
     if dpkg -s libapache2-mod-php >/dev/null 2>&1; then
         echo "   Apache PHP module ✔"
     elif ask_yes "   Install libapache2-mod-php so Apache can execute PHP?"; then
@@ -2140,6 +2189,17 @@ if has_cmd apache2 || has_cmd httpd; then
         else
             echo "   ⚠️  Could not install libapache2-mod-php - Apache will not run PHP."
         fi
+    fi
+    # The package install restarts Apache - if it did not come up, say why
+    # instead of leaving a green line above a dead server. The usual cause is
+    # the other web server holding :80 (apt re-enabled apache2 on install).
+    if has_cmd systemctl && ! systemctl is-active --quiet apache2 2>/dev/null && ! systemctl is-active --quiet httpd 2>/dev/null; then
+        _po80="$(port_owner 80)"
+        echo "   ⚠️  Apache is installed but NOT running."
+        [ -n "$_po80" ] && echo "      Port 80 is held by: $_po80"
+        echo "      If nginx should serve this box: sudo systemctl stop apache2 && sudo systemctl disable apache2"
+        echo "      If Apache should serve it: sudo systemctl stop nginx && sudo systemctl disable nginx && sudo systemctl restart apache2"
+        unset _po80
     fi
 elif has_cmd nginx; then
     if dpkg -s php-fpm >/dev/null 2>&1; then
@@ -2344,14 +2404,19 @@ issue_ssl() {
 
     echo "   ⏳ Requesting a Let's Encrypt certificate for $host ..."
     echo "      The domain must already point to this server and port 80 must be reachable."
-    local rc=0
-    if has_cmd apache2 || has_cmd httpd; then
-        certbot --apache -d "$host" --non-interactive --agree-tos --register-unsafely-without-email || rc=$?
-    elif has_cmd nginx; then
+    local rc=0 _ssl_active=""
+    _ssl_active="$(active_web_server)"
+    # The plugin must match the server that ANSWERS port 80 (http-01 challenge),
+    # not merely an installed binary - a dead apache2 next to a live nginx
+    # means --apache can never complete the challenge.
+    if [ "$_ssl_active" = "nginx" ] || { [ -z "$_ssl_active" ] && ! has_cmd apache2 && ! has_cmd httpd && has_cmd nginx; }; then
         certbot --nginx -d "$host" --non-interactive --agree-tos --register-unsafely-without-email || rc=$?
+    elif has_cmd apache2 || has_cmd httpd; then
+        certbot --apache -d "$host" --non-interactive --agree-tos --register-unsafely-without-email || rc=$?
     else
         certbot certonly --webroot -w "$ROOT_DIR" -d "$host" --non-interactive --agree-tos --register-unsafely-without-email || rc=$?
     fi
+    unset _ssl_active
 
     if [ "$rc" = "0" ]; then
         echo "   🔒 Certificate issued for $host ✔"
@@ -2361,10 +2426,12 @@ issue_ssl() {
         # always says --apache sends an nginx operator to a command that fails
         # (and the --check report already branches correctly, so the two would
         # disagree about the same server).
-        local redo="--webroot -w $ROOT_DIR"
-        if has_cmd apache2 || has_cmd httpd; then redo="--apache"
-        elif has_cmd nginx; then redo="--nginx"
+        local redo="--webroot -w $ROOT_DIR" _redo_active=""
+        _redo_active="$(active_web_server)"
+        if [ "$_redo_active" = "nginx" ] || { [ -z "$_redo_active" ] && ! has_cmd apache2 && ! has_cmd httpd && has_cmd nginx; }; then redo="--nginx"
+        elif has_cmd apache2 || has_cmd httpd; then redo="--apache"
         fi
+        unset _redo_active
         echo "   ⚠️  Could not issue the certificate (exit $rc)."
         echo "      Usual causes: DNS not pointing here, port 80 blocked, or a local machine."
         echo "      Re-run it later with: sudo certbot $redo -d $host"
@@ -2410,7 +2477,14 @@ configure_vhost() {
         if [ -S "$s" ]; then fpm_sock="$s"; break; fi
     done
 
-    if has_cmd apache2 || has_cmd httpd; then
+    # The RUNNING server wins over installed binaries: with a live nginx and
+    # a dead-but-installed apache2, the Apache branch would write a vhost no
+    # request ever reaches (nginx answers :80/:443 instead).
+    local _vhost_active=""
+    _vhost_active="$(active_web_server)"
+
+    if [ "$_vhost_active" = "apache2" ] || { [ -z "$_vhost_active" ] && { has_cmd apache2 || has_cmd httpd; }; }; then
+        unset _vhost_active
         local ap_conf="/etc/apache2/sites-available/botsaz.conf"
         # Check (and offer to repair) the path BEFORE the early return below.
         # A re-run finds the vhost already written, skips everything - and
@@ -3027,55 +3101,61 @@ setup_crontab() {
     
     has_cmd crontab || { echo "   ⚠️  crontab not found - skipping"; return 0; }
     
+    # Use the PHP binary path from config.php if available, else 'php'
+    local php_cmd="php"
+    if [ -f "$ROOT_DIR/config.php" ]; then
+        local cfg_php="$($PHP_BIN -r "require '$ROOT_DIR/config.php'; echo isset(\$config['php_bin']) ? \$config['php_bin'] : 'php';" 2>/dev/null)"
+        [ -n "$cfg_php" ] && [ "$cfg_php" != "php" ] && php_cmd="$cfg_php"
+    fi
+    
     # Build the crontab content
     local cron_content=""
     local cron_line=""
     
     # Child bot cron dispatcher (every 5 minutes) - ESSENTIAL for bot functionality
-    cron_line="*/5 * * * * php $ROOT_DIR/tools/cron_dispatcher.php >/dev/null 2>&1"
+    cron_line="*/5 * * * * cd $ROOT_DIR && $php_cmd tools/cron_dispatcher.php >/dev/null 2>&1"
     echo "   ➕ Adding: $cron_line"
     cron_content="${cron_content}${cron_line}\n"
     
     # Database backup (daily at 3:15 and 15:15) - if backup_dispatcher exists
     if [ -f "$ROOT_DIR/tools/backup_dispatcher.php" ]; then
-        cron_line="0 3,15 * * * php $ROOT_DIR/tools/backup_dispatcher.php >/dev/null 2>&1"
+        cron_line="0 3,15 * * * cd $ROOT_DIR && $php_cmd tools/backup_dispatcher.php >/dev/null 2>&1"
         echo "   ➕ Adding: $cron_line"
         cron_content="${cron_content}${cron_line}\n"
     fi
     
     # Weekly update check (Sundays at 6 AM) - optional
-    cron_line="0 6 * * 0 bash $ROOT_DIR/tools/update.sh >/dev/null 2>&1"
+    cron_line="0 6 * * 0 cd $ROOT_DIR && bash tools/update.sh >/dev/null 2>&1"
     echo "   ➕ Adding: $cron_line"
     cron_content="${cron_content}${cron_line}\n"
     
     # Write to crontab - preserve existing entries
     local existing_crontab=""
-    existing_crontab=$(crontab -l 2>/dev/null || true)
+    existing_crontab=$($SUDO crontab -l 2>/dev/null || true)
     
     # Remove old botsaz entries first (avoid duplicates)
     local new_crontab="$existing_crontab"
     if [ -n "$existing_crontab" ]; then
-        new_crontab=$(echo -e "$existing_crontab" | grep -v 'cron_dispatcher.php' | grep -v 'backup_dispatcher.php' | grep -v 'update.sh' | grep -v '^$' || true)
+        new_crontab=$(echo -e "$existing_crontab" | grep -v 'botsaz-faxima' | grep -v '^$' || true)
     fi
     
     # Add our entries
     if [ -n "$new_crontab" ]; then
-        printf '%s\n' "$new_crontab" | crontab - 2>/dev/null || true
+        printf '%s\n%s' "$new_crontab" "$cron_content" | $SUDO crontab - 2>/dev/null || true
+    else
+        echo -e "$cron_content" | $SUDO crontab - 2>/dev/null || true
     fi
-    echo -e "$cron_content" | crontab - 2>/dev/null || {
-        # Fallback: combine existing + new
-        printf '%s\n%s' "$new_crontab" "$cron_content" | crontab - 2>/dev/null || true
-    }
     
     # Verify
-    local installed=$(crontab -l 2>/dev/null | grep -c 'botsaz-faxima' || true)
+    local installed=$($SUDO crontab -l 2>/dev/null | grep -c 'botsaz-faxima' || true)
     if [ "$installed" -gt 0 ]; then
         ok "   Crontab installed! ($installed entries)"
+        echo "      Run: $SUDO crontab -l"
     else
         warn "   Could not install crontab - add manually:"
         echo "      crontab -e"
         echo "      Then add:"
-        echo "      */5 * * * * php $ROOT_DIR/tools/cron_dispatcher.php"
+        echo "      */5 * * * * cd $ROOT_DIR && $php_cmd tools/cron_dispatcher.php"
     fi
 }
 
