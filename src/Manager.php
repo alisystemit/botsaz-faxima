@@ -79,8 +79,9 @@ class Manager
         if (PHP_VERSION_ID < 80200) {
             return "نسخه PHP " . PHP_VERSION . " کمتر از 8.2 لازم است";
         }
-        // 5. بررسی vendor/
-        if (!is_file($root . '/vendor/autoload.php')) {
+        // 5. بررسی vendor/ (قالب‌ها vendor آماده دارند)
+        $hasVendor = is_file($root . '/templates/faxima/vendor/autoload.php') || is_file($root . '/templates/mirza/vendor/autoload.php');
+        if (!$hasVendor) {
             return "vendor/autoload.php پیدا نشد - composer install را اجرا کنید";
         }
         return ""; // همه چیز OK
