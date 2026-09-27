@@ -1440,8 +1440,9 @@ if [ "$(id -u)" -eq 0 ] && [ -d /root ]; then
 fi
 
 # ===== Auto-fix systemd sandbox (persistent drop-in) =====
-# chmod روی /root وقتی بی‌اثر است که انکار داخل سرویس باشد نه روی دیسک.
-# --check فقط گزارش می‌دهد (داخل report_health)؛ install می‌نویسد.
+# chmod on /root does nothing when the denial lives inside the service,
+# not on disk.
+# --check only reports (inside report_health); install mode writes it.
 if [ "$MODE" = "install" ] && [ "$(id -u)" -eq 0 ]; then
     fix_apache_systemd_hardening apply || true
 fi
@@ -2450,8 +2451,8 @@ if [ -d "$ROOT_DIR/bots" ]; then
     fi
 fi
 # Ensure Apache is running with the correct config
-# NOTE: اگر پروژه زیر /root است و drop-in systemd تازه نوشته شده،
-# restart همین‌جا همان sandbox جدید را اعمال می‌کند.
+# NOTE: if the project lives under /root and a systemd drop-in was just
+# written above, the restart below is what applies that new sandbox.
 fix_apache_systemd_hardening apply || true
 if has_cmd systemctl && systemctl is-active --quiet apache2 2>/dev/null; then
     systemctl restart apache2 2>/dev/null && echo "   ✔ Apache restarted" || \
