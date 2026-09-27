@@ -187,6 +187,8 @@ systemd_sandbox_blocker() { # $1 = project path
             unit="apache2"
         elif systemctl show httpd -p LoadState --value 2>/dev/null | grep -qx loaded; then
             unit="httpd"
+        elif systemctl show nginx -p LoadState --value 2>/dev/null | grep -qx loaded; then
+            unit="nginx"
         fi
     fi
     if [ -n "$unit" ]; then
@@ -370,6 +372,8 @@ fix_apache_systemd_hardening() { # $1 = "apply" to write, else dry-run report
         unit="apache2"
     elif systemctl show httpd -p LoadState --value 2>/dev/null | grep -qx loaded; then
         unit="httpd"
+    elif systemctl show nginx -p LoadState --value 2>/dev/null | grep -qx loaded; then
+        unit="nginx"
     else
         return 0
     fi
@@ -474,6 +478,78 @@ $ctx = stream_context_create(["http" => [
 $code = 0;
 if (isset($http_response_header[0]) && preg_match("#HTTP/\S+\s+(\d+)#", $http_response_header[0], $m)) $code = (int)$m[1];
 echo $code;' 2>/dev/null || true
+}
+
+# Read the bot's status the way THE BOT reads Telegram.
+# src/BotApi.php talks to api.telegram.org over cURL (30s total / 15s connect).
+# Both call sites below used file_get_contents() instead, so the checker and
+# the thing being checked ran two different HTTP stacks - on this very server
+# getMe answered while getWebhookInfo did not, and the report could only say
+# "no answer from api.telegram.org", which nobody can act on. Same stack, same
+# timeouts, one short retry, and the reason comes back with the failure.
+#
+# It also never stops halfway. The old code did `exit` as soon as getMe failed,
+# so WHURL was never printed - and "WHURL is absent" is read below as "no
+# webhook registered, run set_webhook". One blip from Telegram therefore
+# became an instruction to re-register a webhook that was perfectly fine.
+#
+# tg_status <token> -> prints ME=/WH... lines; empty output means PHP died here
+tg_status() { # $1 = bot token
+    TG_TOKEN="$1" "$PHP_BIN" -r '
+function tg_get($url) {
+    $last = "";
+    for ($i = 0; $i < 2; $i++) {
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_POST           => true,
+            CURLOPT_POSTFIELDS     => "",
+            CURLOPT_TIMEOUT        => 30,
+            CURLOPT_CONNECTTIMEOUT => 15,
+            CURLOPT_HTTPHEADER     => ["Content-Type: application/x-www-form-urlencoded"],
+            CURLOPT_SSL_VERIFYPEER => true,
+            CURLOPT_SSL_VERIFYHOST => 2,
+        ]);
+        $body = curl_exec($ch);
+        $err  = curl_error($ch);
+        $code = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        curl_close($ch);
+        if ($body !== false && $code === 200) {
+            $j = json_decode($body, true);
+            if (is_array($j)) return $j;
+            $last = "telegram answered with something that is not JSON";
+        } elseif ($body === false) {
+            $last = "curl: " . $err;
+        } else {
+            // Telegram explains its own failures - 401/429/500 must not all
+            // collapse into "no answer", because only one of them is a blip.
+            $j = json_decode((string) $body, true);
+            $last = (is_array($j) && !empty($j["description"]))
+                ? $j["description"] . " (HTTP " . $code . ")"
+                : "HTTP " . $code;
+        }
+        usleep(300000);
+    }
+    return ["ok" => false, "description" => $last];
+}
+$api = "https://api.telegram.org/bot" . getenv("TG_TOKEN") . "/";
+$me  = tg_get($api . "getMe");
+if (!empty($me["ok"])) {
+    echo "ME=OK @" . ($me["result"]["username"] ?? "?") . "\n";
+} else {
+    echo "ME=ERR:" . ($me["description"] ?? "no reason given") . "\n";
+}
+// Deliberately does NOT stop here - see the note above the function.
+$wh = tg_get($api . "getWebhookInfo");
+if (!empty($wh["ok"])) {
+    $r = $wh["result"];
+    echo "WHURL=" . ($r["url"] ?? "") . "\n";
+    echo "WHPENDING=" . (int)($r["pending_update_count"] ?? 0) . "\n";
+    echo "WHERRDATE=" . (int)($r["last_error_date"] ?? 0) . "\n";
+    echo "WHERR=" . ($r["last_error_message"] ?? "") . "\n";
+} else {
+    echo "WH=ERR:" . ($wh["description"] ?? "no reason given") . "\n";
+}' 2>/dev/null || true
 }
 
 # Read one value out of config.php without booting the whole application.
@@ -884,27 +960,27 @@ report_health() {
     if [ -z "$main_token" ] || ! printf '%s' "$main_token" | grep -Eq '^[0-9]+:[A-Za-z0-9_-]{30,}$'; then
         h_warn "skipped - main_token is not usable yet"
     else
-        v="$(TG_TOKEN="$main_token" "$PHP_BIN" -r '
-$t = getenv("TG_TOKEN");
-$api = "https://api.telegram.org/bot".$t."/";
-$me = @json_decode((string)@file_get_contents($api."getMe"), true);
-if (empty($me["ok"])) { echo "ME=ERR:".($me["description"] ?? "no answer from api.telegram.org"); exit; }
-echo "ME=OK @".$me["result"]["username"]."\n";
-$wh = @json_decode((string)@file_get_contents($api."getWebhookInfo"), true);
-if (empty($wh["ok"])) { echo "WH=ERR:".($wh["description"] ?? "no answer from api.telegram.org"); exit; }
-$r = $wh["result"];
-echo "WHURL=".($r["url"] ?? "")."\n";
-echo "WHPENDING=".(int)($r["pending_update_count"] ?? 0)."\n";
-echo "WHERRDATE=".(int)($r["last_error_date"] ?? 0)."\n";
-echo "WHERR=".($r["last_error_message"] ?? "")."\n";' 2>/dev/null || true)"
+        # One shared probe (tg_status) instead of an inline file_get_contents:
+        # it retries, it uses the bot's own HTTP stack, and it reports the real
+        # reason - and it always comes back with the WH* keys, so a failure
+        # reads as "could not read", never as "no webhook registered".
+        v="$(tg_status "$main_token")"
 
         local meline whurl pend wherrd wherr whinfo expected who probe_missing
+        local have_whurl
         meline="$(printf '%s\n' "$v" | sed -n 's/^ME=//p')"
         whinfo="$(printf '%s\n' "$v" | sed -n 's/^WH=//p')"
         whurl="$(printf '%s\n' "$v" | sed -n 's/^WHURL=//p')"
         pend="$(printf '%s\n' "$v" | sed -n 's/^WHPENDING=//p')"
         wherrd="$(printf '%s\n' "$v" | sed -n 's/^WHERRDATE=//p')"
         wherr="$(printf '%s\n' "$v" | sed -n 's/^WHERR=//p')"
+
+        # WHURL can legitimately be EMPTY (no webhook recorded) - which is a
+        # completely different fact from the line being ABSENT (the probe died
+        # before it could be printed). Only the second one may never be read as
+        # "no webhook registered", so test for the line itself.
+        have_whurl=0
+        if printf '%s\n' "$v" | grep -q '^WHURL='; then have_whurl=1; fi
 
         # getMe prints "ME=OK @username" (a space before the @), so the match
         # has to allow that space - matching only "OK@" made every healthy bot
@@ -916,7 +992,17 @@ echo "WHERR=".($r["last_error_message"] ?? "")."\n";' 2>/dev/null || true)"
                 h_ok "bot is alive${who:+ @$who}"
                 ;;
             ERR:*) bot_up=0; h_fail "Telegram rejected the token: ${meline#ERR:}" ;;
-            *)     bot_up=0; h_fail "api.telegram.org unreachable - cannot verify the bot" ;;
+            *)
+                bot_up=0
+                # Empty $v is NOT "Telegram did not answer": nothing left this
+                # machine at all, which is a local php/curl failure. Saying
+                # otherwise would send the reader off to debug the network.
+                if [ -z "$v" ]; then
+                    h_fail "the Telegram probe printed nothing - php or curl failed locally"
+                else
+                    h_fail "api.telegram.org unreachable - cannot verify the bot"
+                fi
+                ;;
         esac
 
         # getWebhookInfo can fail on its own (rate limit, a blip) while getMe
