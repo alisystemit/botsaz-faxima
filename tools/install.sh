@@ -745,6 +745,12 @@ h_warn() { HC_WARN=$((HC_WARN + 1)); printf '  [WARN] %s\n' "$1"; }
 h_fail() { HC_FAIL=$((HC_FAIL + 1)); printf '  [FAIL] %s\n' "$1"; }
 h_note() { printf '         %s\n' "$1"; }   # context only, not a result
 
+# Aliases for the installer sections below - same as h_ok/h_warn/h_fail/h_note
+ok()   { h_ok "$1"; }
+warn() { h_warn "$1"; }
+fail() { h_fail "$1"; }
+step() { echo -e "\n━━━ $1 ━━━"; }
+
 # Is mod_rewrite really enabled?
 # `a2enmod -l` does not exist in every Apache build - where it is missing it
 # prints usage on stderr and exits non-zero, and the old test redirected that
