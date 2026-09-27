@@ -2011,7 +2011,18 @@ preflight_fresh_server() {
             $SUDO systemctl disable apache2 2>/dev/null || true
             local apkg="apache2 apache2-bin apache2-data apache2-utils"
             apkg="$apkg $(dpkg -l 'libapache2-mod-php*' 2>/dev/null | awk '$1=="ii"{print $2}')"
-            apt_remove $apkg || true
+            # Use purge (not just remove) to eliminate config files
+            $SUDO apt-get purge -y $apkg 2>/dev/null || true
+            $SUDO apt-get autoremove -y 2>/dev/null || true
+            # Also remove any php packages that pulled apache in
+            $SUDO apt-get purge -y libapache2-mod-php8.5 libapache2-mod-php 2>/dev/null || true
+            $SUDO apt-get autoremove -y 2>/dev/null || true
+            # Nuclear option: if apache2 binary still exists, remove it
+            if has_cmd apache2; then
+                warn "   apache2 still exists after apt purge - trying dpkg --remove..."
+                $SUDO dpkg --remove --force-depends apache2 apache2-bin apache2-utils 2>/dev/null || true
+                $SUDO apt-get remove -y --purge apache2* apache2-* 2>/dev/null || true
+            fi
             if has_cmd apache2; then
                 warn "   Apache is still installed - nginx will not get port 80."
                 warn "   Finish it by hand: sudo apt-get purge apache2 apache2-bin apache2-utils libapache2-mod-php"
@@ -2849,7 +2860,7 @@ configure_vhost() {
             fi
         else
             echo "   ⚠️  nginx config test failed - undoing the vhost so the server keeps running:"
-            printf '%s\n' "$ng_out" | head -n 5
+            printf '%s\n' "$ng_out" | awk 'NR<=5'
             $SUDO rm -f /etc/nginx/sites-enabled/botsaz.conf "$ng_conf"
         fi
         return 0
