@@ -2155,33 +2155,60 @@ install_php_if_needed
 # A FUNCTION (not inline code): php-fpm is often installed AFTER the first
 # pass runs, so its php.ini does not exist yet - callers re-run this after
 # any PHP install step.
+# PHP_ETC_ROOT only exists so this can be exercised against a fake tree; on a
+# server it is always the real /etc/php.
+PHP_ETC_ROOT="${PHP_ETC_ROOT:-/etc/php}"
+
 apply_pcre_fix() {
-    local _pcre_jit_ok _all_inis _ap _unique_inis _ini
-    _pcre_jit_ok=$($PHP_BIN -r 'echo ini_get("pcre.jit");' 2>/dev/null || echo "unknown")
-    if [ "$_pcre_jit_ok" != "0" ]; then
-        # Find all PHP ini files: CLI + Apache + FPM modules
-        _all_inis="$($PHP_BIN -r 'echo php_ini_loaded_file();' 2>/dev/null || echo '')"
-        # Also check common SAPI ini locations
-        for _ap in /etc/php/*/apache2/php.ini /etc/php/*/apache2php.ini /etc/php/*/fpm/php.ini; do
-            [ -f "$_ap" ] && _all_inis="$_all_inis $_ap"
-        done
-        # Deduplicate
-        _unique_inis=$(echo "$_all_inis" | tr ' ' '\n' | sort -u | grep -v '^$')
-        for _ini in $_unique_inis; do
-            [ -z "$_ini" ] && continue
-            if [ ! -f "$_ini" ]; then continue; fi
-            if ! grep -q '^pcre.jit=' "$_ini" 2>/dev/null; then
-                echo 'pcre.jit=0' >> "$_ini"
-                echo "   ✔ Disabled PCRE JIT in $_ini"
-            elif ! grep -q '^pcre.jit=0' "$_ini" 2>/dev/null; then
-                # pcre.jit exists but is not 0 → change it
-                sed -i "s/^pcre\.jit=.*/pcre.jit=0/" "$_ini"
-                echo "   ✔ Changed pcre.jit to 0 in $_ini"
-            else
-                echo "   ✔ pcre.jit=0 already set in $_ini"
-            fi
-        done
-    fi
+    # The JIT warning is PER-SAPI and Apache never sees what the CLI reports.
+    # The old version asked `php -r 'echo ini_get("pcre.jit")'` - the CLI
+    # - and did NOTHING when that answered 0, so a box with a quiet CLI kept
+    # logging "Allocation of JIT memory failed, PCRE JIT will be disabled" on
+    # every single request under mod_php. The operator then had to write
+    # /etc/php/<ver>/apache2/conf.d/99-pcre.ini by hand to make it stop.
+    #
+    # So this writes that drop-in itself, one per SAPI that exists (cli,
+    # apache2, fpm). conf.d is scanned AFTER php.ini and 99- sorts after the
+    # module files, so it wins no matter what php.ini or a mod already said -
+    # and it does not depend on anybody else's opinion of the value.
+    local _dir _sapi _ap _ini _all_inis _unique_inis
+    for _dir in "$PHP_ETC_ROOT"/*/*/conf.d; do
+        [ -d "$_dir" ] || continue
+        case "$_dir" in */mods-available/*) continue ;; esac
+        _sapi="$(printf '%s' "$_dir" | sed 's|.*/\([^/]*\)/conf\.d$|\1|')"
+        if [ -f "$_dir/99-pcre.ini" ] && grep -qx 'pcre\.jit=0' "$_dir/99-pcre.ini" 2>/dev/null; then
+            echo "   ✔ pcre.jit=0 already in $_sapi (conf.d/99-pcre.ini)"
+            continue
+        fi
+        if printf 'pcre.jit=0\n' > "$_dir/99-pcre.ini" 2>/dev/null; then
+            echo "   ✔ PCRE JIT disabled for the $_sapi SAPI -> $_dir/99-pcre.ini"
+        else
+            echo "   ⚠️  Could not write $_dir/99-pcre.ini - add pcre.jit=0 by hand"
+        fi
+    done
+
+    # Layouts without conf.d still get the php.ini itself patched, so this
+    # keeps working outside Debian/Ubuntu packaging too.
+    _all_inis="$($PHP_BIN -r 'echo php_ini_loaded_file();' 2>/dev/null || echo '')"
+    for _ap in "$PHP_ETC_ROOT"/*/apache2/php.ini "$PHP_ETC_ROOT"/*/apache2php.ini \
+               "$PHP_ETC_ROOT"/*/fpm/php.ini "$PHP_ETC_ROOT"/*/cli/php.ini; do
+        [ -f "$_ap" ] && _all_inis="$_all_inis $_ap"
+    done
+    _unique_inis=$(echo "$_all_inis" | tr ' ' '\n' | sort -u | grep -v '^$')
+    for _ini in $_unique_inis; do
+        [ -z "$_ini" ] && continue
+        if [ ! -f "$_ini" ]; then continue; fi
+        if ! grep -q '^pcre.jit=' "$_ini" 2>/dev/null; then
+            echo 'pcre.jit=0' >> "$_ini"
+            echo "   ✔ Disabled PCRE JIT in $_ini"
+        elif ! grep -q '^pcre.jit=0' "$_ini" 2>/dev/null; then
+            # pcre.jit exists but is not 0 → change it
+            sed -i "s/^pcre\.jit=.*/pcre.jit=0/" "$_ini"
+            echo "   ✔ Changed pcre.jit to 0 in $_ini"
+        else
+            echo "   ✔ pcre.jit=0 already set in $_ini"
+        fi
+    done
 }
 apply_pcre_fix
 
@@ -3197,24 +3224,38 @@ fi
 WEBHOOK_URL="${BASE_URL}/bot.php"
 $PHP_BIN "$ROOT_DIR/tools/set_webhook.php" "$WEBHOOK_URL" || echo "⚠️  Webhook not set (the URL is probably not https/public). Set it manually later."
 
-# ===== FIX: data/ ownership and Apache restart =====
+# ---------- runtime ownership: data/ and bots/ belong to www-data ----------
+# Apache serves this as www-data, so EVERYTHING the app writes must be
+# writable by it - including files this very installer creates a moment later
+# while running as root (the initial installer, the health check, and root's
+# crontab once it fires).
+#
+# The old version asked one question first: is the data/ DIRECTORY already
+# owned by www-data? On the box in question it was - while data/botsaz.sqlite
+# inside it was root:root. The guard therefore said "nothing to do", the
+# manager database stayed root-owned, bot.php could not write to it, and
+# Telegram received "500 Internal Server Error" for every update while the
+# update queue kept growing. A directory that looks right says nothing about
+# the files under it, so this is UNCONDITIONAL and RECURSIVE - and it runs a
+# second time at the very end, after the last step that runs PHP as root.
+enforce_wwwdata_ownership() {
+    [ "$(id -u)" -eq 0 ] || return 0
+    local _d _did=0
+    for _d in "$ROOT_DIR/data" "$ROOT_DIR/bots"; do
+        [ -d "$_d" ] || continue
+        if chown -R www-data:www-data "$_d" 2>/dev/null; then
+            _did=1
+        else
+            echo "   ⚠️  Could not chown $_d - run: chown -R www-data:www-data '$_d'"
+        fi
+    done
+    [ "$_did" = "1" ] && echo "   ✔ data/ and bots/ belong to www-data (recursive)"
+    return 0
+}
+enforce_wwwdata_ownership
+# ===== FIX: Apache restart =====
 # If the project is under /root, Apache (www-data) needs write access to data/ and bots/
 # and the vhost needs to be properly configured.
-if [ "$(id -u)" -eq 0 ] && [ -d "$ROOT_DIR/data" ]; then
-    if [ "$(stat -c '%U:%G' "$ROOT_DIR/data")" != "www-data:www-data" ]; then
-        chown -R www-data:www-data "$ROOT_DIR/data" 2>/dev/null && \
-            echo "   ✔ chown -R www-data:www-data $ROOT_DIR/data" || \
-            echo "   ⚠️  Could not chown data/ - run manually"
-    fi
-fi
-# bots/ directory needs write access for child bot creation
-if [ -d "$ROOT_DIR/bots" ]; then
-    if [ "$(stat -c '%U:%G' "$ROOT_DIR/bots")" != "www-data:www-data" ]; then
-        chown www-data:www-data "$ROOT_DIR/bots" 2>/dev/null && \
-            echo "   ✔ chown www-data:www-data $ROOT_DIR/bots" || \
-            echo "   ⚠️  Could not chown bots/ - run manually"
-    fi
-fi
 # Ensure Apache is running with the correct config
 # NOTE: if the project lives under /root and a systemd drop-in was just
 # written above, the restart below is what applies that new sandbox.
@@ -3372,6 +3413,14 @@ setup_crontab() {
 
 # Set up crontab before the final messages
 setup_crontab
+
+# Last filesystem action of the whole install. report_health() and
+# setup_crontab() both run PHP as ROOT after the chown above, and the first
+# thing root's */5 cron does is touch data/ again - if that leaves a root-owned
+# botsaz.sqlite behind, bot.php gets "attempt to write a readonly database"
+# and the webhook answers 500 from then on. Enforcing it here means the tree is
+# handed over to www-data as the installer's final act.
+enforce_wwwdata_ownership
 
 echo ""
 echo "========================================="
