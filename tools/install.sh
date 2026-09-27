@@ -836,6 +836,33 @@ report_health() {
             fi
             unset _fpm_svc
         fi
+        # Who REALLY answers :80/:443? If that is not $ws, every vhost written
+        # above serves nobody: Telegram talks to the other server while this
+        # report inspects ours. The classic shape is a dead-but-installed
+        # apache2 next to a live nginx (apt drags apache2 back via
+        # libapache2-mod-php and it fails forever on the busy port).
+        if has_cmd ss; then
+            local _po80="" _po443="" _want=""
+            _po80="$(port_owner 80)"; _po443="$(port_owner 443)"
+            case "$ws" in
+                apache2|httpd) _want="apache2 httpd" ;;
+                nginx) _want="nginx" ;;
+            esac
+            for _pp in "$_po80" "$_po443"; do
+                [ -n "$_pp" ] || continue
+                case " $_want " in
+                    *" $_pp "*) ;;
+                    *)
+                        h_fail "port is answered by '$_pp', not by $ws - the other web server owns it"
+                        h_note "one server must go: sudo systemctl stop X && sudo systemctl disable X"
+                        h_note "nginx box with dead apache2: stop+disable apache2, then bash tools/install.sh"
+                        h_note "apache box with live nginx: stop+disable nginx, then bash tools/install.sh"
+                        break
+                        ;;
+                esac
+            done
+            unset _po80 _po443 _want _pp
+        fi
     fi
 
     # ---------- 3) project files ----------
