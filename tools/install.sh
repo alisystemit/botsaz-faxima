@@ -1980,9 +1980,24 @@ preflight_fresh_server() {
             warn "   Stopping and removing Apache (port conflict with nginx)..."
             $SUDO systemctl stop apache2 2>/dev/null || true
             $SUDO systemctl disable apache2 2>/dev/null || true
-            $SUDO apt_remove apache2 apache2-bin apache2-data apache2-utils libapache2-mod-php8.5 libapache2-mod-php libapache2-mod-php8.5 2>/dev/null || true
-            $SUDO apt_remove apache2 2>/dev/null || true
-            ok "   Apache removed"
+            # apt_remove is a SHELL FUNCTION and already applies $SUDO itself.
+            # Calling it as `$SUDO apt_remove` makes sudo search PATH for a
+            # command called apt_remove; it is not there, so nothing is removed
+            # and `|| true` hides it behind an "Apache removed" message.
+            # Never put $SUDO in front of a shell function.
+            #
+            # The PHP module is discovered rather than hard-coded: apt-get
+            # aborts the ENTIRE list when it cannot locate one package, so a
+            # stale version number meant not a single package was removed.
+            local apkg="apache2 apache2-bin apache2-data apache2-utils"
+            apkg="$apkg $(dpkg -l 'libapache2-mod-php*' 2>/dev/null | awk '$1=="ii"{print $2}')"
+            apt_remove $apkg || true
+            if has_cmd apache2; then
+                warn "   Apache is still installed - nginx will not get port 80."
+                warn "   Finish it by hand: sudo apt-get purge apache2 apache2-bin apache2-utils"
+            else
+                ok "   Apache removed"
+            fi
         fi
         # Install nginx if not present
         if [ "$ws_nginx" -eq 0 ]; then
@@ -1998,8 +2013,14 @@ preflight_fresh_server() {
             warn "   Stopping and removing nginx (port conflict with Apache)..."
             $SUDO systemctl stop nginx 2>/dev/null || true
             $SUDO systemctl disable nginx 2>/dev/null || true
-            $SUDO apt_remove nginx nginx-common 2>/dev/null || true
-            ok "   nginx removed"
+            # no $SUDO here for exactly the reason spelled out above
+            apt_remove nginx nginx-common || true
+            if has_cmd nginx; then
+                warn "   nginx is still installed - Apache will not get port 80."
+                warn "   Finish it by hand: sudo apt-get purge nginx nginx-common"
+            else
+                ok "   nginx removed"
+            fi
         fi
         # Install Apache if not present
         if [ "$ws_apache" -eq 0 ]; then
