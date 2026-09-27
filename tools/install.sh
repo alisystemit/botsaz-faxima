@@ -2163,8 +2163,10 @@ configure_vhost() {
             echo "    location ~ ^/(tools|src|templates|data|docs)/ { deny all; return 404; }"
             echo "    location ~ ^/config\.php$ { deny all; return 404; }"
             echo "    location ~ /\. { deny all; return 404; }"
-            echo "    location ~ ^/bots/.*\.(env|json|log|sqlite|sql|bak|txt|lock|php)$ { deny all; return 404; }"
+            # bots/ entry points (index.php, table.php, cron/*.php) must stay accessible"
+            echo "    location ~ ^/bots/.*\.(env|json|log|sqlite|sql|bak|txt|lock)$ { deny all; return 404; }"
             echo "    location ~ ^/bots/(hash\.txt|info|error_log)$ { deny all; return 404; }"
+            echo "    location ~ ^/bots/.*config\.php$ { deny all; return 404; }"
             if [ -n "$fpm_sock" ]; then
                 echo "    location ~ \.php\$ {"
                 echo "        include snippets/fastcgi-php.conf;"
