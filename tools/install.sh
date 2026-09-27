@@ -85,6 +85,15 @@ apt_install() {
     hash -r 2>/dev/null || true
 }
 
+# Remove packages via apt (opposite of apt_install)
+apt_remove() {
+    echo "   ⏳ Removing with apt (sudo may ask for a password)..."
+    # shellcheck disable=SC2068
+    $SUDO apt-get remove -y $@ 2>/dev/null || true
+    $SUDO apt-get autoremove -y 2>/dev/null || true
+    hash -r 2>/dev/null || true
+}
+
 # ==================================================================
 # SHARED: health check + error-log report
 # Everything below is defined BEFORE the installer starts, because
@@ -1861,16 +1870,101 @@ preflight_fresh_server() {
     fi
 
     # --- 2) web server ----------------------------------------------------
-    if ! has_cmd apache2 && ! has_cmd nginx; then
+    local ws_apache=0 ws_nginx=0
+    has_cmd apache2 && ws_apache=1
+    has_cmd nginx && ws_nginx=1
+
+    if [ "$ws_apache" -eq 0 ] && [ "$ws_nginx" -eq 0 ]; then
         echo "   ⚠️  No web server - Telegram cannot reach the webhook without one."
         local pick=""
         printf '   Install: [1] Apache (default)   [2] nginx   [3] none\n'
         read -r -p "   > " pick || true
         case "$pick" in
-            2) if ask_yes "   Install nginx?"; then apt_install nginx || true; $SUDO systemctl enable --now nginx 2>/dev/null || true; fi ;;
-            3) echo "   no web server installed" ;;
-            *) if ask_yes "   Install Apache?"; then apt_install apache2 || true; fi ;;
+            2) PICKED="nginx" ;;
+            3) PICKED="none" ;;
+            *) PICKED="apache" ;;
         esac
+    elif [ "$ws_nginx" -eq 1 ] && [ "$ws_apache" -eq 0 ]; then
+        echo "   nginx is already installed."
+        printf '   Switch to: [1] Apache   [2] keep nginx   [3] none\n'
+        read -r -p "   > " pick || true
+        case "$pick" in
+            1) PICKED="apache" ;;
+            3) PICKED="none" ;;
+            *) PICKED="nginx" ;;
+        esac
+    elif [ "$ws_apache" -eq 1 ] && [ "$ws_nginx" -eq 0 ]; then
+        echo "   Apache is already installed."
+        printf '   Switch to: [1] nginx   [2] keep apache   [3] none\n'
+        read -r -p "   > " pick || true
+        case "$pick" in
+            1) PICKED="nginx" ;;
+            3) PICKED="none" ;;
+            *) PICKED="apache" ;;
+        esac
+    else
+        echo "   ⚠️  Both Apache AND nginx are installed! Port 80 conflict!"
+        printf '   Choose one: [1] nginx   [2] apache   [3] none\n'
+        read -r -p "   > " pick || true
+        case "$pick" in
+            1) PICKED="nginx" ;;
+            2) PICKED="apache" ;;
+            3) PICKED="none" ;;
+            *) PICKED="nginx" ;;
+        esac
+    fi
+
+    # --- Handle the chosen web server: install chosen, REMOVE other ---
+    if [ "$PICKED" = "nginx" ]; then
+        # Stop and remove Apache if it exists
+        if [ "$ws_apache" -eq 1 ]; then
+            warn "   Stopping and removing Apache (port conflict with nginx)..."
+            $SUDO systemctl stop apache2 2>/dev/null || true
+            $SUDO systemctl disable apache2 2>/dev/null || true
+            $SUDO apt_remove apache2 apache2-bin apache2-data apache2-utils libapache2-mod-php8.5 libapache2-mod-php libapache2-mod-php8.5 2>/dev/null || true
+            $SUDO apt_remove apache2 2>/dev/null || true
+            ok "   Apache removed"
+        fi
+        # Install nginx if not present
+        if [ "$ws_nginx" -eq 0 ]; then
+            ok "   Installing nginx..."
+            apt_install nginx || true
+        fi
+        $SUDO systemctl enable --now nginx 2>/dev/null || true
+        ok "   nginx is ready"
+
+    elif [ "$PICKED" = "apache" ]; then
+        # Stop and remove nginx if it exists
+        if [ "$ws_nginx" -eq 1 ]; then
+            warn "   Stopping and removing nginx (port conflict with Apache)..."
+            $SUDO systemctl stop nginx 2>/dev/null || true
+            $SUDO systemctl disable nginx 2>/dev/null || true
+            $SUDO apt_remove nginx nginx-common 2>/dev/null || true
+            ok "   nginx removed"
+        fi
+        # Install Apache if not present
+        if [ "$ws_apache" -eq 0 ]; then
+            ok "   Installing Apache..."
+            apt_install apache2 || true
+        fi
+        $SUDO systemctl enable --now apache2 2>/dev/null || true
+        ok "   Apache is ready"
+
+    else
+        # none - stop and disable both
+        warn "   No web server selected."
+        if [ "$ws_apache" -eq 1 ]; then
+            $SUDO systemctl stop apache2 2>/dev/null || true
+            $SUDO systemctl disable apache2 2>/dev/null || true
+            ok "   Apache stopped"
+        fi
+        if [ "$ws_nginx" -eq 1 ]; then
+            $SUDO systemctl stop nginx 2>/dev/null || true
+            $SUDO systemctl disable nginx 2>/dev/null || true
+            ok "   nginx stopped"
+        fi
+        warn "   Telegram cannot reach the webhook without a web server!"
+        warn "   You can add one later with: bash tools/install.sh"
     fi
 
     # --- 3) database ------------------------------------------------------
