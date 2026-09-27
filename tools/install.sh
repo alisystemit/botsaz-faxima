@@ -1774,11 +1774,22 @@ if [ "$(id -u)" -eq 0 ] && [ -d /root ]; then
                         sed -i 's#/root/botsaz-faxima#/var/www/botsaz-faxima#g' "$_vhost"
                         echo "   ✔ Updated DocumentRoot in $_vhost"
                     fi
-                    # CRITICAL: Update ROOT_DIR so all subsequent paths use /var/www
-                    if [ "$ROOT_DIR" = "/root/botsaz-faxima" ] || [ "$ROOT_DIR" = "/root/botsaz-faxima" ]; then
-                        ROOT_DIR="/var/www/botsaz-faxima"
-                        echo "   ✔ ROOT_DIR updated to: $ROOT_DIR"
-                    fi
+                    # CRITICAL: ROOT_DIR has to receive the same rewrite the vhost
+                    # above just got, or every path used afterwards still points
+                    # at /root while Apache is already serving /var/www.
+                    #
+                    # The old condition compared the SAME string twice (A || A),
+                    # so only the exact default could ever match. Take the exact
+                    # root and anything genuinely beneath it - with a path
+                    # boundary, so a sibling such as /root/botsaz-faxima-old is
+                    # never silently rewritten. Already-moved trees are left
+                    # alone, which is what makes a re-run safe.
+                    case "$ROOT_DIR" in
+                        /root/botsaz-faxima|/root/botsaz-faxima/*)
+                            ROOT_DIR="/var/www/botsaz-faxima${ROOT_DIR#/root/botsaz-faxima}"
+                            echo "   ✔ ROOT_DIR updated to: $ROOT_DIR"
+                            ;;
+                    esac
                     echo "   ⚠️  Run: bash tools/install.sh --check"
                     echo "        to verify the move worked"
                 fi
