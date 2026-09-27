@@ -100,6 +100,7 @@ tools/healthcheck.php → بررسی پوشه ↔ رکورد ↔ دیتابیس 
 tools/dryrun.php      → ساخت خشک بدون تلگرام (exit code برای CI)
 tools/cron_dispatcher.php → اجرای کرون همه ربات‌ها از یک خط crontab
 tools/backup_dispatcher.php → بک‌آپ خودکار دیتابیس ربات‌ها و ارسال به ادمین
+tools/update.sh → بروزرسانی از گیت‌هاب بدون نصب مجدد
 ```
 
 ## نصب دستی — راهنمای کامل (هاست و لاراگون) 🛠️
@@ -377,6 +378,33 @@ bash tools/install.sh
 - `ساخت دیتابیس ناموفق` موقع ساخت ربات → یوزر MySQL دسترسی `CREATE DATABASE` ندارد؛ به یوزر دسترسی بده یا از یوزر root (یا هم‌رده) استفاده کن.
 - `secret_key` را بعد از ساخت ربات‌ها عوض نکن (توکن‌های ذخیره‌شده با همان کلید رمزگشایی می‌شوند).
 - اگر `php` در PATH نیست، در `config.php` کلید `php_bin` را با مسیر کامل ست کن (کرون و lint از آن استفاده می‌کنند).
+
+### بروزرسانی از گیت‌هاب
+وقتی روی گیت‌هاب تغییری ثبت می‌شود، روی سرور کافیه یک بار بزنی:
+```bash
+bash /root/botsaz-faxima/tools/update.sh
+```
+این اسکریپت:
+1. `git pull` از origin/main
+2. فایل‌های `.htaccess` از بین می‌روند؟ برمی‌گردوند
+3. مجوزهای `/root` رو فیکس می‌کنه
+4. vhost nginx/Apache رو آپدیت می‌کنه
+5. systemd sandbox رو فیکس می‌کنه
+6. PCRE JIT رو ست می‌کنه
+7. سرویس‌ها رو ریستارت می‌کنه
+8. تست سلامت اجرا می‌کنه
+9. وبهوک رو چک می‌کنه
+
+**بدون `update.sh`** (دستی):
+```bash
+cd /root/botsaz-faxima
+git pull origin main
+# اگر .htaccess پاک شد:
+git checkout HEAD~1 -- .htaccess
+chmod 711 /root
+bash tools/install.sh --check
+systemctl restart apache2 || systemctl restart nginx
+```
 
 ## فلو ساخت ربات (داخل تلگرام)
 
