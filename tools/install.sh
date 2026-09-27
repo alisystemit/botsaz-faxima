@@ -2071,28 +2071,6 @@ preflight_fresh_server() {
         warn "   Telegram cannot reach the webhook without a web server!"
         warn "   You can add one later with: bash tools/install.sh"
     fi
-            ok "   Installing Apache..."
-            apt_install apache2 || true
-        fi
-        $SUDO systemctl enable --now apache2 2>/dev/null || true
-        ok "   Apache is ready"
-
-    else
-        # none - stop and disable both
-        warn "   No web server selected."
-        if [ "$ws_apache" -eq 1 ]; then
-            $SUDO systemctl stop apache2 2>/dev/null || true
-            $SUDO systemctl disable apache2 2>/dev/null || true
-            ok "   Apache stopped"
-        fi
-        if [ "$ws_nginx" -eq 1 ]; then
-            $SUDO systemctl stop nginx 2>/dev/null || true
-            $SUDO systemctl disable nginx 2>/dev/null || true
-            ok "   nginx stopped"
-        fi
-        warn "   Telegram cannot reach the webhook without a web server!"
-        warn "   You can add one later with: bash tools/install.sh"
-    fi
 
     # --- 3) database ------------------------------------------------------
     local db_bin=""
