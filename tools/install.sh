@@ -1678,19 +1678,32 @@ install_php_if_needed
 # ---------- Fix: PCRE JIT memory allocation warning ----------
 # Some Ubuntu/Debian configs block PCRE JIT memory allocation,
 # causing "preg_match(): Allocation of JIT memory failed" warnings.
-# Fix: set pcre.jit=0 in PHP ini.
+# Fix: set pcre.jit=0 in ALL PHP ini files (CLI + Apache).
+# Apache may use a different .ini than CLI, so both must be updated.
 _pcre_jit_ok=$($PHP_BIN -r 'echo ini_get("pcre.jit");' 2>/dev/null || echo "unknown")
-if [ "$_pcre_jit_ok" = "1" ]; then
-    _php_ini=$($PHP_BIN -r 'echo php_ini_loaded_file();' 2>/dev/null || echo '')
-    if [ -n "$_php_ini" ] && [ -f "$_php_ini" ]; then
-        if ! grep -q '^pcre.jit=' "$_php_ini" 2>/dev/null; then
-            echo 'pcre.jit=0' >> "$_php_ini"
-            echo "   ✔ Disabled PCRE JIT in $_php_ini"
+if [ "$_pcre_jit_ok" != "0" ]; then
+    # Find all PHP ini files: CLI + Apache modules
+    _all_inis="$($PHP_BIN -r 'echo php_ini_loaded_file();' 2>/dev/null || echo '')"
+    # Also check common Apache ini locations
+    for _ap in /etc/php/*/apache2/php.ini /etc/php/*/apache2php.ini /etc/php/*/fpm/php.ini; do
+        [ -f "$_ap" ] && _all_inis="$_all_inis $_ap"
+    done
+    # Deduplicate
+    _unique_inis=$(echo "$_all_inis" | tr ' ' '\n' | sort -u | grep -v '^$')
+    for _ini in $_unique_inis; do
+        [ -z "$_ini" ] && continue
+        if [ ! -f "$_ini" ]; then continue; fi
+        if ! grep -q '^pcre.jit=' "$_ini" 2>/dev/null; then
+            echo 'pcre.jit=0' >> "$_ini"
+            echo "   ✔ Disabled PCRE JIT in $_ini"
+        elif ! grep -q '^pcre.jit=0' "$_ini" 2>/dev/null; then
+            # pcre.jit exists but is not 0 → change it
+            sed -i "s/^pcre\.jit=.*/pcre.jit=0/" "$_ini"
+            echo "   ✔ Changed pcre.jit to 0 in $_ini"
         else
-            echo "   ✔ PCRE JIT already configured"
+            echo "   ✔ pcre.jit=0 already set in $_ini"
         fi
-    fi
-    echo "   ℹ️  PCRE JIT disabled (security restriction) - no preg_match warnings"
+    done
 fi
 
 # ---------- 0) prerequisite: PHP extensions ----------
