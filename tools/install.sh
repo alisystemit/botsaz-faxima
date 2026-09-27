@@ -2157,14 +2157,21 @@ configure_vhost() {
             echo "    root \"$ROOT_DIR\";"
             echo "    index index.php index.html;"
             echo "    client_max_body_size 64m;"
+            echo "    autoindex off;"
             echo "    location / { try_files \$uri \$uri/ /index.php?\$query_string; }"
+            # Block sensitive directories and files (equivalent of .htaccess rules)
+            echo "    location ~ ^/(tools|src|templates|data|docs)/ { deny all; return 404; }"
+            echo "    location ~ ^/config\.php$ { deny all; return 404; }"
+            echo "    location ~ /\. { deny all; return 404; }"
+            echo "    location ~ ^/bots/.*\.(env|json|log|sqlite|sql|bak|txt|lock|php)$ { deny all; return 404; }"
             if [ -n "$fpm_sock" ]; then
                 echo "    location ~ \.php\$ {"
                 echo "        include snippets/fastcgi-php.conf;"
                 echo "        fastcgi_pass unix:$fpm_sock;"
+                echo "        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;"
                 echo "    }"
             fi
-            echo "    location ~ /\.ht { deny all; }"
+            echo "    location ~ /\.ht { deny all; return 404; }"
         }
         {
             echo "# Managed by botsaz install.sh - do not edit by hand"
