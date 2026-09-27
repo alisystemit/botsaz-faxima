@@ -2897,7 +2897,7 @@ configure_vhost() {
             # connects the two.
             echo "    location ~ ^/\.well-known/ { }"
             echo "    location ~ /\. { deny all; return 404; }"
-            # bots/ entry points (index.php, table.php, cron/*.php) must stay accessible"
+            # bots/ entry points (index.php, table.php, cron/*.php) must stay accessible
             echo "    location ~ ^/bots/.*\.(env|json|log|sqlite|sql|bak|txt|lock)$ { deny all; return 404; }"
             echo "    location ~ ^/bots/(hash\.txt|info|error_log)$ { deny all; return 404; }"
             echo "    location ~ ^/bots/.*config\.php$ { deny all; return 404; }"
