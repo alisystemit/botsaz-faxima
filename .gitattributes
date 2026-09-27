@@ -1,2 +1,9 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Shell scripts must stay LF, even on a Windows checkout. With
+# core.autocrlf=true a fresh clone materialises CRLF, bash then trips over the
+# stray CR and the integrity check rejects the file outright. A Linux clone is
+# unaffected either way - this only protects Windows contributors.
+*.sh text eol=lf
+*.bash text eol=lf
