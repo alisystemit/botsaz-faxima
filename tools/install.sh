@@ -2051,8 +2051,13 @@ elif has_cmd nginx; then
         echo "   nginx PHP-FPM ✔"
     elif ask_yes "   Install php-fpm so nginx can execute PHP?"; then
         if apt_install php-fpm; then
-            $SUDO systemctl enable --now php8.2-fpm 2>/dev/null || true
-            $SUDO systemctl enable --now php8.1-fpm 2>/dev/null || true
+            # Enable whatever php-fpm version actually got installed - the
+            # version differs per release (8.1/8.2/8.3/...), so a hardcoded
+            # name enables nothing on most servers and PHP stays down.
+            for _fpm_new in $(systemctl list-unit-files --type=service --no-legend 2>/dev/null | awk '{print $1}' | grep -E '^php[0-9.]*-fpm\.service$' || true); do
+                $SUDO systemctl enable --now "$_fpm_new" 2>/dev/null || true
+            done
+            unset _fpm_new
             echo "   nginx PHP-FPM installed ✔"
         else
             echo "   ⚠️  Could not install php-fpm - nginx will not run PHP."
@@ -2257,9 +2262,17 @@ issue_ssl() {
         echo "   🔒 Certificate issued for $host ✔"
         echo "      Renewal is automatic (certbot installs its own timer/cron)."
     else
+        # Name the same plugin the attempt above really used - a hint that
+        # always says --apache sends an nginx operator to a command that fails
+        # (and the --check report already branches correctly, so the two would
+        # disagree about the same server).
+        local redo="--webroot -w $ROOT_DIR"
+        if has_cmd apache2 || has_cmd httpd; then redo="--apache"
+        elif has_cmd nginx; then redo="--nginx"
+        fi
         echo "   ⚠️  Could not issue the certificate (exit $rc)."
         echo "      Usual causes: DNS not pointing here, port 80 blocked, or a local machine."
-        echo "      Re-run it later with: sudo certbot --apache -d $host"
+        echo "      Re-run it later with: sudo certbot $redo -d $host"
     fi
 }
 issue_ssl
@@ -2491,6 +2504,20 @@ configure_vhost() {
             # Block sensitive directories and files (equivalent of .htaccess rules)
             echo "    location ~ ^/(tools|src|templates|data|docs)/ { deny all; return 404; }"
             echo "    location ~ ^/config\.php$ { deny all; return 404; }"
+            # .htaccess blocks these by NAME (<FilesMatch
+            # "^(\.env|\.git|README|composer\.(json|lock)|config\.example\.php)">).
+            # The dotfile rule below covers the first two; without these nginx
+            # would hand out the README and the composer files, and would EXECUTE
+            # config.example.php - which lays out every database column.
+            echo "    location ~ ^/(README[^/]*|composer\.(json|lock)|config\.example\.php)\$ { deny all; return 404; }"
+            # Let's Encrypt serves the http-01 challenge out of
+            # /.well-known/acme-challenge/ and re-checks it on EVERY renewal.
+            # .htaccess allows that path (it only blocks .git), so this rule has
+            # to sit before the dotfile rule - otherwise the first certificate is
+            # issued while no vhost blocks it yet, and every renewal 90 days later
+            # returns 404. Apache renews, nginx does not, and nothing in the logs
+            # connects the two.
+            echo "    location ~ ^/\.well-known/ { }"
             echo "    location ~ /\. { deny all; return 404; }"
             # bots/ entry points (index.php, table.php, cron/*.php) must stay accessible"
             echo "    location ~ ^/bots/.*\.(env|json|log|sqlite|sql|bak|txt|lock)$ { deny all; return 404; }"
@@ -2503,6 +2530,7 @@ configure_vhost() {
                 echo "        fastcgi_pass unix:$fpm_sock;"
                 echo "        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;"
                 echo "        fastcgi_index index.php;"
+                echo "    }"
             fi
             echo "    location ~ /\.ht { deny all; return 404; }"
         }
@@ -2514,18 +2542,26 @@ configure_vhost() {
             echo "    ssl_session_cache shared:SSL:10m;"
             echo "    ssl_session_timeout 10m;"
         }
+        # NO `default_server` on any listen line. Ubuntu's stock
+        # /etc/nginx/sites-enabled/default already claims it, and two
+        # default_server on one address make nginx refuse to load ANY config:
+        #   nginx: [emerg] a duplicate listen 80 default_server
+        # `nginx -t` then fails and the rollback below deletes the vhost we
+        # just wrote - an install would end with a warning and no site at all.
+        # It buys nothing here either: Telegram addresses us by Host header,
+        # which `server_name` already matches.
         {
             echo "# Managed by botsaz install.sh - do not edit by hand"
             if [ "$cert_ok" = "1" ]; then
                 echo "server {"
-                echo "    listen 80 default_server;"
-                echo "    listen [::]:80 default_server;"
+                echo "    listen 80;"
+                echo "    listen [::]:80;"
                 echo "    server_name $host;"
                 echo "    return 301 https://$host\$request_uri;"
                 echo "}"
                 echo "server {"
-                echo "    listen 443 ssl default_server;"
-                echo "    listen [::]:443 ssl default_server;"
+                echo "    listen 443 ssl;"
+                echo "    listen [::]:443 ssl;"
                 echo "    server_name $host;"
                 echo "    ssl_certificate     /etc/letsencrypt/live/$host/fullchain.pem;"
                 echo "    ssl_certificate_key /etc/letsencrypt/live/$host/privkey.pem;"
@@ -2534,8 +2570,8 @@ configure_vhost() {
                 echo "}"
             else
                 echo "server {"
-                echo "    listen 80 default_server;"
-                echo "    listen [::]:80 default_server;"
+                echo "    listen 80;"
+                echo "    listen [::]:80;"
                 echo "    server_name $host;"
                 _nginx_app
                 echo "}"
