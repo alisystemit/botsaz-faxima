@@ -1963,133 +1963,54 @@ setup_app_db_account() {
     fi
 }
 
-# ---------- web-server coexistence: one serves, the other yields ----------
-# Exactly ONE server may hold port 80/443. The loser is STOPPED and DISABLED
-# - never purged. Uninstalling the other stack destroys working setups (its
-# vhosts, snippets, certbot hooks) for a conflict a disable already solves,
-# and a later apt install can silently drag it back anyway.
-# Sets the global PICKED (nginx|apache|none) for the install steps that follow.
+# ---------- web server: Apache serves, anything else yields ----------
+# This installer serves with Apache ONLY - there is no web-server prompt any
+# more. The old menu had different DEFAULTS per box (an nginx box offered
+# "keep nginx" as its default, the both-installed box offered "nginx"), so an
+# operator who pressed Enter to get past the question silently chose a server,
+# got no Apache vhost and a webhook that answers 404 - without ever realising
+# they had decided anything. A question with per-box defaults is not a choice,
+# it is a trap.
+#
+# Exactly ONE server may hold port 80/443, so nginx is STOPPED and DISABLED
+# - never purged. Uninstalling it destroys working setups (its vhosts,
+# snippets, certbot hooks) for a conflict a disable already solves, and a
+# later apt install can silently drag it back anyway.
+# Sets the global PICKED (always "apache") for the install steps that follow.
 ensure_single_webserver() {
-    local ws_apache=0 ws_nginx=0 pick=""
+    local ws_apache=0 ws_nginx=0
     has_cmd apache2 && ws_apache=1
     has_cmd nginx && ws_nginx=1
+    PICKED="apache"
 
-    if [ "$ws_apache" -eq 0 ] && [ "$ws_nginx" -eq 0 ]; then
-        echo "   ⚠️  No web server - Telegram cannot reach the webhook without one."
-        printf '   Install: [1] Apache (default)   [2] nginx   [3] none\n'
-        read -r -p "   > " pick || true
-        case "$pick" in
-            2) PICKED="nginx" ;;
-            3) PICKED="none" ;;
-            *) PICKED="apache" ;;
-        esac
-    elif [ "$ws_nginx" -eq 1 ] && [ "$ws_apache" -eq 0 ]; then
-        echo "   nginx is already installed."
-        printf '   Switch to: [1] Apache   [2] keep nginx   [3] none\n'
-        read -r -p "   > " pick || true
-        case "$pick" in
-            1) PICKED="apache" ;;
-            3) PICKED="none" ;;
-            *) PICKED="nginx" ;;
-        esac
-    elif [ "$ws_apache" -eq 1 ] && [ "$ws_nginx" -eq 0 ]; then
-        echo "   Apache is already installed."
-        printf '   Switch to: [1] nginx   [2] keep apache   [3] none\n'
-        read -r -p "   > " pick || true
-        case "$pick" in
-            1) PICKED="nginx" ;;
-            3) PICKED="none" ;;
-            *) PICKED="apache" ;;
-        esac
-    else
-        echo "   ⚠️  Both Apache AND nginx are installed! Port 80 conflict!"
-        printf '   Choose one: [1] nginx   [2] apache   [3] none\n'
-        read -r -p "   > " pick || true
-        case "$pick" in
-            1) PICKED="nginx" ;;
-            2) PICKED="apache" ;;
-            3) PICKED="none" ;;
-            *) PICKED="nginx" ;;
-        esac
-    fi
-
-    if [ "$PICKED" = "nginx" ]; then
-        if [ "$ws_apache" -eq 1 ]; then
-            warn "   Stopping and disabling Apache (it must yield port 80 to nginx)..."
-            $SUDO systemctl stop apache2 2>/dev/null || true
-            $SUDO systemctl disable apache2 2>/dev/null || true
-            if systemctl is-active --quiet apache2 2>/dev/null; then
-                warn "   Apache still running - stop it by hand: sudo systemctl stop apache2"
-            else
-                ok "   Apache stopped and disabled (packages and configs kept)"
-            fi
-            echo "      To fully remove it later: sudo apt-get purge apache2 apache2-bin apache2-utils 'libapache2-mod-php*'"
-        fi
-        # Install nginx if not present (use --no-install-recommends to avoid pulling apache2)
-        if [ "$ws_nginx" -eq 0 ]; then
-            ok "   Installing nginx..."
-            apt_install_nr nginx || true
-        fi
-        # An apache2 binary may exist without running (e.g. dragged in as a
-        # dependency) - it owns no port, so leave the packages alone and only
-        # make sure it stays down instead of purging the stack.
-        if has_cmd apache2; then
-            if systemctl is-active --quiet apache2 2>/dev/null; then
-                warn "   Apache appeared as a dependency and is RUNNING - yielding ports to nginx..."
-                $SUDO systemctl stop apache2 2>/dev/null || true
-            fi
-            $SUDO systemctl disable apache2 2>/dev/null || true
-            ok "   Apache disabled (packages kept - purge manually if you ever want it gone)"
-        fi
-        $SUDO systemctl enable --now nginx 2>/dev/null || true
-        ok "   nginx is ready"
-
-    elif [ "$PICKED" = "apache" ]; then
-        if [ "$ws_nginx" -eq 1 ]; then
-            warn "   Stopping and disabling nginx (it must yield port 80 to Apache)..."
+    # nginx must yield port 80/443 to Apache.
+    if [ "$ws_nginx" -eq 1 ]; then
+        # `command -v`, not has_cmd: the point is whether systemctl EXISTS here.
+        # Without systemd there is no stop to run, so claiming one would be a lie.
+        if command -v systemctl >/dev/null 2>&1; then
             $SUDO systemctl stop nginx 2>/dev/null || true
             $SUDO systemctl disable nginx 2>/dev/null || true
+            # Verify against the system, not against what we hope happened.
             if systemctl is-active --quiet nginx 2>/dev/null; then
                 warn "   nginx still running - stop it by hand: sudo systemctl stop nginx"
             else
                 ok "   nginx stopped and disabled (packages and vhosts kept)"
             fi
-            echo "      To fully remove it later: sudo apt-get purge nginx nginx-common"
+        else
+            warn "   nginx is installed but there is no systemd here - stop it yourself:"
+            warn "      sudo systemctl stop nginx  (or kill it) before Apache can hold port 80"
         fi
-        # Install Apache if not present
-        if [ "$ws_apache" -eq 0 ]; then
-            ok "   Installing Apache..."
-            apt_install apache2 || true
-        fi
-        # Same rule mirrored: a lingering nginx binary that is not running
-        # owns no port - keep it down, do not uninstall it.
-        if has_cmd nginx; then
-            if systemctl is-active --quiet nginx 2>/dev/null; then
-                warn "   nginx is RUNNING although Apache was chosen - yielding ports..."
-                $SUDO systemctl stop nginx 2>/dev/null || true
-            fi
-            $SUDO systemctl disable nginx 2>/dev/null || true
-            ok "   nginx disabled (packages kept - purge manually if you ever want it gone)"
-        fi
-        $SUDO systemctl enable --now apache2 2>/dev/null || true
-        ok "   Apache is ready"
-
-    else
-        # none - stop and disable both (packages stay for later use)
-        warn "   No web server selected."
-        if [ "$ws_apache" -eq 1 ]; then
-            $SUDO systemctl stop apache2 2>/dev/null || true
-            $SUDO systemctl disable apache2 2>/dev/null || true
-            ok "   Apache stopped"
-        fi
-        if [ "$ws_nginx" -eq 1 ]; then
-            $SUDO systemctl stop nginx 2>/dev/null || true
-            $SUDO systemctl disable nginx 2>/dev/null || true
-            ok "   nginx stopped"
-        fi
-        warn "   Telegram cannot reach the webhook without a web server!"
-        warn "   You can add one later with: bash tools/install.sh"
+        echo "      To fully remove it later: sudo apt-get purge nginx nginx-common"
     fi
+
+    # Install Apache if not present
+    if [ "$ws_apache" -eq 0 ]; then
+        ok "   Installing Apache..."
+        apt_install apache2 || true
+    fi
+
+    $SUDO systemctl enable --now apache2 2>/dev/null || true
+    ok "   Apache is ready"
 }
 
 preflight_fresh_server() {
