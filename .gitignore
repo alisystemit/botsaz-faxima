@@ -7,6 +7,8 @@
 /data/logs/
 /bots/*/
 /bots/*/config.php
+/data/db_backup.json
+/data/backups/
 /bots/*/states/
 /templates/*/states/
 /.env
