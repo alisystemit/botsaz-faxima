@@ -44,10 +44,22 @@ class Manager
         return $k !== '' ? $k : self::DEFAULT_SECRET_KEY;
     }
 
-    // ===== بررسی پیش‌نیازها قبل از ساخت ربات =====
-    // اگر مشکلی بود، پیام خطای دقیق برمی‌گردوند
-    // اگر همه چیز OK بود، "" برمی‌گردوند
-    public static function checkBuildPrerequisites(): string
+    /**
+     * بررسی پیش‌نیازها قبل از ساخت ربات.
+     *
+     * $type = قالبی که همین حالا دارد ساخته می‌شود. null یعنی نامشخص، و آن
+     * موقع همهٔ قالب‌های معتبر بررسی می‌شوند.
+     *
+     * این آرگومان برای همین اضافه شد: قبلاً یک چکِ یکسان روی هر دو قالب
+     * می‌خورد، یعنی اگر vendor قالبِ میرزا پاک می‌شد، ساختِ فاکسیما هم بسته
+     * می‌شد (موفقیتِ ناموجود)، و اگر با || می‌شد، رباتِ قالبِ ناقص با پیام
+     * «موفقیت» ساخته می‌شد (موفقیتِ دروغین). ساختنِ چیزی که داری می‌سازی،
+     * باید همان چیزی را بسنجد که داری می‌سازی.
+     *
+     * اگر مشکلی بود، پیام خطای دقیق برمی‌گردوند
+     * اگر همه چیز OK بود، "" برمی‌گردوند
+     */
+    public static function checkBuildPrerequisites(?string $type = null): string
     {
         $root = dirname(__DIR__);
         // 1. بررسی پوشه bots/
@@ -79,10 +91,28 @@ class Manager
         if (PHP_VERSION_ID < 80200) {
             return "نسخه PHP " . PHP_VERSION . " کمتر از 8.2 لازم است";
         }
-        // 5. بررسی vendor/ (قالب‌ها vendor آماده دارند)
-        $hasVendor = is_file($root . '/templates/faxima/vendor/autoload.php') || is_file($root . '/templates/mirza/vendor/autoload.php');
-        if (!$hasVendor) {
-            return "vendor قالب‌ها روی سرور نیست (templates/*/vendor/autoload.php) - گیت را pull کنید، نه composer install";
+        // 5. بررسی vendor/ قالبی که دارد ساخته می‌شود
+        //
+        // اینجا قبلاً vendor/ ریشهٔ پروژه را می‌خواست، در حالی که ریشه نه
+        // composer.json دارد نه vendor/ - و در .gitignore هم نیست، يعني هرگز
+        // نداشته. پس اين چک همیشه می‌خورد و ساخت ربات اصلاً شروع نمی‌شد، و
+        // پیشنهادِ خودِ پیام (composer install) هم بدون composer.json ناممکن
+        // بود. vendor واقعی داخلِ خودِ قالب است و bot.php آن را با copyDir()
+        // داخل bots/<slug>/ می‌برد - پس همان را می‌سنجیم.
+        $types = ($type !== null && isset(self::validTypes()[$type]))
+            ? [$type]
+            : array_keys(self::validTypes());
+        foreach ($types as $_tpl) {
+            $_dir = self::templateDir($_tpl);
+            if (!is_dir($_dir)) {
+                return "قالب «{$_tpl}» روی سرور نیست ({$_dir})"
+                    . "\nحل: git pull کنید";
+            }
+            if (!is_file($_dir . '/vendor/autoload.php')) {
+                return "vendor قالب «{$_tpl}» روی سرور نیست ({$_dir}/vendor/autoload.php)"
+                    . "\nحل: git pull کنید - نه composer install"
+                    . "\n(ریشهٔ پروژه اصلاً composer.json ندارد، پس آن کار نمی‌کند)";
+            }
         }
         return ""; // همه چیز OK
     }

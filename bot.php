@@ -529,17 +529,21 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
                 BotApi::send($TOKEN, $chatId, "⛔️ این نام رزرو شده است؛ نام دیگری بفرست.");
                 return;
             }
-            BotApi::send($TOKEN, $chatId, "⏳ در حال ساخت ربات <b>{$slug}</b> ...");
-            // ===== بررسی پیش‌نیازها قبل از ساخت =====
-            $_prereq_err = Manager::checkBuildPrerequisites();
-            if ($_prereq_err !== '') {
-                Logger::getInstance()->error('build', "Prerequisites failed for {$slug}: {$_prereq_err}");
-                BotApi::send($TOKEN, $chatId, "❌ خطا در ساخت ربات:\n{$_prereq_err}\nنام دیگری بفرست یا «❌ انصراف» بزن.");
-                return;
-            }
+            // ===== نوع قالب را قبل از پیش‌نیازها تعیین کن =====
+            // اینجا پایین‌تر بود و بعد از checkBuildPrerequisites() خوانده
+            // می‌شد؛ ولی همان چک باید بداند کدام قالب دارد ساخته می‌شود تا
+            // vendor همان قالب را بسنجد، نه هر دو را با هم.
             $type = $temp['type'] ?? 'faxima';
             if (!in_array($type, ['faxima', 'mirza'], true)) {
                 $type = 'faxima';
+            }
+            BotApi::send($TOKEN, $chatId, "⏳ در حال ساخت ربات <b>{$slug}</b> ...");
+            // ===== بررسی پیش‌نیازها قبل از ساخت =====
+            $_prereq_err = Manager::checkBuildPrerequisites($type);
+            if ($_prereq_err !== '') {
+                Logger::getInstance()->error('build', "Prerequisites failed for {$slug} ({$type}): {$_prereq_err}");
+                BotApi::send($TOKEN, $chatId, "❌ خطا در ساخت ربات:\n{$_prereq_err}\nنام دیگری بفرست یا «❌ انصراف» بزن.");
+                return;
             }
             try {
                 // ===== پردازش غیرهمزمان =====
