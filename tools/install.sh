@@ -2325,6 +2325,7 @@ $cfg = array(
     "manager_db" => null,
     "php_bin" => (string) getenv("CFG_PHP_BIN"),
     "secret_key" => (string) getenv("SECRET_KEY"),
+    "db_backup" => array("enabled" => true, "times" => array("06:00", "18:00")),
 );
 $out = "<?php\nreturn " . var_export($cfg, true) . ";\n";
 $out = str_replace("\x27manager_db\x27 => NULL,", "\x27manager_db\x27 => __DIR__ . \x27/data/botsaz.sqlite\x27,", $out);
@@ -2471,6 +2472,42 @@ if has_cmd systemctl && systemctl is-active --quiet apache2 2>/dev/null; then
     systemctl restart apache2 2>/dev/null && echo "   ✔ Apache restarted" || \
         echo "   ⚠️  Apache restart failed - reload manually"
 fi
+
+# ===== Post-restart: prove the server answers, then re-register the webhook ==
+# Why this exists: step 8 called set_webhook BEFORE fix_apache_systemd_hardening
+# and the restart below, so it registered the URL against an Apache that could
+# still be sandboxed. Every delivery Telegram attempts in that window gets a
+# 403, Telegram "gives up after a few attempts", and the webhook is then
+# registered but dead - /start stays silent no matter what the user does.
+# Re-registering only after the server has actually answered 200 is what makes
+# the next delivery succeed.
+#
+# Opening the site in a browser - what used to make the bot come alive - never
+# reaches Telegram at all. It only looked like the fix because a retry happened
+# to land in the same minute; nothing about visiting / re-registers anything.
+# Registering here means the user never has to.
+#
+# Probe repeatedly instead of sleeping a fixed amount: systemctl restart
+# returns as soon as the unit is ACTIVE, which can still precede the first
+# accepted connection. The `[ ] || [ ]` test stays inside `if` on purpose -
+# this script runs with `set -e` and a bare AND-OR list would abort it.
+_warm="0"
+for _i in 1 2 3 4 5 6; do
+    _warm="$(wh_probe "${BASE_URL%/}/bot.php" || true)"
+    if [ "$_warm" = "200" ] || [ "$_warm" = "403" ]; then break; fi
+    sleep 1
+done
+if [ "$_warm" = "200" ] || [ "$_warm" = "403" ]; then
+    echo "   ✔ Apache answers HTTP $_warm on ${BASE_URL%/}/bot.php after restart"
+    if $PHP_BIN "$ROOT_DIR/tools/set_webhook.php" "${BASE_URL%/}/bot.php" 2>/dev/null; then
+        echo "   ✔ Webhook re-confirmed against the live server"
+    else
+        echo "   ⚠️  Webhook re-confirm failed - run: php tools/set_webhook.php"
+    fi
+else
+    echo "   ⚠️  bot.php answered HTTP ${_warm:-0} on all 6 tries - fix the vhost before trusting Telegram"
+fi
+unset _warm _i
 
 # 9) verify EVERYTHING and show every error the bot has produced
 # These are the same two reports `bash tools/install.sh --check` prints later, so
