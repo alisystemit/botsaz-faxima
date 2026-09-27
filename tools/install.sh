@@ -536,11 +536,17 @@ $api = "https://api.telegram.org/bot" . getenv("TG_TOKEN") . "/";
 $me  = tg_get($api . "getMe");
 if (!empty($me["ok"])) {
     echo "ME=OK @" . ($me["result"]["username"] ?? "?") . "\n";
+    $wh = tg_get($api . "getWebhookInfo");
 } else {
-    echo "ME=ERR:" . ($me["description"] ?? "no reason given") . "\n";
+    // Deliberately does NOT stop here - see the note above the function.
+    // getWebhookInfo would ask the same host the same question over the same
+    // connection, so there is no point paying the timeout for it again; but a
+    // MISSING WHURL line is read by BOTH callers as "no webhook registered",
+    // so the WH= line must still be printed, carrying this same reason.
+    $reason = $me["description"] ?? "no reason given";
+    echo "ME=ERR:" . $reason . "\n";
+    $wh = ["ok" => false, "description" => $reason];
 }
-// Deliberately does NOT stop here - see the note above the function.
-$wh = tg_get($api . "getWebhookInfo");
 if (!empty($wh["ok"])) {
     $r = $wh["result"];
     echo "WHURL=" . ($r["url"] ?? "") . "\n";
@@ -1012,6 +1018,12 @@ report_health() {
         if [ -n "$whinfo" ]; then
             h_warn "could not read getWebhookInfo: ${whinfo#ERR:}"
             h_note "the webhook status is UNKNOWN right now, not missing - nothing to fix here"
+        elif [ "$have_whurl" != "1" ]; then
+            # Neither a value nor an explanation came back - the probe itself
+            # failed here. That is a fact about THIS server, and it says
+            # nothing whatever about what Telegram has on record.
+            h_fail "the Telegram probe returned no webhook data at all"
+            h_note "the webhook status is UNKNOWN, not missing - nothing to fix here"
         else
         if [ -z "$whurl" ]; then
             h_fail "no webhook registered - php tools/set_webhook.php"
@@ -1369,27 +1381,26 @@ report_logs() {
 
     # ---- [5] what Telegram itself saw ----
     printf '\n  [5] Telegram webhook status\n'
-    local tok wi url pend edate errmsg
+    local tok wi url pend edate errmsg whreason
     tok="$(cfg_get main_token)"
     if [ -z "$tok" ] || ! printf '%s' "$tok" | grep -Eq '^[0-9]+:[A-Za-z0-9_-]{30,}$'; then
         printf '      (no usable main_token in config.php)\n'
     else
-        wi="$(TG_TOKEN="$tok" "$PHP_BIN" -r '
-$t = getenv("TG_TOKEN");
-$j = @json_decode((string)@file_get_contents("https://api.telegram.org/bot".$t."/getWebhookInfo"), true);
-if (empty($j["ok"])) { echo "OFFLINE"; exit; }
-$r = $j["result"];
-echo "url=".($r["url"] ?? "")."\n";
-echo "pending=".(int)($r["pending_update_count"] ?? 0)."\n";
-echo "edate=".(int)($r["last_error_date"] ?? 0)."\n";
-echo "msg=".($r["last_error_message"] ?? "")."\n";' 2>/dev/null || true)"
-        if [ "$wi" = "OFFLINE" ]; then
-            printf '      api.telegram.org did not answer\n'
+        # The SAME probe as the health check above, so the two reports can
+        # never disagree about whether Telegram answered - they used to run
+        # two different HTTP stacks and did exactly that.
+        wi="$(tg_status "$tok")"
+        url="$(printf '%s\n' "$wi" | sed -n 's/^WHURL=//p')"
+        pend="$(printf '%s\n' "$wi" | sed -n 's/^WHPENDING=//p')"
+        edate="$(printf '%s\n' "$wi" | sed -n 's/^WHERRDATE=//p')"
+        errmsg="$(printf '%s\n' "$wi" | sed -n 's/^WHERR=//p')"
+        whreason="$(printf '%s\n' "$wi" | sed -n 's/^WH=ERR://p')"
+        [ -n "$whreason" ] || whreason="$(printf '%s\n' "$wi" | sed -n 's/^ME=ERR://p')"
+        if ! printf '%s\n' "$wi" | grep -q '^WHURL='; then
+            # "did not answer" without a reason was undiagnosable; the probe
+            # now returns WHY (timeout, TLS, HTTP status, Telegram's own text).
+            printf '      could not read the webhook status: %s\n' "${whreason:-the probe printed nothing at all}"
         else
-            url="$(printf '%s\n' "$wi" | sed -n 's/^url=//p')"
-            pend="$(printf '%s\n' "$wi" | sed -n 's/^pending=//p')"
-            edate="$(printf '%s\n' "$wi" | sed -n 's/^edate=//p')"
-            errmsg="$(printf '%s\n' "$wi" | sed -n 's/^msg=//p')"
             any_log=1
             printf '      url     : %s\n' "${url:-(none)}"
             printf '      queued  : %s\n' "${pend:-0}"
@@ -1928,15 +1939,25 @@ while true; do
     printf '   [X] Wrong token format (it must look like 123456:ABC... - 35 chars). Try again:\n'
 done
 # live token check (warning only - we continue if the network is down)
+# Same probe as every other Telegram question in this script (tg_status): the
+# bot's own cURL stack, one retry, and the reason. A bare "did not answer"
+# cannot tell a typo in the token from a firewall in front of api.telegram.org,
+# and the reader is being asked to decide whether to continue anyway.
 echo "   ⏳ Checking the token against Telegram..."
-if ! MAIN_TOKEN="$MAIN_TOKEN" $PHP_BIN -r '
-$tok = (string) getenv("MAIN_TOKEN");
-$j = @json_decode((string) @file_get_contents("https://api.telegram.org/bot".$tok."/getMe"), true);
-if (empty($j["ok"])) { fwrite(STDERR, "getMe failed\n"); exit(1); }
-echo "   🤖 @".$j["result"]["username"]." ✔\n";'; then
-    echo "   ⚠️  Telegram did not answer (wrong token, or network/filter problem)."
+_tk="$(tg_status "$MAIN_TOKEN")"
+if printf '%s\n' "$_tk" | grep -q '^ME=OK '; then
+    echo "   🤖 @$(printf '%s\n' "$_tk" | sed -n 's/^ME=OK @//p') ✔"
+else
+    _why="$(printf '%s\n' "$_tk" | sed -n 's/^ME=ERR://p')"
+    if [ -n "$_why" ]; then
+        echo "   ⚠️  Telegram did not accept this token: $_why"
+    else
+        echo "   ⚠️  The token check printed nothing - php or curl failed locally."
+    fi
+    echo "       (a wrong token, no network, or a filter in front of api.telegram.org)"
     ask_yes "   Continue with this token anyway?" || exit 1
 fi
+unset _tk _why
 
 # 3) super admin numeric id
 echo ""
