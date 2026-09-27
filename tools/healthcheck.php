@@ -249,6 +249,32 @@ $cronLine = "*/5 * * * * php " . __DIR__ . "/cron_dispatcher.php";
 $ok[] = "Cron line: {$cronLine}";
 $ok[] = "Add this line to your crontab: crontab -e";
 
+// ===== ۱۲.۱. وضعیت بکاپ دیتابیس ربات‌ها =====
+// src/DbBackup.php لازم نیست؛ فقط فایل وضعیت خوانده می‌شود تا هلث‌چک سبک بماند
+echo "[12.1] بررسی بکاپ دیتابیس...\n";
+$_bstate = [];
+$_bstateFile = dirname(__DIR__) . '/data/db_backup.json';
+if (is_file($_bstateFile)) {
+    $_bstate = json_decode((string)@file_get_contents($_bstateFile), true) ?: [];
+}
+$_bbots = array_filter($dbBots, fn($b) => ($b['status'] ?? '') === 'active' && !empty($b['db_name']));
+if ($_bbots === []) {
+    $ok[] = "Backup: no active bots with database yet";
+} else {
+    foreach ($_bbots as $_bb) {
+        $_bf = (string)$_bb['folder'];
+        $_last = (string)($_bstate[$_bf]['last_sent'] ?? '');
+        if ($_last === '') {
+            $warnings[] = "Backup: {$_bf} has never been sent yet (next dispatcher slot will send it)";
+        } elseif ((time() - (strtotime($_last) ?: 0)) > 36 * 3600) {
+            $warnings[] = "Backup: {$_bf} last sent {$_last} (over 36h ago) - check cron_dispatcher and data/logs";
+        } else {
+            $ok[] = "Backup: {$_bf} last sent {$_last}";
+        }
+    }
+}
+unset($_bstate, $_bstateFile, $_bbots, $_bb, $_bf, $_last);
+
 // ===== ۱۳. بررسی زندهٔ توکن با getMe =====
 // بدون این چک، توکن باطل/placeholder فقط با خطای 404 مبهم خودش را نشان می‌داد.
 echo "[13] بررسی زندهٔ توکن (getMe)...\n";
