@@ -235,4 +235,49 @@ class BotApi
     {
         return json_encode(['remove_keyboard' => true]);
     }
+
+    /**
+     * ارسال فایل (multipart) — برای بکاپ دیتابیس استفاده می‌شود.
+     * call() فقط urlencoded می‌فرستد و فایل را پشتیبانی نمی‌کند، پس اینجا جدا پیاده شده.
+     */
+    public static function sendDocument(string $token, $chatId, string $filePath, string $caption = ''): array
+    {
+        if (!is_file($filePath) || !is_readable($filePath)) {
+            return ['ok' => false, 'description' => 'file not readable'];
+        }
+        if (!function_exists('curl_init')) {
+            return ['ok' => false, 'description' => 'curl not available'];
+        }
+        $url = "https://api.telegram.org/bot{$token}/sendDocument";
+        $post = [
+            'chat_id' => (string)$chatId,
+            'caption' => mb_substr($caption, 0, 900),
+            'document' => new CURLFile($filePath),
+        ];
+        for ($attempt = 0; $attempt < 2; $attempt++) {
+            if ($attempt > 0) usleep(self::$baseDelay * 2);
+            $ch = curl_init($url);
+            $opts = [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_POST => true,
+                CURLOPT_POSTFIELDS => $post,
+                CURLOPT_TIMEOUT => 120,
+                CURLOPT_CONNECTTIMEOUT => 15,
+            ];
+            if (self::$proxy) $opts[CURLOPT_PROXY] = self::$proxy;
+            curl_setopt_array($ch, $opts);
+            $out = curl_exec($ch);
+            $err = curl_error($ch);
+            curl_close($ch);
+            if ($out === false) continue;
+            $j = json_decode($out, true);
+            if (!is_array($j)) continue;
+            if (empty($j['ok'])) {
+                self::logFail('sendDocument', 'error_code=' . ($j['error_code'] ?? '-') . ' — ' . ($j['description'] ?? 'unknown'));
+            }
+            return $j;
+        }
+        self::logFail('sendDocument', 'upload failed — ' . (isset($err) && $err !== '' ? $err : 'no response'));
+        return ['ok' => false, 'description' => 'upload failed: ' . ($err ?? 'no response')];
+    }
 }
