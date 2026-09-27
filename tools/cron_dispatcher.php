@@ -164,6 +164,20 @@ try {
     $log->warning('cron', 'prune failed: ' . $e->getMessage());
 }
 
+// ===== بکاپ دوره‌ای دیتابیس ربات‌ها (روزی ۱-۲ بار طبق config) =====
+// اسلات‌ها در config.php: 'db_backup' => ['enabled' => true, 'times' => ['03:00','15:00']]
+// خود DbBackup چک می‌کند اسلات رسیده یا نه؛ پس اجرای هر ۵ دقیقه‌ای بی‌خطر است
+// و ارسال تکراری نمی‌شود. جزئیات در data/db_backup.json.
+try {
+    require_once __DIR__ . '/../src/DbBackup.php';
+    $backupRes = DbBackup::runDue($cfg, $store);
+    foreach ($backupRes['sent'] as $_s) $log->info('cron', 'backup: ' . $_s);
+    foreach ($backupRes['failed'] as $_f => $_e) $log->warning('cron', "backup failed for {$_f}: {$_e}");
+    unset($backupRes, $_s, $_f, $_e);
+} catch (Throwable $e) {
+    $log->warning('cron', 'backup slot check failed: ' . $e->getMessage());
+}
+
 $log->info('cron', 'Cron dispatcher finished');
 
 /**
