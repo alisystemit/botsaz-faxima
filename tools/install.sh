@@ -2721,6 +2721,18 @@ configure_vhost() {
             echo "        AllowOverride All"
             echo "        Require all granted"
             echo "    </Directory>"
+            # phpMyAdmin lives in /usr/share/phpmyadmin and Debian's own alias
+            # conf is never enabled here (reconfigure-webserver is preseeded to
+            # "none"), so step 0's "served at /phpmyadmin once the vhost exists"
+            # is only true once THIS vhost wires it. No Indexes: a directory
+            # without an index file has to 403 rather than list its contents.
+            echo "    Alias /phpmyadmin \"/usr/share/phpmyadmin\""
+            echo "    <Directory \"/usr/share/phpmyadmin\">"
+            echo "        Options FollowSymLinks"
+            echo "        DirectoryIndex index.php"
+            echo "        AllowOverride None"
+            echo "        Require all granted"
+            echo "    </Directory>"
             echo "</VirtualHost>"
         } | $SUDO tee "$ap_conf" > /dev/null
         if [ "$cert_ok" = "1" ]; then
@@ -2735,6 +2747,15 @@ configure_vhost() {
                 echo "    <Directory \"$ROOT_DIR\">"
                 echo "        Options Indexes FollowSymLinks"
                 echo "        AllowOverride All"
+                echo "        Require all granted"
+                echo "    </Directory>"
+                # same alias as the :80 block - an Alias is scoped to its own
+                # VirtualHost, so https://$host/phpmyadmin would 404 without it
+                echo "    Alias /phpmyadmin \"/usr/share/phpmyadmin\""
+                echo "    <Directory \"/usr/share/phpmyadmin\">"
+                echo "        Options FollowSymLinks"
+                echo "        DirectoryIndex index.php"
+                echo "        AllowOverride None"
                 echo "        Require all granted"
                 echo "    </Directory>"
                 echo "</VirtualHost>"
@@ -2881,6 +2902,33 @@ configure_vhost() {
             echo "    location ~ ^/bots/(hash\.txt|info|error_log)$ { deny all; return 404; }"
             echo "    location ~ ^/bots/.*config\.php$ { deny all; return 404; }"
             if [ -n "$fpm_sock" ]; then
+                # phpMyAdmin lives in /usr/share/phpmyadmin and Debian's own
+                # alias conf is never enabled here (reconfigure-webserver is
+                # preseeded to "none"), so step 0's "served at /phpmyadmin once
+                # the vhost exists" is only true once THIS vhost wires it.
+                # Everything sits inside the fpm_sock test on purpose: without
+                # a php handler the prefix location would hand index.php to
+                # the browser as SOURCE CODE. Emitted even when the package is
+                # absent - both locations then answer 404 and cost nothing.
+                echo "    location = /phpmyadmin { return 301 /phpmyadmin/; }"
+                # Plain prefix, NOT ^~ : a ^~ stops nginx before it reaches any
+                # regex, so the .php block below would never run. root /usr/share
+                # + URI /phpmyadmin/x resolves to /usr/share/phpmyadmin/x, and
+                # the server-level `index index.php` sends the bare directory to
+                # index.php, which the block below then executes.
+                echo "    location /phpmyadmin/ { root /usr/share; }"
+                # Declared BEFORE location ~ \.php$ below: nginx tries regex
+                # locations in the order they are written and the first match
+                # wins, so this one has to claim phpMyAdmin's scripts first -
+                # otherwise $document_root would be the project root and every
+                # phpMyAdmin script would 404.
+                echo "    location ~ ^/phpmyadmin/.+\.php\$ {"
+                echo "        root /usr/share;"
+                echo "        try_files \$uri =404;"
+                echo "        include fastcgi_params;"
+                echo "        fastcgi_pass unix:$fpm_sock;"
+                echo "        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;"
+                echo "    }"
                 echo "    location ~ \.php\$ {"
                 # Self-contained: fastcgi_params (unlike the distro snippet)
                 # carries no try_files of its own, so our guard below can
