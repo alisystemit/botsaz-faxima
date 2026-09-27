@@ -48,6 +48,23 @@ echo ""
 # ---------- helpers ----------
 has_cmd() { command -v "$1" &>/dev/null; }
 
+# Detect the PHP version available in apt repos (e.g. "8.5")
+detect_php_version() {
+    for _v in 8.5 8.4 8.3 8.2 8.1; do
+        if apt-cache show "php${_v}-cli" >/dev/null 2>&1 || true; then
+            printf '%s' "$_v"
+            return 0
+        fi
+    done
+    # Fallback: try to read from an already-installed PHP
+    if has_cmd php; then
+        printf '%s' "$($PHP_BIN -r 'echo PHP_MAJOR_VERSION . "." . PHP_MINOR_VERSION;' 2>/dev/null || echo 8.5)"
+        return 0
+    fi
+    printf '8.5'  # best guess for current Ubuntu
+    return 0
+}
+
 SUDO=""
 if [ "$(id -u)" -ne 0 ]; then SUDO="sudo"; fi
 
@@ -817,9 +834,17 @@ report_health() {
 
     # ---------- 2) web server ----------
     printf '\n  --- 2) Web server ---\n'
-    local ws=""
-    if has_cmd apache2ctl || has_cmd apache2; then ws="apache2"; fi
-    if [ -z "$ws" ] && has_cmd nginx; then ws="nginx"; fi
+    local ws="" _ws_active=""
+    # A RUNNING server outranks installed binaries: with a live nginx and a
+    # dead apache2-bin leftover, "apache2" here would print a mod_rewrite FAIL
+    # and check the wrong vhost while Telegram talks to nginx.
+    _ws_active="$(active_web_server)"
+    if [ "$_ws_active" = "apache2" ]; then ws="apache2"
+    elif [ "$_ws_active" = "nginx" ]; then ws="nginx"
+    elif has_cmd apache2ctl || has_cmd apache2; then ws="apache2"
+    elif has_cmd nginx; then ws="nginx"
+    fi
+    unset _ws_active
     if [ -z "$ws" ]; then
         h_fail "neither Apache nor nginx is installed - nothing can serve the webhook"
     else
@@ -2149,11 +2174,32 @@ install_php_if_needed() {
         echo "   ⚠️  PHP not found."
     fi
     if can_apt && ask_yes "   Install/upgrade PHP automatically with the required extensions?"; then
-        apt_install_nr php php-cli php-curl php-mbstring php-mysql php-sqlite3 php-xml php-zip
+        # Detect the PHP version that is available in the repos.
+        # We install VERSIONED packages (php8.5-cli, php8.5-fpm, ...) instead of
+        # the "php" metapackage. The "php" metapackage depends on
+        # libapache2-mod-php which pulls in the entire apache2 stack -
+        # --no-install-recommends does NOT help because that is a hard
+        # dependency, not a recommendation.
+        local php_ver="" _php_pkg=""
+        for _v in 8.5 8.4 8.3 8.2 8.1; do
+            if apt-cache show "php${_v}-cli" >/dev/null 2>&1; then
+                php_ver="$_v"
+                break
+            fi
+        done
+        if [ -z "$php_ver" ]; then
+            echo "   ❌ No PHP 8.1+ package found in the repositories."
+            echo "      Add the ondrej/php PPA or install PHP manually."
+            exit 1
+        fi
+        # Individual versioned packages - never the "php" metapackage.
+        apt_install_nr "php${php_ver}-cli" "php${php_ver}-common" "php${php_ver}-fpm" \
+            "php${php_ver}-curl" "php${php_ver}-mbstring" "php${php_ver}-mysql" \
+            "php${php_ver}-sqlite3" "php${php_ver}-xml" "php${php_ver}-zip"
     fi
     if ! has_cmd "$PHP_BIN"; then
         echo "❌ PHP is not available. Install it manually:"
-        echo "   sudo apt install php php-cli php-curl php-mbstring php-mysql php-sqlite3"
+        echo "   sudo apt install php$(detect_php_version)-cli php$(detect_php_version)-curl php$(detect_php_version)-mbstring"
         exit 1
     fi
     PHP_VER=$($PHP_BIN -r "echo PHP_VERSION_ID;")
@@ -2169,33 +2215,39 @@ install_php_if_needed
 # ---------- Fix: PCRE JIT memory allocation warning ----------
 # Some Ubuntu/Debian configs block PCRE JIT memory allocation,
 # causing "preg_match(): Allocation of JIT memory failed" warnings.
-# Fix: set pcre.jit=0 in ALL PHP ini files (CLI + Apache).
-# Apache may use a different .ini than CLI, so both must be updated.
-_pcre_jit_ok=$($PHP_BIN -r 'echo ini_get("pcre.jit");' 2>/dev/null || echo "unknown")
-if [ "$_pcre_jit_ok" != "0" ]; then
-    # Find all PHP ini files: CLI + Apache modules
-    _all_inis="$($PHP_BIN -r 'echo php_ini_loaded_file();' 2>/dev/null || echo '')"
-    # Also check common Apache ini locations
-    for _ap in /etc/php/*/apache2/php.ini /etc/php/*/apache2php.ini /etc/php/*/fpm/php.ini; do
-        [ -f "$_ap" ] && _all_inis="$_all_inis $_ap"
-    done
-    # Deduplicate
-    _unique_inis=$(echo "$_all_inis" | tr ' ' '\n' | sort -u | grep -v '^$')
-    for _ini in $_unique_inis; do
-        [ -z "$_ini" ] && continue
-        if [ ! -f "$_ini" ]; then continue; fi
-        if ! grep -q '^pcre.jit=' "$_ini" 2>/dev/null; then
-            echo 'pcre.jit=0' >> "$_ini"
-            echo "   ✔ Disabled PCRE JIT in $_ini"
-        elif ! grep -q '^pcre.jit=0' "$_ini" 2>/dev/null; then
-            # pcre.jit exists but is not 0 → change it
-            sed -i "s/^pcre\.jit=.*/pcre.jit=0/" "$_ini"
-            echo "   ✔ Changed pcre.jit to 0 in $_ini"
-        else
-            echo "   ✔ pcre.jit=0 already set in $_ini"
-        fi
-    done
-fi
+# Fix: set pcre.jit=0 in ALL PHP ini files (CLI + Apache + FPM).
+# A FUNCTION (not inline code): php-fpm is often installed AFTER the first
+# pass runs, so its php.ini does not exist yet - callers re-run this after
+# any PHP install step.
+apply_pcre_fix() {
+    local _pcre_jit_ok _all_inis _ap _unique_inis _ini
+    _pcre_jit_ok=$($PHP_BIN -r 'echo ini_get("pcre.jit");' 2>/dev/null || echo "unknown")
+    if [ "$_pcre_jit_ok" != "0" ]; then
+        # Find all PHP ini files: CLI + Apache + FPM modules
+        _all_inis="$($PHP_BIN -r 'echo php_ini_loaded_file();' 2>/dev/null || echo '')"
+        # Also check common SAPI ini locations
+        for _ap in /etc/php/*/apache2/php.ini /etc/php/*/apache2php.ini /etc/php/*/fpm/php.ini; do
+            [ -f "$_ap" ] && _all_inis="$_all_inis $_ap"
+        done
+        # Deduplicate
+        _unique_inis=$(echo "$_all_inis" | tr ' ' '\n' | sort -u | grep -v '^$')
+        for _ini in $_unique_inis; do
+            [ -z "$_ini" ] && continue
+            if [ ! -f "$_ini" ]; then continue; fi
+            if ! grep -q '^pcre.jit=' "$_ini" 2>/dev/null; then
+                echo 'pcre.jit=0' >> "$_ini"
+                echo "   ✔ Disabled PCRE JIT in $_ini"
+            elif ! grep -q '^pcre.jit=0' "$_ini" 2>/dev/null; then
+                # pcre.jit exists but is not 0 → change it
+                sed -i "s/^pcre\.jit=.*/pcre.jit=0/" "$_ini"
+                echo "   ✔ Changed pcre.jit to 0 in $_ini"
+            else
+                echo "   ✔ pcre.jit=0 already set in $_ini"
+            fi
+        done
+    fi
+}
+apply_pcre_fix
 
 # ---------- 0) prerequisite: PHP extensions ----------
 echo "✅ Checking PHP extensions..."
@@ -2253,10 +2305,14 @@ echo "✅ Checking the PHP web-server module..."
 # on nginx's busy port. That is exactly how a running nginx install ends up
 # with a dead apache2 beside it.
 if [ "${PICKED:-}" = "nginx" ] || { [ -z "${PICKED:-}" ] && ! has_cmd apache2 && ! has_cmd httpd && has_cmd nginx; }; then
-    if dpkg -s php-fpm >/dev/null 2>&1; then
+    local _php_ver="$(detect_php_version)"
+    local _fpm_pkg="php${_php_ver}-fpm"
+    if dpkg -s "$_fpm_pkg" >/dev/null 2>&1; then
         echo "   nginx PHP-FPM ✔"
     elif ask_yes "   Install php-fpm so nginx can execute PHP?"; then
-        if apt_install_nr php-fpm; then
+        # Versioned package avoids pulling the "php" metapackage
+        # which depends on libapache2-mod-php → apache2
+        if apt_install_nr "$_fpm_pkg"; then
             # Enable whatever php-fpm version actually got installed - the
             # version differs per release (8.1/8.2/8.3/...), so a hardcoded
             # name enables nothing on most servers and PHP stays down.
@@ -2291,10 +2347,13 @@ elif has_cmd apache2 || has_cmd httpd; then
         unset _po80
     fi
 elif has_cmd nginx; then
-    if dpkg -s php-fpm >/dev/null 2>&1; then
+    local _php_ver2="$(detect_php_version)"
+    local _fpm_pkg2="php${_php_ver2}-fpm"
+    if dpkg -s "$_fpm_pkg2" >/dev/null 2>&1; then
         echo "   nginx PHP-FPM ✔"
     elif ask_yes "   Install php-fpm so nginx can execute PHP?"; then
-        if apt_install php-fpm; then
+        # Versioned package avoids pulling the "php" metapackage
+        if apt_install_nr "$_fpm_pkg2"; then
             # Enable whatever php-fpm version actually got installed - the
             # version differs per release (8.1/8.2/8.3/...), so a hardcoded
             # name enables nothing on most servers and PHP stays down.
@@ -2310,6 +2369,10 @@ elif has_cmd nginx; then
 else
     echo "   ⚠️  No Apache/nginx detected - skipping the PHP web-server module."
 fi
+
+# php-fpm / mod-php may have been installed JUST above, so their php.ini files
+# did not exist during the first PCRE pass - run it again for the new SAPIs.
+apply_pcre_fix
 
 # ---------- 0) optional: phpMyAdmin ----------
 # Installs the web UI for MySQL. It is optional and it asks first, because a
@@ -2475,10 +2538,11 @@ issue_ssl() {
     if ! has_cmd certbot; then
         echo "   ⚠️  certbot is not installed."
         if can_apt && ask_yes "   Install certbot now? (required to issue the certificate)"; then
-            apt_install certbot || true
-            # the matching plugin is what lets certbot edit the vhost for us
-            if has_cmd apache2 || has_cmd httpd; then apt_install python3-certbot-apache || true; fi
-            if has_cmd nginx; then apt_install python3-certbot-nginx || true; fi
+            apt_install_nr certbot python3-certbot-nginx || true
+            # The plugin for the chosen server is already installed above.
+            # Do NOT install python3-certbot-apache here - it drags the
+            # FULL apache2 stack in as a dependency (enabled at boot,
+            # failing forever on nginx's busy port).
         fi
     fi
     if ! has_cmd certbot; then
@@ -2750,6 +2814,17 @@ configure_vhost() {
         fi
         $SUDO mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled 2>/dev/null || true
 
+        # Sanitize fastcgi-php.conf: ensure no try_files inside it.
+        # The snippet is included inside "location ~ \.php$" which inherits
+        # try_files from the parent "location /" block. A duplicate
+        # try_files causes: nginx: [emerg] "try_files" directive is duplicate
+        if [ -f /etc/nginx/snippets/fastcgi-php.conf ]; then
+            if grep -q 'try_files' /etc/nginx/snippets/fastcgi-php.conf 2>/dev/null; then
+                $SUDO sed -i '/^[[:space:]]*try_files/d' /etc/nginx/snippets/fastcgi-php.conf 2>/dev/null || true
+                echo "   ✔ Sanitized fastcgi-php.conf (removed try_files duplicate)"
+            fi
+        fi
+
         # the application block is reused for :80 (no cert yet) and :443 (cert present)
         # Include mime.types for correct MIME types on static files
         _nginx_app() {
@@ -2784,9 +2859,9 @@ configure_vhost() {
             echo "    location ~ ^/bots/.*config\.php$ { deny all; return 404; }"
             if [ -n "$fpm_sock" ]; then
                 echo "    location ~ \.php\$ {"
-                # NOTE: do NOT repeat try_files here — snippets/fastcgi-php.conf
-                # already contains 'try_files \$uri =404;'. Repeating it causes:
-                #   nginx: [emerg] "try_files" directive is duplicate
+                # snippets/fastcgi-php.conf is sanitized before this
+                # (any try_files is removed) to avoid duplicate
+                # directive errors with the parent location / block
                 echo "        include snippets/fastcgi-php.conf;"
                 echo "        fastcgi_pass unix:$fpm_sock;"
                 echo "        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;"
@@ -2846,6 +2921,11 @@ configure_vhost() {
             fi
         } | $SUDO tee "$ng_conf" > /dev/null
         $SUDO ln -sf "$ng_conf" /etc/nginx/sites-enabled/botsaz.conf 2>/dev/null || true
+        # A certbot-touched `default` vhost claiming our name wins by file
+        # order - drop competitors BEFORE testing, like the Apache branch does.
+        # Without this, Telegram keeps hitting default/404 while our vhost sits
+        # correct but second in line.
+        drop_vhost_conflicts "$host" "$ng_conf" apply
         # never reload nginx on a broken config - roll back instead
         local ng_out="" ng_rc=1
         ng_out="$($SUDO nginx -t 2>&1)" && ng_rc=0 || ng_rc=1
@@ -3131,7 +3211,17 @@ fi
 # nginx path: a new vhost needs (at most) a reload, but php-fpm needs a real
 # restart - both for a freshly written systemd drop-in AND for php.ini changes
 # (pcre.jit=0 above is not picked up by running workers otherwise).
+# Also: if nginx was chosen but Apache snuck in as a dependency, remove it.
 if has_cmd nginx; then
+    # Safety: remove Apache if it snuck in as a certbot/PHP dependency
+    if has_cmd apache2 || has_cmd apachectl || [ -f /etc/apache2/apache2.conf ]; then
+        warn "   Apache present after nginx install - removing..."
+        $SUDO systemctl stop apache2 2>/dev/null || true
+        $SUDO systemctl disable apache2 2>/dev/null || true
+        apt_remove apache2 apache2-bin apache2-data apache2-utils libapache2-mod-php 2>/dev/null || true
+        $SUDO apt-get purge -y apache2 apache2-bin apache2-data apache2-utils libapache2-mod-php 2>/dev/null || true
+        has_cmd apache2 && warn "   Apache still present - purge manually" || ok "   Apache removed"
+    fi
     if $SUDO systemctl reload nginx 2>/dev/null || $SUDO service nginx reload 2>/dev/null; then
         echo "   ✔ nginx reloaded"
     else
