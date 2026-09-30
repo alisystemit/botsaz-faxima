@@ -8,6 +8,7 @@ require_once __DIR__ . '/src/Store.php';
 require_once __DIR__ . '/src/Manager.php';
 require_once __DIR__ . '/src/Logger.php';
 require_once __DIR__ . '/src/DbBackup.php';
+require_once __DIR__ . '/src/Nav.php';
 
 $cfgFile = __DIR__ . '/config.php';
 if (!file_exists($cfgFile)) { http_response_code(500); echo json_encode(['ok'=>false,'error'=>'config.php missing']); exit; }
@@ -177,11 +178,130 @@ function mainMenu(array $u, array $supers, Store $store = null): string {
 }
 
 function typeMenu(): string {
-    return BotApi::ikb([
-        [['text' => '✨ فاکسیما (فروش VPN)', 'callback_data' => 'newbot:faxima']],
-        [['text' => '🌙 میرزا (فروش VPN)', 'callback_data' => 'newbot:mirza']],
-        [['text' => '❌ انصراف', 'callback_data' => 'cancel']],
-    ]);
+    return Nav::typeMenu();
+}
+
+// ===== helpers ناوبری (ماژولار — همه از Nav تغذیه می‌شوند) =====
+
+/** لیست «ربات‌های من» + دکمه برگشت — مشترک بین پیام و کال‌بک */
+function sendMyBotsList(Store $store, string $TOKEN, $chatId, int $uid, int $msgId = 0): void
+{
+    if (!$store->hasBot($uid)) {
+        $t = $store->hasPendingRequest($uid)
+            ? "⏳ هنوز رباتی ندارید. درخواست شما در انتظار تأیید ادمین است."
+            : "هنوز رباتی نساخته‌ای.\nبرای شروع، «🤖 ساخت ربات جدید» را بزنید.\nتوجه: هر کاربر فقط یک ربات می‌تواند بسازد.";
+        if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, $t);
+        else BotApi::send($TOKEN, $chatId, $t);
+        return;
+    }
+    $bots = $store->myBots($uid);
+    if (!$bots) {
+        if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, "هنوز رباتی نساخته‌ای.");
+        else BotApi::send($TOKEN, $chatId, "هنوز رباتی نساخته‌ای.");
+        return;
+    }
+    $rows = [];
+    foreach ($bots as $b) {
+        $st = ($b['status'] ?? '') === 'active' ? '🟢' : '🔴';
+        $rows[] = [['text' => "{$st} {$b['folder']} (@{$b['bot_username']})", 'callback_data' => "mybot:{$b['id']}"]];
+    }
+    $kb = Nav::myBotsKb($rows);
+    if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, "📦 ربات‌های شما:", ['reply_markup' => $kb]);
+    else BotApi::send($TOKEN, $chatId, "📦 ربات‌های شما:", ['reply_markup' => $kb]);
+}
+
+/** پنل مدیریت کاربران مجاز — مشترک بین پیام و کال‌بک (edit یا send) */
+function showUsersPanel(string $TOKEN, $chatId, int $msgId = 0): void
+{
+    $kb = Nav::usersPanelKb();
+    if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, "مدیریت کاربران مجاز 👇", ['reply_markup' => $kb]);
+    else BotApi::send($TOKEN, $chatId, "مدیریت کاربران مجاز 👇", ['reply_markup' => $kb]);
+}
+
+/** متن پنل یک ربات (مشترک بین edit و send) */
+function botPanelText(array $cfg, array $bot): string
+{
+    $pdo = childPdo($cfg, $bot);
+    $count = $pdo ? childCount($pdo, $bot) : -1;
+    $countTxt = $count >= 0 ? $count : 'نامشخص';
+    $st = ($bot['status'] ?? '') === 'active' ? '🟢 فعال' : '🔴 غیرفعال';
+    return "🤖 <b>{$bot['folder']}</b> ({$bot['type']})\n\n"
+        . "🔹 یوزرنیم: @{$bot['bot_username']}\n"
+        . "🔹 وضعیت: {$st}\n"
+        . "🔹 ادمین: <code>{$bot['admin_id']}</code>\n"
+        . "🔹 دیتابیس: <code>{$bot['db_name']}</code>\n"
+        . "👥 کاربران: {$countTxt}";
+}
+
+/**
+ * برگشت یک مرحله‌ای داخل stepها — قبل از switch اصلی handleStep صدا زده می‌شود.
+ * هرگز استثنا نمی‌دهد و هرگز کاربر را در مرحله گیر نمی‌اندازد (fallback: منوی اصلی).
+ */
+function handleBack(array $cfg, Store $store, string $TOKEN, array $SUPERS, array $user, $chatId, string $step, array $temp): void
+{
+    $uid = (int)$user['user_id'];
+    try {
+        $target = Nav::backTarget($step);
+        switch ($target['kind']) {
+            case 'type':
+                $store->clearStep($uid);
+                BotApi::send($TOKEN, $chatId, "نوع ربات را انتخاب کن 👇", ['reply_markup' => Nav::typeMenu()]);
+                return;
+            case 'step': {
+                $prev = (string)($target['step'] ?? 'idle');
+                if ($prev === 'await_bot_token') {
+                    $type = (string)($temp['type'] ?? '');
+                    if ($type === '') { // temp گم شده (مثلاً ری‌استارت) → انتخاب نوع
+                        $store->clearStep($uid);
+                        BotApi::send($TOKEN, $chatId, "نوع ربات را انتخاب کن 👇", ['reply_markup' => Nav::typeMenu()]);
+                        return;
+                    }
+                    $store->setStep($uid, 'await_bot_token', ['type' => $type]);
+                    $names = Manager::validTypes();
+                    $label = $names[$type] ?? $type;
+                    BotApi::send($TOKEN, $chatId, "توکن ربات <b>{$label}</b> را بفرست.\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
+                    return;
+                }
+                // برگشت به await_admin_id — بدون توکن معتبر نمی‌شود ادامه داد
+                $hasToken = !empty($temp['token']);
+                if (!$hasToken) {
+                    $store->clearStep($uid);
+                    BotApi::send($TOKEN, $chatId, "نوع ربات را انتخاب کن 👇", ['reply_markup' => Nav::typeMenu()]);
+                    return;
+                }
+                $store->setStep($uid, 'await_admin_id');
+                BotApi::send($TOKEN, $chatId, "آیدی عددی ادمین را بفرست:\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
+                return;
+            }
+            case 'users':
+                $store->clearStep($uid);
+                showUsersPanel($TOKEN, $chatId);
+                return;
+            case 'backup':
+                $store->clearStep($uid);
+                showBackupPanel($cfg, $store, $TOKEN, $chatId);
+                return;
+            case 'bot': {
+                $botId = (int)($temp['bot_id'] ?? 0);
+                $store->clearStep($uid);
+                $bot = $botId > 0 ? $store->botById($botId) : null;
+                if (!$bot || ((int)$bot['owner_id'] !== $uid && !isAdmin($store->user($uid), $SUPERS))) {
+                    BotApi::send($TOKEN, $chatId, "🏠 منوی اصلی", ['reply_markup' => mainMenu($store->user($uid), $SUPERS, $store)]);
+                    return;
+                }
+                BotApi::send($TOKEN, $chatId, botPanelText($cfg, $bot), ['reply_markup' => Nav::botPanelKb($bot)]);
+                return;
+            }
+            case 'menu':
+            default:
+                $store->clearStep($uid);
+                BotApi::send($TOKEN, $chatId, "🏠 منوی اصلی", ['reply_markup' => mainMenu($store->user($uid), $SUPERS, $store)]);
+                return;
+        }
+    } catch (Throwable $e) {
+        try { $store->clearStep($uid); } catch (Throwable $ignored) {}
+        BotApi::send($TOKEN, $chatId, "🏠 منوی اصلی", ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
+    }
 }
 
 function childPdo(array $cfg, array $bot): ?PDO {
@@ -257,7 +377,7 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
         return;
     }
 
-    if ($text === '/start' || str_starts_with($text, '/start ') || $text === '🏠 منو' || $text === '❌ انصراف') {
+    if ($text === '/start' || str_starts_with($text, '/start ') || Nav::isMenu($text) || Nav::isCancel($text) || Nav::isBack($text)) {
         $store->clearStep($uid);
         // ===== ست دستورات ربات (فقط هنگام /start — نه هر آپدیت) =====
         BotApi::setMyCommands($TOKEN, [
@@ -313,22 +433,7 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
             return;
 
         case '📦 ربات‌های من':
-            if (!$store->hasBot($uid)) {
-                if ($store->hasPendingRequest($uid)) {
-                    BotApi::send($TOKEN, $chatId, "⏳ هنوز رباتی ندارید. درخواست شما در انتظار تأیید ادمین است.");
-                } else {
-                    BotApi::send($TOKEN, $chatId, "هنوز رباتی نساخته‌ای.\nبرای شروع، «🤖 ساخت ربات جدید» را بزنید.\nتوجه: هر کاربر فقط یک ربات می‌تواند بسازد.");
-                }
-                return;
-            }
-            $bots = $store->myBots($uid);
-            if (!$bots) { BotApi::send($TOKEN, $chatId, "هنوز رباتی نساخته‌ای."); return; }
-            $rows = [];
-            foreach ($bots as $b) {
-                $st = $b['status'] === 'active' ? '🟢' : '🔴';
-                $rows[] = [['text' => "{$st} {$b['folder']} (@{$b['bot_username']})", 'callback_data' => "mybot:{$b['id']}"]];
-            }
-            BotApi::send($TOKEN, $chatId, "📦 ربات‌های شما:", ['reply_markup' => BotApi::ikb($rows)]);
+            sendMyBotsList($store, $TOKEN, $chatId, $uid);
             return;
 
         case 'ℹ️ راهنما':
@@ -431,14 +536,11 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
 
             case '📣 همگانی':
                 $store->setStep($uid, 'await_broadcast');
-                BotApi::send($TOKEN, $chatId, "متن پیام همگانی را بفرست.\nبرای انصراف: ❌ انصراف", ['reply_markup' => BotApi::kb([[['text'=>'❌ انصراف']]])]);
+                BotApi::send($TOKEN, $chatId, "متن پیام همگانی را بفرست.\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
                 return;
 
             case '👥 کاربران مجاز':
-                BotApi::send($TOKEN, $chatId, "مدیریت کاربران مجاز 👇", ['reply_markup' => BotApi::ikb([
-                    [['text' => '➕ افزودن کاربر', 'callback_data' => 'users:add'], ['text' => '➖ حذف کاربر', 'callback_data' => 'users:remove']],
-                    [['text' => '📃 لیست', 'callback_data' => 'users:list']],
-                ])]);
+                showUsersPanel($TOKEN, $chatId);
                 return;
 
             case '📋 همه ربات‌ها':
@@ -463,14 +565,21 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
     $uid = (int)$user['user_id'];
     $admin = isAdmin($user, $SUPERS);
 
-    // دکمهٔ «🏠 منو» همیشه باید کار کند — حتی وسط یک مرحلهٔ ورودی
-    if ($text === '🏠 منو') {
+    // دکمه‌های ناوبری همیشه باید کار کنند — حتی وسط یک مرحلهٔ ورودی.
+    // ترتیب مهم است: این چک‌ها قبل از switch اصلی هستند تا متن «برگشت» در
+    // stepهای همگانی (await_broadcast/await_child_broadcast) به‌اشتباه برای همه ارسال نشود.
+    if (Nav::isMenu($text)) {
         $store->clearStep($uid);
         BotApi::send($TOKEN, $chatId, "🏠 منوی اصلی", ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
         return;
     }
 
-    if ($text === '❌ انصراف' || $text === '/start' || str_starts_with($text, '/start ')) {
+    if (Nav::isBack($text)) {
+        handleBack($cfg, $store, $TOKEN, $SUPERS, $user, $chatId, $step, $temp);
+        return;
+    }
+
+    if (Nav::isCancel($text) || $text === '/start' || str_starts_with($text, '/start ')) {
         $store->clearStep($uid);
         BotApi::send($TOKEN, $chatId, "انصراف داده شد. 🏠", ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
         return;
@@ -481,7 +590,7 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
             if (!$admin) { $store->clearStep($uid); return; }
             $parsed = DbBackup::parseTimes($text);
             if (!$parsed['ok']) {
-                BotApi::send($TOKEN, $chatId, "⛔️ " . $parsed['error'] . "\nدوباره بفرست (مثلاً: <code>3,15</code>). برای انصراف: ❌ انصراف");
+                BotApi::send($TOKEN, $chatId, "⛔️ " . $parsed['error'] . "\nدوباره بفرست (مثلاً: <code>3,15</code>).\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
                 return;
             }
             $cur = DbBackup::settings($cfg, $store);
@@ -495,12 +604,12 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
         case 'await_bot_token': {
             $token = trim($text);
             if (!preg_match('/^\d+:[\w\-]{20,}$/', $token)) {
-                BotApi::send($TOKEN, $chatId, "⛔️ فرمت توکن اشتباه است.");
+                BotApi::send($TOKEN, $chatId, "⛔️ فرمت توکن اشتباه است.\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
                 return;
             }
             $me = BotApi::getMe($token);
             if (empty($me['ok'])) {
-                BotApi::send($TOKEN, $chatId, "⛔️ توکن نامعتبر است.");
+                BotApi::send($TOKEN, $chatId, "⛔️ توکن نامعتبر است.\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
                 return;
             }
             // ===== رمزنگاری توکن =====
@@ -511,23 +620,23 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
                 'bot_username' => $me['result']['username'] ?? '',
                 'bot_id' => $me['result']['id'] ?? 0,
             ]);
-            BotApi::send($TOKEN, $chatId, "✅ ربات شناسایی شد: @" . ($me['result']['username'] ?? '?') . "\n\nحالا آیدی عددی ادمین را بفرست:");
+            BotApi::send($TOKEN, $chatId, "✅ ربات شناسایی شد: @" . ($me['result']['username'] ?? '?') . "\n\nحالا آیدی عددی ادمین را بفرست:\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
             return;
         }
 
         case 'await_admin_id': {
             if (!preg_match('/^\d{5,}$/', $text)) {
-                BotApi::send($TOKEN, $chatId, "⛔️ آیدی عددی بفرست.");
+                BotApi::send($TOKEN, $chatId, "⛔️ آیدی عددی بفرست.\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
                 return;
             }
             $store->setStep($uid, 'await_folder', ['admin_id' => (int)$text]);
-            BotApi::send($TOKEN, $chatId, "حالا یک نام انگلیسی کوتاه بفرست (مثلا: <code>shop1</code>)");
+            BotApi::send($TOKEN, $chatId, "حالا یک نام انگلیسی کوتاه بفرست (مثلا: <code>shop1</code>)\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
             return;
         }
 
         case 'await_folder': {
             if ($text === '') {
-                BotApi::send($TOKEN, $chatId, "⛔️ لطفاً یک نام انگلیسی بفرستید.");
+                BotApi::send($TOKEN, $chatId, "⛔️ لطفاً یک نام انگلیسی بفرستید.\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
                 return;
             }
             // فقط نامی که حداقل یک حرف/عدد لاتین داشته باشد قبول می‌شود.
@@ -535,19 +644,19 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
             // به نام تصادفی مثل bot-a1b2c3 تبدیل می‌کرد و ساخت همان لحظه شروع می‌شد؛
             // کاربر هیچ شانسی برای اعتراض به نام نداشت.
             if (!preg_match('/[A-Za-z0-9]/', $text)) {
-                BotApi::send($TOKEN, $chatId, "⛔️ لطفاً یک نام انگلیسی بفرستید (حروف و اعداد لاتین).");
+                BotApi::send($TOKEN, $chatId, "⛔️ لطفاً یک نام انگلیسی بفرستید (حروف و اعداد لاتین).\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
                 return;
             }
             $slug = Manager::slugify($text);
             if ($store->botByFolder($slug) || is_dir(Manager::childBotsDir() . '/' . $slug)) {
-                BotApi::send($TOKEN, $chatId, "⛔️ این نام قبلا استفاده شده.");
+                BotApi::send($TOKEN, $chatId, "⛔️ این نام قبلا استفاده شده.\nنام دیگری بفرست.\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
                 return;
             }
             // نام‌های رزرو: bots/backups (ریشهٔ بکاپ‌ها) و bots/states —
             // ساخت ربات با این نام‌ها هم با بکاپ تداخل می‌کند و هم با قواعد مسدودسازی
             // .htaccess (states/ و backups/) وبهوکش 403 می‌شود.
             if (in_array($slug, ['backups', 'states'], true)) {
-                BotApi::send($TOKEN, $chatId, "⛔️ این نام رزرو شده است؛ نام دیگری بفرست.");
+                BotApi::send($TOKEN, $chatId, "⛔️ این نام رزرو شده است؛ نام دیگری بفرست.\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
                 return;
             }
             // ===== نوع قالب را قبل از پیش‌نیازها تعیین کن =====
@@ -563,7 +672,7 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
             $_prereq_err = Manager::checkBuildPrerequisites($type);
             if ($_prereq_err !== '') {
                 Logger::getInstance()->error('build', "Prerequisites failed for {$slug} ({$type}): {$_prereq_err}");
-                BotApi::send($TOKEN, $chatId, "❌ خطا در ساخت ربات:\n{$_prereq_err}\nنام دیگری بفرست یا «❌ انصراف» بزن.");
+                BotApi::send($TOKEN, $chatId, "❌ خطا در ساخت ربات:\n{$_prereq_err}\nنام دیگری بفرست، یا برگرد / انصراف بده.", ['reply_markup' => Nav::stepKb()]);
                 return;
             }
             try {
@@ -583,7 +692,7 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
                 Logger::getInstance()->error('build', "Build failed ({$slug}): " . $e->getMessage());
                 // مرحله عمداً باقی می‌ماند تا کاربر بتواند همان‌جا نام دیگری بفرستد
                 // («دوباره تلاش کن» یعنی همین). انصراف با ❌ انصراف / 🏠 منو.
-                BotApi::send($TOKEN, $chatId, "❌ خطا در ساخت ربات: " . htmlspecialchars(Manager::sanitizeDbError($e->getMessage())) . "\nنام دیگری بفرست یا «❌ انصراف» بزن.", ['reply_markup' => BotApi::kb([[['text' => '❌ انصراف']]])]);
+                BotApi::send($TOKEN, $chatId, "❌ خطا در ساخت ربات: " . htmlspecialchars(Manager::sanitizeDbError($e->getMessage())) . "\nنام دیگری بفرست، یا برگرد / انصراف بده.", ['reply_markup' => Nav::stepKb()]);
             }
             return;
         }
@@ -610,7 +719,7 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
         }
 
         case 'await_user_add': {
-            if (!preg_match('/^\d{5,}$/', $text)) { BotApi::send($TOKEN, $chatId, "آیدی عددی بفرست:"); return; }
+            if (!preg_match('/^\d{5,}$/', $text)) { BotApi::send($TOKEN, $chatId, "آیدی عددی بفرست:\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]); return; }
             $currentUser = $store->user((int)$text);
             $currentIsAdmin = (int)$currentUser['is_admin'];
             $store->setAllowed((int)$text, 1, $currentIsAdmin);
@@ -620,7 +729,7 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
         }
 
         case 'await_user_remove': {
-            if (!preg_match('/^\d{5,}$/', $text)) { BotApi::send($TOKEN, $chatId, "آیدی عددی بفرست:"); return; }
+            if (!preg_match('/^\d{5,}$/', $text)) { BotApi::send($TOKEN, $chatId, "آیدی عددی بفرست:\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]); return; }
             // is_admin هم صفر می‌شود؛ وگرنه حذف دسترسیِ یک ادمین بی‌اثر می‌ماند
             // (canUse تا زمانی که is_admin=1 باشد true برمی‌گرداند)
             $store->setAllowed((int)$text, 0, 0);
@@ -826,11 +935,12 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
 
     // ===== canUse چک =====
     // کاربری که درخواستش توسط ادمین تأیید شده باید بتواند ادامه دهد (newbot:…)
-    // و انصراف همیشه باید کار کند تا کاربر در مرحله گیر نکند.
+    // و انصراف/برگشت/منو همیشه باید کار کنند تا کاربر در مرحله گیر نکند.
     if (!canUse($user, $SUPERS) && !$store->hasApprovedRequest($uid)) {
-        if ($data === 'cancel') {
+        if ($data === 'cancel' || $data === Nav::CB_BACK_MAIN || $data === Nav::CB_BACK_TYPE) {
             $store->clearStep($uid);
-            BotApi::edit($TOKEN, $chatId, $msgId, "❌ انصراف داده شد.");
+            if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, "❌ انصراف داده شد.");
+            BotApi::send($TOKEN, $chatId, "🏠 منوی اصلی", ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
             return;
         }
         BotApi::send($TOKEN, $chatId, "⛔️ دسترسی ندارید.");
@@ -839,7 +949,36 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
 
     if ($data === 'cancel') {
         $store->clearStep($uid);
-        BotApi::edit($TOKEN, $chatId, $msgId, "❌ انصراف داده شد.");
+        if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, "❌ انصراف داده شد.");
+        BotApi::send($TOKEN, $chatId, "🏠 منوی اصلی", ['reply_markup' => mainMenu($store->user($uid), $SUPERS, $store)]);
+        return;
+    }
+
+    // ===== برگشت‌های اینلاین (همیشه بدون خطا) =====
+    if ($data === Nav::CB_BACK_MAIN) {
+        $store->clearStep($uid);
+        if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, "🏠 منوی اصلی");
+        BotApi::send($TOKEN, $chatId, "🏠 منوی اصلی", ['reply_markup' => mainMenu($store->user($uid), $SUPERS, $store)]);
+        return;
+    }
+    if ($data === Nav::CB_BACK_TYPE) {
+        $store->clearStep($uid);
+        if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, "نوع ربات را انتخاب کن 👇");
+        BotApi::send($TOKEN, $chatId, "نوع ربات را انتخاب کن 👇", ['reply_markup' => Nav::typeMenu()]);
+        return;
+    }
+    if ($data === Nav::CB_MY_BOTS) {
+        sendMyBotsList($store, $TOKEN, $chatId, $uid, $msgId);
+        return;
+    }
+    if ($data === Nav::CB_BACK_USERS) {
+        if (!$admin) { BotApi::send($TOKEN, $chatId, "⛔️ فقط ادمین."); return; }
+        showUsersPanel($TOKEN, $chatId, $msgId);
+        return;
+    }
+    if ($data === Nav::CB_BACK_BACKUP) {
+        if (!$admin) { BotApi::send($TOKEN, $chatId, "⛔️ فقط ادمین."); return; }
+        showBackupPanel($cfg, $store, $TOKEN, $chatId, $msgId);
         return;
     }
 
@@ -862,8 +1001,8 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
             return;
         }
         $store->setStep($uid, 'await_bot_token', ['type' => $type]);
-        BotApi::send($TOKEN, $chatId, "توکن ربات <b>{$names[$type]}</b> را بفرست.\nبرای انصراف: ❌ انصراف",
-            ['reply_markup' => BotApi::kb([[['text'=>'❌ انصراف']]])]);
+        BotApi::send($TOKEN, $chatId, "توکن ربات <b>{$names[$type]}</b> را بفرست.\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL,
+            ['reply_markup' => Nav::stepKb()]);
         return;
     }
 
@@ -913,13 +1052,13 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
     if ($data === 'users:add') {
         if (!$admin) { BotApi::send($TOKEN, $chatId, "⛔️ فقط ادمین."); return; }
         $store->setStep($uid, 'await_user_add');
-        BotApi::send($TOKEN, $chatId, "آیدی عددی کاربر جدید را بفرست:");
+        BotApi::send($TOKEN, $chatId, "آیدی عددی کاربر جدید را بفرست:\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
         return;
     }
     if ($data === 'users:remove') {
         if (!$admin) { BotApi::send($TOKEN, $chatId, "⛔️ فقط ادمین."); return; }
         $store->setStep($uid, 'await_user_remove');
-        BotApi::send($TOKEN, $chatId, "آیدی عددی کاربر برای حذف دسترسی:");
+        BotApi::send($TOKEN, $chatId, "آیدی عددی کاربر برای حذف دسترسی:\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
         return;
     }
     if ($data === 'users:list') {
@@ -964,7 +1103,7 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
         }
         if ($action === 'custom') {
             $store->setStep($uid, 'await_backup_times');
-            BotApi::send($TOKEN, $chatId, "🕐 ساعت‌های بکاپ را بفرست (به وقت سرور، حداکثر ۴ ساعت).\nمثلاً: <code>3,15</code> یعنی ۰۳:۰۰ و ۱۵:۰۰\nبرای انصراف: ❌ انصراف");
+            BotApi::send($TOKEN, $chatId, "🕐 ساعت‌های بکاپ را بفرست (به وقت سرور، حداکثر ۴ ساعت).\nمثلاً: <code>3,15</code> یعنی ۰۳:۰۰ و ۱۵:۰۰\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
             return;
         }
         if ($action === 'now') {
@@ -1011,13 +1150,7 @@ function showBackupPanel(array $cfg, Store $store, string $TOKEN, $chatId, int $
         }
     }
     $t .= "\nکرون: <code>0 3,15 * * * php .../tools/backup_dispatcher.php</code>\n(کرون ۵دقیقه‌ای هم اسلات‌ها را خودش چک می‌کند)";
-    $kb = BotApi::ikb([
-        [['text' => $set['enabled'] ? '🔴 غیرفعال' : '🟢 فعال‌سازی', 'callback_data' => 'backup:toggle']],
-        [['text' => '2 بار در روز (۳ و ۱۵)', 'callback_data' => 'backup:preset2']],
-        [['text' => '1 بار در روز (۳ صبح)', 'callback_data' => 'backup:preset1']],
-        [['text' => '🕐 ساعت دلخواه', 'callback_data' => 'backup:custom']],
-        [['text' => '▶️ بکاپ الان', 'callback_data' => 'backup:now'], ['text' => '🔄 بروزرسانی', 'callback_data' => 'backup:refresh']],
-    ]);
+    $kb = Nav::backupPanelKb((bool)$set['enabled']);
     if ($msgId > 0) {
         BotApi::edit($TOKEN, $chatId, $msgId, $t, ['reply_markup' => $kb, 'parse_mode' => 'HTML']);
     } else {
@@ -1050,22 +1183,13 @@ function sendPendingRequests(Store $store, string $TOKEN, $chatId): void
 
 function showBotPanel(array $cfg, Store $store, string $TOKEN, $chatId, $msgId, array $bot, string $from = ''): void
 {
-    $pdo = childPdo($cfg, $bot);
-    $count = $pdo ? childCount($pdo, $bot) : -1;
-    $countTxt = $count >= 0 ? $count : 'نامشخص';
-    $st = $bot['status'] === 'active' ? '🟢 فعال' : '🔴 غیرفعال';
-    $t = "🤖 <b>{$bot['folder']}</b> ({$bot['type']})\n\n"
-        . "🔹 یوزرنیم: @{$bot['bot_username']}\n"
-        . "🔹 وضعیت: {$st}\n"
-        . "🔹 ادمین: <code>{$bot['admin_id']}</code>\n"
-        . "🔹 دیتابیس: <code>{$bot['db_name']}</code>\n"
-        . "👥 کاربران: {$countTxt}";
-    $toggle = $bot['status'] === 'active' ? '🔴 غیرفعال' : '🟢 فعال‌سازی';
-    BotApi::edit($TOKEN, $chatId, $msgId, $t, ['reply_markup' => BotApi::ikb([
-        [['text' => '📊 آمار', 'callback_data' => "act:stats:{$bot['id']}"], ['text' => '📣 همگانی', 'callback_data' => "act:broadcast:{$bot['id']}"]],
-        [['text' => '🔗 ست مجدد وبهوک', 'callback_data' => "act:webhook:{$bot['id']}"], ['text' => $toggle, 'callback_data' => "act:toggle:{$bot['id']}"]],
-        [['text' => '🗑 حذف ربات', 'callback_data' => "act:delask:{$bot['id']}"]],
-    ])]);
+    $t = botPanelText($cfg, $bot);
+    $kb = Nav::botPanelKb($bot);
+    if ($msgId > 0) {
+        BotApi::edit($TOKEN, $chatId, $msgId, $t, ['reply_markup' => $kb]);
+    } else {
+        BotApi::send($TOKEN, $chatId, $t, ['reply_markup' => $kb]);
+    }
 }
 
 function botAction(array $cfg, Store $store, string $TOKEN, array $SUPERS, array $user, $chatId, $msgId, array $bot, string $action): void
@@ -1080,7 +1204,7 @@ function botAction(array $cfg, Store $store, string $TOKEN, array $SUPERS, array
         }
         case 'broadcast': {
             $store->setStep($uid, 'await_child_broadcast', ['bot_id' => $bot['id']]);
-            BotApi::send($TOKEN, $chatId, "پیام همگانی برای ربات <b>{$bot['folder']}</b> را بفرست:\nانصراف: ❌ انصراف", ['reply_markup' => BotApi::kb([[['text'=>'❌ انصراف']]])]);
+            BotApi::send($TOKEN, $chatId, "پیام همگانی برای ربات <b>{$bot['folder']}</b> را بفرست:\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
             return;
         }
         case 'webhook': {
