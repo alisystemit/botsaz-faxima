@@ -196,10 +196,20 @@ class BotApi
         }
     }
 
+    /**
+     * ویرایش پیام؛ اگر شناسهٔ پیام معتبر نباشد (۰ یا null) به‌جای بی‌صدا هیچ‌کاری‌نکردن،
+     * پیام را ارسال می‌کند.
+     * بدون این، یک کال‌بک بدون message_id عملاً «هیچ» به کاربر نشان می‌داد و
+     * لاگ هم فقط یک خط بی‌مورد می‌ساخت.
+     */
     public static function edit(string $token, $chatId, $msgId, string $text, array $extra = []): void
     {
+        if (!is_numeric($msgId) || (int)$msgId <= 0) {
+            self::send($token, $chatId, $text, $extra);
+            return;
+        }
         $r = self::call($token, 'editMessageText', array_merge([
-            'chat_id' => $chatId, 'message_id' => $msgId, 'text' => $text, 'parse_mode' => 'HTML',
+            'chat_id' => $chatId, 'message_id' => (int)$msgId, 'text' => $text, 'parse_mode' => 'HTML',
         ], $extra));
         if (!is_array($r) || empty($r['ok'])) {
             self::logFail('editMessageText', 'chat=' . $chatId . ' — ' . (($r['description'] ?? '') ?: 'no response'));
@@ -279,5 +289,40 @@ class BotApi
         }
         self::logFail('sendDocument', 'upload failed — ' . (isset($err) && $err !== '' ? $err : 'no response'));
         return ['ok' => false, 'description' => 'upload failed: ' . ($err ?? 'no response')];
+    }
+
+    /**
+     * ارسال عکس با file_id تلگرام (بدون دانلود و بارگذاری دوباره).
+     * برای رسید کارت‌به‌کارت استفاده می‌شود: کاربر عکس فیش را می‌فرستد و
+     * همان file_id مستقیم برای ادمین‌ها فرستاده می‌شود.
+     * اگر file_id نامعتبر یا منقضی باشد، تلگرام خطا می‌دهد و لاگ می‌شود (نه کرش).
+     */
+    public static function sendPhoto(string $token, $chatId, string $fileId, string $caption = ''): array
+    {
+        if (trim($fileId) === '') return ['ok' => false, 'description' => 'empty file_id'];
+        $params = ['chat_id' => $chatId, 'photo' => $fileId];
+        if ($caption !== '') $params['caption'] = mb_substr($caption, 0, 900);
+        $r = self::call($token, 'sendPhoto', $params);
+        if (!is_array($r) || empty($r['ok'])) {
+            self::logFail('sendPhoto', 'chat=' . $chatId . ' — ' . (($r['description'] ?? '') ?: 'no response'));
+        }
+        return is_array($r) ? $r : ['ok' => false, 'description' => 'no response'];
+    }
+
+    /**
+     * ارسال سند با file_id تلگرام (بدون دانلود/بارگذاری دوباره).
+     * تلگرام با file_id نیز multipart را قبول می‌کند، ولی چون نیازی به فایل
+     * محلی نیست، ارسال urlencoded کافی و سبک‌تر است.
+     */
+    public static function sendDocumentById(string $token, $chatId, string $fileId, string $caption = ''): array
+    {
+        if (trim($fileId) === '') return ['ok' => false, 'description' => 'empty file_id'];
+        $params = ['chat_id' => $chatId, 'document' => $fileId];
+        if ($caption !== '') $params['caption'] = mb_substr($caption, 0, 900);
+        $r = self::call($token, 'sendDocument', $params);
+        if (!is_array($r) || empty($r['ok'])) {
+            self::logFail('sendDocumentById', 'chat=' . $chatId . ' — ' . (($r['description'] ?? '') ?: 'no response'));
+        }
+        return is_array($r) ? $r : ['ok' => false, 'description' => 'no response'];
     }
 }

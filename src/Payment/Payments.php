@@ -25,11 +25,28 @@ class Payments
     public const ST_CANCELLED = 'cancelled';
     public const ST_EXPIRED = 'expired';
 
+    /**
+     * بیشترین تعداد فاکتورِ «باز» مجاز برای هر کاربر.
+     * بدون سقف، کاربری که فاکتور می‌سازد و رها می‌کند می‌توانست با یک کلیک
+     * هزاران ردیف در دیتابیس بسازد.
+     */
+    public const MAX_OPEN_PAYMENTS = 5;
+
+    /**
+     * کلید کش «اسکیما ساخته شد» به تفکیک دیتابیس.
+     * بدون این کش، هر متد پرداخت (که چند بار در هر پیام صدا زده می‌شد) یک
+     * CREATE TABLE IF NOT EXISTS + PRAGMA/SHOW COLUMNS می‌فرستاد؛ یعنی ده‌ها
+     * رفت‌وبرگشت اضافه به دیتابیس برای هر پیام کاربر.
+     */
+    private static array $schemaReady = [];
+
     /** ساخت جدول/ستون در صورت نبودن (sqlite + mysql) */
     public static function ensureSchema(Store $store): void
     {
         $pdo = $store->getPdo();
         $driver = $store->getDriver();
+        $cacheKey = $store->getSchemaId();
+        if (isset(self::$schemaReady[$cacheKey])) return;
         if ($driver === 'mysql') {
             $pdo->exec("CREATE TABLE IF NOT EXISTS payments (
                 id INT AUTO_INCREMENT PRIMARY KEY,
@@ -73,11 +90,22 @@ class Payments
             )");
             $pdo->exec("CREATE INDEX IF NOT EXISTS idx_pay_user ON payments(user_id)");
             $pdo->exec("CREATE INDEX IF NOT EXISTS idx_pay_status ON payments(status)");
+            // ایندکس ext_id لازم است: fallbackهای IPN و «🔄 بررسی وضعیت» با همین ستون جست‌وجو می‌کنند
+            $pdo->exec("CREATE INDEX IF NOT EXISTS idx_pay_ext ON payments(ext_id)");
             try {
                 $cols = array_column($pdo->query("PRAGMA table_info(users)")->fetchAll(PDO::FETCH_ASSOC), 'name');
                 if (!in_array('bot_limit', $cols, true)) $pdo->exec("ALTER TABLE users ADD COLUMN bot_limit INTEGER DEFAULT 1");
             } catch (Throwable $e) { /* نادیده */ }
         }
+        // فقط وقتی علامت می‌زنیم که ساخت جدول واقعاً موفق بوده؛
+        // اگر CREATE خطا بدهد، درخواست بعدی دوباره تلاش می‌کند.
+        self::$schemaReady[$cacheKey] = true;
+    }
+
+    /** فقط برای تست: کش اسکیما را پاک می‌کند */
+    public static function resetSchemaCache(): void
+    {
+        self::$schemaReady = [];
     }
 
     private static function nowSql(Store $store): string
@@ -85,7 +113,60 @@ class Payments
         return $store->getDriver() === 'mysql' ? 'NOW()' : "datetime('now')";
     }
 
-    // ---------- لیمیت کاربر ----------
+    // ---------- ابزار متن/عدد ----------
+
+    /**
+     * ارقام فارسی (۰-۹) و عربی (٠-٩) را به لاتین تبدیل می‌کند و
+     * علامت‌های منفی نمایشی/عربی را هم به «-» می‌آورد.
+     * بدون این کار، ادمینی که «۵۰۰۰۰» یا «۱۰۰٬۰۰۰» تایپ کند
+     * با پیام «فقط عدد بفرستید» روبه‌رو می‌شد.
+     */
+    public static function normalizeDigits(string $s): string
+    {
+        $map = [
+            '۰' => '0', '۱' => '1', '۲' => '2', '۳' => '3', '۴' => '4',
+            '۵' => '5', '۶' => '6', '۷' => '7', '۸' => '8', '۹' => '9',
+            '٠' => '0', '١' => '1', '٢' => '2', '٣' => '3', '٤' => '4',
+            '٥' => '5', '٦' => '6', '٧' => '7', '٨' => '8', '٩' => '9',
+            '۰' => '0', '۱' => '1', '۲' => '2', '۳' => '3', '۴' => '4',
+            '۵' => '5', '۶' => '6', '۷' => '7', '۸' => '8', '۹' => '9',
+            // جداکنندهٔ هزارگان فارسی/عربی حذف، اعشار به نقطه
+            '٬' => '', '،' => '', ',' => '', '٫' => '.', ' ' => ' ',
+            '−' => '-', '–' => '-', '—' => '-',
+        ];
+        return strtr($s, $map);
+    }
+
+    /**
+     * عدد اعشاری از ورودی آزاد ادمین (ارقام فارسی + جداکنندهٔ هزارگان).
+     * خروجی null یعنی ورودی اصلاً عدد نبود.
+     */
+    public static function toNumber(string $s): ?float
+    {
+        $t = self::normalizeDigits($s);
+        $t = preg_replace('/[^0-9.\-]/', '', $t) ?? '';
+        if ($t === '' || !preg_match('/-?\d*\.?\d+/', $t)) return null;
+        return (float)$t;
+    }
+
+    /** فقط رقم (بعد از نرمال‌سازی)؛ برای قیمت‌ها و مبالغ */
+    public static function digitsOnly(string $s): string
+    {
+        return preg_replace('/[^0-9]/', '', self::normalizeDigits($s));
+    }
+
+    /**
+     * استخراج عدد صحیح از ورودی آزاد ادمین؛ منفی هم می‌پذیرد.
+     * خروجی null یعنی ورودی اصلاً عدد نبود.
+     */
+    public static function parseIntLoose(string $s): ?int
+    {
+        $t = self::normalizeDigits($s);
+        if (!preg_match('/-?\d+/', $t, $m)) return null;
+        return (int)$m[0];
+    }
+
+// ---------- لیمیت کاربر ----------
 
     public static function getUserLimit(Store $store, int $uid): int
     {
@@ -109,35 +190,63 @@ class Payments
         $st->execute([$limit, $uid]);
     }
 
+    /**
+     * افزایش/کاهش اتمیک سقف کاربر.
+     * نسخهٔ قبلی «بخوان، بعد بنویس» بود؛ دو IPN همزمان (که NOWPayments
+     * به‌صورت طبیعی تکرار می‌فرستد) هر دو یک مقدار می‌خواندند و یکی از
+     * افزایش‌ها گم می‌شد. اینجا خودِ دیتابیس جمع می‌زند.
+     * مقدار -1 یعنی نامحدود و دست‌نخورده می‌ماند.
+     */
     public static function addUserLimit(Store $store, int $uid, int $delta): int
     {
         self::ensureSchema($store);
         $cur = self::getUserLimit($store, $uid);
         if ($cur < 0) return $cur; // نامحدود می‌ماند
         $new = max(0, $cur + $delta);
-        self::setUserLimit($store, $uid, $new);
-        return $new;
+        // CASE WHEN تا به‌ازای هر سطر سقفِ منفی (نامحدود) تبدیل به عدد نشود
+        $sql = "UPDATE users SET bot_limit = CASE WHEN bot_limit < 0 THEN bot_limit ELSE MAX(0, bot_limit + ?) END WHERE user_id=?";
+        if ($store->getDriver() === 'sqlite') {
+            $sql = "UPDATE users SET bot_limit = CASE WHEN bot_limit < 0 THEN bot_limit ELSE MAX(0, COALESCE(bot_limit,0) + ?) END WHERE user_id=?";
+        }
+        $st = $store->getPdo()->prepare($sql);
+        $st->execute([$delta, $uid]);
+        return self::getUserLimit($store, $uid);
     }
 
     // ---------- پرداخت‌ها ----------
 
-    /** مبلغ موردنیاز برای ساخت: max(قیمت قالب، 0) + اگر سقف پر است قیمت اسلات */
+    /**
+     * مبلغ موردنیاز برای ساخت: قیمت قالب + اگر سقف پر است قیمت یک اسلات.
+     * خروجی: ['need_limit'=>bool, 'need_template'=>bool, 'blocked'=>bool, 'amount'=>int, 'slots'=>int]
+     *
+     * نکتهٔ 'blocked': کاربر مسدود (bot_limit=0) نباید فاکتور ساخت ببیند؛ چون
+     * پرداختِ او سقف را از ۰ به ۱ می‌برد و عملاً مسدودی ادمین را دور می‌زند.
+     */
     public static function requiredForBuild(Store $store, array $user, string $type, array $supers = []): array
     {
         // اگر درگاه لیمیت غیرفعال باشد، نیاز به لیمیت ندارد
         $limitEnabled = PaymentLimits::isActive($store);
         // اگر درگاه قالب غیرفعال باشد، نیاز به ووچر ندارد
         $templateEnabled = PaymentPricing::isActive($store);
-        
-        $needLimit = !$limitEnabled ? false : !PaymentLimits::canBuild($store, $user, $supers);
+        $blocked = PaymentLimits::isBlocked($store, $user, $supers);
+
+        $needLimit = $blocked ? false : ($limitEnabled ? !PaymentLimits::canBuild($store, $user, $supers) : false);
         $needTemplate = $templateEnabled
             && PaymentPricing::isPaid($store, $type)
             && !PaymentLimits::isAdminUnlimited($user, $supers)
             && self::countUsableTemplateVoucher($store, (int)$user['user_id'], $type) <= 0;
+        // کاربر مسدود فاکتور نمی‌گیرد؛ فقط باید پیام مسدودی را ببیند
+        if ($blocked) $needTemplate = false;
         $amount = 0;
         if ($needTemplate) $amount += PaymentPricing::templatePrice($store, $type);
         if ($needLimit) $amount += PaymentPricing::limitUnitPrice($store); // یک اسلات
-        return ['need_limit' => $needLimit, 'need_template' => $needTemplate, 'amount' => $amount, 'slots' => $needLimit ? 1 : 0];
+        return [
+            'need_limit' => $needLimit,
+            'need_template' => $needTemplate,
+            'blocked' => $blocked,
+            'amount' => $amount,
+            'slots' => $needLimit ? 1 : 0,
+        ];
     }
 
     public static function createPayment(Store $store, int $uid, string $kind, string $template, int $slots, int $amount, string $method = ''): int
@@ -153,11 +262,11 @@ class Payments
     /** پرداخت مرکب ساخت ربات: هم اسلات (اگر لازم) هم ووچر قالب (اگر لازم) در یک ردیف */
     public static function createBuildPayment(Store $store, int $uid, string $type, array $req, string $method): int
     {
-        $kind = $req['need_limit'] && !$req['need_template'] ? self::KIND_LIMIT
-            : (!$req['need_limit'] && $req['need_template'] ? self::KIND_TEMPLATE : self::KIND_LIMIT);
-        // اگر هر دو لازم است، kind=limit با template پر می‌شود تا grant هر دو را اعمال کند
-        $tpl = $req['need_template'] ? $type : '';
-        return self::createPayment($store, $uid, $kind, $tpl, $req['slots'], $req['amount'], $method);
+        // kind=limit برای حالت «فقط اسلات» و حالت مرکب (اسلات + قالب با هم)
+        // تا grant یک‌بار هر دو اثر را اعمال کند؛ فقط وقتی قالب لازم است و اسلات نه، kind=template.
+        $kind = (!empty($req['need_limit']) || empty($req['need_template'])) ? self::KIND_LIMIT : self::KIND_TEMPLATE;
+        $tpl = !empty($req['need_template']) ? $type : '';
+        return self::createPayment($store, $uid, $kind, $tpl, (int)($req['slots'] ?? 0), (int)($req['amount'] ?? 0), $method);
     }
 
     public static function getPayment(Store $store, int $id): ?array
@@ -195,14 +304,45 @@ class Payments
         return $st->fetchAll(PDO::FETCH_ASSOC);
     }
 
+    /**
+     * صف بررسی ادمین.
+     * «pending» عمداً نیست: آن وضعیت یعنی فاکتور ساخته شده ولی کاربر هیچ
+     * روشی انتخاب نکرده (یا رها کرده) — نه چیزی برای تأیید، نه چیزی که
+     * باید صف ادمین را پر کند. فقط چیزی می‌آید که واقعاً منتظر اقدام است.
+     */
     public static function pendingAdminList(Store $store, int $limit = 20): array
     {
         self::ensureSchema($store);
         $limit = max(1, min(50, $limit));
         $st = $store->getPdo()->query(
-            "SELECT * FROM payments WHERE status IN ('await_admin','await_receipt','await_pay','pending') ORDER BY id DESC LIMIT {$limit}"
+            "SELECT * FROM payments WHERE status IN ('await_admin','await_receipt','await_pay') ORDER BY id DESC LIMIT {$limit}"
         );
         return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /**
+     * شمار فاکتورهای صف ادمین — برای شمارندهٔ منوی اصلی.
+     * منوی اصلی روی هر پیام ساخته می‌شود؛ کشیدن ۵۰ ردیف کامل برای فقط شمارش،
+     * بار دیتابیس را بی‌دلیل بالا می‌برد.
+     */
+    public static function pendingAdminCount(Store $store): int
+    {
+        try { self::ensureSchema($store); } catch (Throwable $e) { return 0; }
+        $st = $store->getPdo()->query(
+            "SELECT COUNT(*) FROM payments WHERE status IN ('await_admin','await_receipt','await_pay')"
+        );
+        return (int)$st->fetchColumn();
+    }
+
+    /** شمار فاکتورهای باز (هنوز نهایی/لغو نشده) یک کاربر */
+    public static function openPaymentCount(Store $store, int $uid): int
+    {
+        self::ensureSchema($store);
+        $st = $store->getPdo()->prepare(
+            "SELECT COUNT(*) FROM payments WHERE user_id=? AND status IN (?,?,?,?)"
+        );
+        $st->execute([$uid, self::ST_PENDING, self::ST_AWAIT_RECEIPT, self::ST_AWAIT_ADMIN, self::ST_AWAIT_PAY]);
+        return (int)$st->fetchColumn();
     }
 
     public static function setMethod(Store $store, int $id, string $method, string $status, string $extId = '', string $payUrl = ''): void
@@ -212,11 +352,27 @@ class Payments
         $st->execute([$method, $status, $extId, $payUrl, $id]);
     }
 
-    public static function setReceipt(Store $store, int $id, string $receipt): void
+    /**
+     * ثبت رسید و بردن پرداخت به صف بررسی ادمین.
+     * گارد وضعیت لازم است: بدون آن، رسیدی که بعد از لغو/رد فرستاده شود
+     * پرداخت مرده را دوباره زنده می‌کرد و ادمین نادیده می‌گرفتش.
+     */
+    public static function setReceipt(Store $store, int $id, string $receipt): bool
     {
         self::ensureSchema($store);
-        $st = $store->getPdo()->prepare("UPDATE payments SET receipt=?, status=? WHERE id=?");
-        $st->execute([$receipt, self::ST_AWAIT_ADMIN, $id]);
+        $st = $store->getPdo()->prepare(
+            "UPDATE payments SET receipt=?, status=? WHERE id=? AND status IN (?,?)"
+        );
+        $st->execute([$receipt, self::ST_AWAIT_ADMIN, $id, self::ST_AWAIT_RECEIPT, self::ST_PENDING]);
+        return $st->rowCount() > 0;
+    }
+
+    /** ثبت/به‌روزرسانی شناسهٔ بیرونی سرویس (invoice_id یا payment_id) */
+    public static function setExtId(Store $store, int $id, string $extId): void
+    {
+        self::ensureSchema($store);
+        $st = $store->getPdo()->prepare("UPDATE payments SET ext_id=? WHERE id=?");
+        $st->execute([$extId, $id]);
     }
 
     public static function setStatus(Store $store, int $id, string $status): void
@@ -274,37 +430,66 @@ class Payments
             $new = self::addUserLimit($store, (int)$payment['user_id'], $slots);
             $notes[] = "سقف به " . PaymentLimits::formatLimit($new) . " رسید";
         }
-        if ($tpl !== '') $notes[] = "مجوز ساخت «{$tpl}» صادر شد";
+        if ($tpl !== '') $notes[] = "مجوز ساخت «" . htmlspecialchars($tpl) . "» صادر شد";
         if ($notes === []) $notes[] = "ثبت شد";
         return implode('، ', $notes);
     }
 
-    /** تأیید ادمین برای کارت‌به‌کارت: paid + grant */
+    /**
+     * تأیید ادمین برای کارت‌به‌کارت: paid + grant
+     *
+     * دو نکته که قبلاً غلط بود:
+     * ۱) «pending» (فاکتوری که کاربر هرگز روشی برایش انتخاب نکرد) هم تأییدپذیر
+     *    بود؛ یعنی یک ردیف رهاشده را می‌شد تأیید کرد و رایگان اسلات داد.
+     * ۲) بررسی وضعیت و سپس setStatus جدا بود؛ دو کلیک همزمان روی «تأیید»
+     *    هر دو از گارد رد می‌شدند و لیمیت را دوبار اضافه می‌کردند.
+     *    حالا UPDATE خودش شرط وضعیت دارد و فقط کسی که واقعاً سطر را برداشته grant می‌کند.
+     */
     public static function approveByAdmin(Store $store, int $id): ?array
     {
-        $p = self::getPayment($store, $id);
-        if (!$p || !in_array($p['status'], [self::ST_AWAIT_ADMIN, self::ST_AWAIT_RECEIPT, self::ST_PENDING], true)) return null;
-        self::setStatus($store, $id, self::ST_PAID);
-        $p = self::getPayment($store, $id);
-        $note = self::grant($store, $p);
-        $p['grant_note'] = $note;
-        return $p;
-    }
-
-    /** پرداخت کریپتویی که IPN/confirmed آمده: idempotent — اگر قبلاً paid/used بود دوباره grant نکن */
-    public static function markCryptoPaid(Store $store, int $id): ?array
-    {
+        self::ensureSchema($store);
+        $now = self::nowSql($store);
+        $st = $store->getPdo()->prepare(
+            "UPDATE payments SET status=?, paid_at={$now}, handled_at={$now} WHERE id=? AND status IN (?,?)"
+        );
+        $st->execute([self::ST_PAID, $id, self::ST_AWAIT_ADMIN, self::ST_AWAIT_RECEIPT]);
+        if ($st->rowCount() === 0) return null;
         $p = self::getPayment($store, $id);
         if (!$p) return null;
-        if (in_array($p['status'], [self::ST_PAID, self::ST_USED], true)) return $p; // تکراری
-        if (!in_array($p['status'], [self::ST_AWAIT_PAY, self::ST_PENDING], true)) return null;
-        self::setStatus($store, $id, self::ST_PAID);
-        $p = self::getPayment($store, $id);
-        $note = self::grant($store, $p);
-        $p['grant_note'] = $note;
+        $p['grant_note'] = self::grant($store, $p);
         return $p;
     }
 
+    /**
+     * پرداخت کریپتویی که IPN/«بررسی وضعیت» تأییدش کرد.
+     * idempotent و اتمیک: فقط گذار اولیهٔ وضعیت grant می‌کند، پس IPN تکراری
+     * (که NOWPayments عادی است) هیچ اثری ندارد.
+     * اگر پرداخت لغو/رد شده باشد null برمی‌گرداند تا IPN چیزی احیا نکند.
+     */
+    public static function markCryptoPaid(Store $store, int $id): ?array
+    {
+        self::ensureSchema($store);
+        $now = self::nowSql($store);
+        $st = $store->getPdo()->prepare(
+            "UPDATE payments SET status=?, paid_at={$now}, handled_at={$now} WHERE id=? AND status IN (?,?)"
+        );
+        $st->execute([self::ST_PAID, $id, self::ST_AWAIT_PAY, self::ST_PENDING]);
+        if ($st->rowCount() === 0) {
+            // اگر قبلاً پرداخت شده، گزارش وضعیت نهایی را برمی‌گردانیم (idempotent)
+            $p = self::getPayment($store, $id);
+            if ($p && in_array($p['status'], [self::ST_PAID, self::ST_USED], true)) return $p;
+            return null;
+        }
+        $p = self::getPayment($store, $id);
+        if (!$p) return null;
+        $p['grant_note'] = self::grant($store, $p);
+        return $p;
+    }
+
+    /**
+     * یک خط خلاصه از وضعیت یک پرداخت.
+     * خروجی HTML است (پیام‌ها parse_mode=HTML دارند) ⇒ هر فیلدِ دیتابیس escape می‌شود.
+     */
     public static function describe(array $p): string
     {
         $stMap = [
@@ -313,10 +498,11 @@ class Payments
             'paid' => '✅ پرداخت‌شده', 'used' => '🎟️ مصرف‌شده',
             'declined' => '❌ رد شده', 'cancelled' => '🚫 لغو شده', 'expired' => '⌛ منقضی',
         ];
-        $st = $stMap[$p['status'] ?? ''] ?? ($p['status'] ?? '');
+        $raw = (string)($p['status'] ?? '');
+        $st = $stMap[$raw] ?? ($raw !== '' ? $raw : 'نامشخص');
         $kind = ($p['kind'] ?? '') === 'template' ? 'قالب' : 'لیمیت';
-        $tpl = ($p['template'] ?? '') !== '' ? " ({$p['template']})" : '';
+        $tpl = (string)($p['template'] ?? '') !== '' ? ' (' . htmlspecialchars((string)$p['template']) . ')' : '';
         $slots = (int)($p['slots'] ?? 0) > 0 ? " [{$p['slots']} اسلات]" : '';
-        return "#{$p['id']} {$kind}{$tpl}{$slots} — " . number_format((int)($p['amount'] ?? 0)) . " تومان — {$st}";
+        return "#{$p['id']} {$kind}{$tpl}{$slots} — " . number_format((int)($p['amount'] ?? 0)) . " تومان — " . htmlspecialchars($st);
     }
 }

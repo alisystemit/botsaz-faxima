@@ -23,6 +23,11 @@ class PaymentPanel
         if ($limit >= 0) $t .= "ربات‌های فعلی: <b>{$count}</b>\n";
         $t .= "قیمت هر اسلات اضافه: <b>" . PaymentPricing::formatToman($unit) . "</b>\n\n";
 
+        // مسدودی اول از همه گفته شود؛ وگرنه کاربر فکر می‌کند با خرید اسلات باز می‌شود
+        if (PaymentLimits::isBlocked($store, $user, $supers)) {
+            $t .= "⛔️ " . PaymentLimits::blockedNotice() . "\n";
+        }
+
         $vars = [
             'amount' => PaymentPricing::formatToman($unit),
             'slots' => '۱',
@@ -53,10 +58,16 @@ class PaymentPanel
         return $t;
     }
 
-    public static function limitShopKb(Store $store): string
+    public static function limitShopKb(Store $store, ?array $user = null, array $supers = []): string
     {
         $rows = [];
-        if (PaymentGateways::isEnabled($store, PaymentGateways::LIMIT)) {
+        // دکمهٔ خرید اسلات فقط وقتی نشان داده می‌شود که قیمتش واقعاً تعیین شده باشد؛
+        // با قیمت صفر، دکمه‌ها «مرده» بودند و کاربر با خطا مواجه می‌شد.
+        // و اگر کاربر مسدود است اصلاً دکمهٔ خرید اسلات نباید باشد (خرید ⇒ بازشدن مسدودی).
+        $buyable = PaymentGateways::isEnabled($store, PaymentGateways::LIMIT)
+            && PaymentPricing::limitUnitPrice($store) > 0
+            && !($user !== null && PaymentLimits::isBlocked($store, $user, $supers));
+        if ($buyable) {
             $rows[] = [['text' => '➕ خرید ۱ اسلات', 'callback_data' => 'pay:buy:limit:1']];
             $rows[] = [['text' => '➕ خرید ۳ اسلات', 'callback_data' => 'pay:buy:limit:3']];
             $rows[] = [['text' => '➕ خرید ۵ اسلات', 'callback_data' => 'pay:buy:limit:5']];
@@ -103,7 +114,11 @@ class PaymentPanel
         if (!PaymentGateways::isEnabled($store, PaymentGateways::CARD)) $why[] = 'کارت‌به‌کارت غیرفعال است';
         elseif (!PaymentCard::isConfigured($store)) $why[] = 'شماره کارت ثبت نشده';
         if (!PaymentGateways::isEnabled($store, PaymentGateways::NOWPAY)) $why[] = 'NOWPayments غیرفعال است';
-        elseif (!PaymentNowPay::isConfigured($store)) $why[] = 'API key ثبت نشده';
+        else {
+            // دقیق بگو کدام کلید کم است؛ «API key ثبت نشده» وقتی مشکل ipn_secret است گمراه‌کننده بود
+            if (!PaymentNowPay::hasApiKey($store)) $why[] = 'کلید API ناقص است';
+            if (!PaymentNowPay::hasIpnSecret($store)) $why[] = 'IPN Secret ثبت نشده (تأیید خودکار ممکن نیست)';
+        }
         if ($why !== []) $t .= implode(' • ', $why) . "\n";
         $t .= "لطفاً بعداً تلاش کنید یا با ادمین در میان بگذارید.";
         return $t;
@@ -115,6 +130,11 @@ class PaymentPanel
         return PaymentGateways::availableMethods($store, $cfg) !== [];
     }
 
+    /**
+     * کیبورد بعد از ثبت رسید کارتی.
+     * «پرداخت‌های من» به‌جای برگشت مستقیم به منو، وضعیت را جلوی چشم کاربر می‌آورد
+     * (وگرنه رسید ثبت‌شده بود ولی کاربر هیچ راهی برای دیدن نتیجه نداشت).
+     */
     public static function receiptSentKb(int $paymentId): string
     {
         return BotApi::ikb([
@@ -140,14 +160,60 @@ class PaymentPanel
         return BotApi::ikb($rows);
     }
 
-    /** فهرست پرداخت‌های کاربر */
+    /** فهرست پرداخت‌های کاربر (یک کوئری؛ راهنما از همان فهرست مشتق می‌شود) */
     public static function myPaymentsText(Store $store, int $uid): string
     {
-        $list = Payments::userPayments($store, $uid, 10);
+        $list = Payments::userPayments($store, $uid, 20);
         if ($list === []) return "🧾 <b>پرداخت‌های من</b>\n\nهنوز پرداختی ثبت نشده.";
         $t = "🧾 <b>پرداخت‌های من</b>\n\n";
-        foreach ($list as $p) $t .= Payments::describe($p) . "\n";
-        return $t . "\nبا «🔄 بررسی» وضعیت پرداخت کارتی به‌روز می‌شود.";
+        foreach (array_slice($list, 0, 10) as $p) $t .= Payments::describe($p) . "\n";
+        return $t . "\n" . self::myPaymentsHint($list);
+    }
+
+    /** راهنمای پایین فهرست پرداخت‌ها — اگر فاکتور کریپتویی باز باشد، «بررسی وضعیت» معنی دارد */
+    private static function myPaymentsHint(array $list): string
+    {
+        if (self::openCryptoPayments($list) !== []) {
+            return "با «🔄 بررسی وضعیت» می‌توانید پرداخت کریپتویی را دستی هم تأیید کنید (اگر IPN به سرور نرسد).";
+        }
+        if (self::openCardPayments($list) !== []) return "رسید کارتی شما ثبت شده و در صف بررسی ادمین است.";
+        return "";
+    }
+
+    /** فهرست فاکتورهای کریپتوییِ باز (در انتظار پرداخت) */
+    private static function openCryptoPayments(array $list): array
+    {
+        return array_values(array_filter($list,
+            fn($p) => $p['method'] === Payments::METHOD_NOWPAY && $p['status'] === Payments::ST_AWAIT_PAY
+        ));
+    }
+
+    /** فهرست فاکتورهای کارتیِ باز (رسید ثبت‌شده و در انتظار تأیید) */
+    private static function openCardPayments(array $list): array
+    {
+        return array_values(array_filter($list,
+            fn($p) => $p['method'] === Payments::METHOD_CARD && in_array($p['status'], [Payments::ST_AWAIT_RECEIPT, Payments::ST_AWAIT_ADMIN], true)
+        ));
+    }
+
+    /**
+     * کیبورد «پرداخت‌های من».
+     * برای هر فاکتور کریپتوییِ باز یک «🔄 بررسی وضعیت» می‌گذارد تا متن راهنما
+     * دروغ نگوید (قبلاً متن «🔄 بررسی» را می‌گفت ولی چنین دکمه‌ای نبود).
+     */
+    public static function myPaymentsKb(Store $store, int $uid): string
+    {
+        $rows = [];
+        foreach (self::openCryptoPayments(Payments::userPayments($store, $uid, 20)) as $p) {
+            $id = (int)$p['id'];
+            $txt = '🔄 بررسی وضعیت #' . $id;
+            if (trim((string)($p['pay_url'] ?? '')) !== '') {
+                $rows[] = [['text' => $txt, 'callback_data' => "pay:check:{$id}"]];
+            }
+        }
+        $rows[] = [['text' => '💳 فروشگاه لیمیت', 'callback_data' => 'pay:shop']];
+        $rows[] = [['text' => Nav::BACK, 'callback_data' => Nav::CB_BACK_MAIN]];
+        return BotApi::ikb($rows);
     }
 
     // ---- ادمین ----
@@ -169,7 +235,15 @@ class PaymentPanel
         $t .= "\n<b>پیکربندی</b>\n";
         $t .= "کارت: <code>" . htmlspecialchars($card !== '' ? $card : 'ثبت نشده') . "</code>\n";
         $t .= "NOWPayments: {$nowOk}\n";
-        $t .= "در انتظار بررسی: <b>" . count(Payments::pendingAdminList($store, 50)) . "</b>";
+        // کدام کلید کم است تا ادمین بداند دقیقاً چه چیزی را باید وارد کند
+        if ($nowOk === '❌') {
+            $miss = [];
+            if (!PaymentNowPay::hasApiKey($store)) $miss[] = 'API Key';
+            if (!PaymentNowPay::hasIpnSecret($store)) $miss[] = 'IPN Secret';
+            if ($miss !== []) $t .= "↳ ناقص: <b>" . implode(' + ', $miss) . "</b>\n";
+        }
+        if ($unit <= 0) $t .= "⚠️ قیمت اسلات صفر است ⇒ دکمهٔ خرید اسلات نمایش داده نمی‌شود.\n";
+        $t .= "در انتظار بررسی: <b>" . Payments::pendingAdminCount($store) . "</b>";
         return $t;
     }
 
@@ -201,10 +275,18 @@ class PaymentPanel
         return BotApi::ikb($rows);
     }
 
-    public static function reviewKb(int $paymentId): string
+    /**
+     * کیبورد بررسی یک پرداخت.
+     * برای فاکتور کریپتویی «تأیید» معنا ندارد (تأییدش IPN/سرویس می‌کند)،
+     * پس دکمهٔ آن «🔄 استعلام وضعیت» می‌شود تا ادمین بتواند دستی هم بپرسد.
+     */
+    public static function reviewKb(int $paymentId, string $method = ''): string
     {
+        $first = ($method === Payments::METHOD_NOWPAY)
+            ? ['text' => '🔄 استعلام وضعیت', 'callback_data' => "payadmin:verify:{$paymentId}"]
+            : ['text' => '✅ تأیید', 'callback_data' => "payadmin:approve:{$paymentId}"];
         return BotApi::ikb([
-            [['text' => '✅ تأیید', 'callback_data' => "payadmin:approve:{$paymentId}"], ['text' => '❌ رد', 'callback_data' => "payadmin:decline:{$paymentId}"]],
+            [$first, ['text' => '❌ رد', 'callback_data' => "payadmin:decline:{$paymentId}"]],
             [['text' => '🔄 بررسی دوباره', 'callback_data' => 'payadmin:list'], ['text' => Nav::BACK, 'callback_data' => 'payadmin:panel']],
         ]);
     }

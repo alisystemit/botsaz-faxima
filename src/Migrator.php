@@ -139,6 +139,8 @@ class Migrator
                 )");
                 $this->pdo->exec("CREATE INDEX IF NOT EXISTS idx_pay_user ON payments(user_id)");
                 $this->pdo->exec("CREATE INDEX IF NOT EXISTS idx_pay_status ON payments(status)");
+                // پاریتی با MySQL: fallbackهای IPN و «🔄 بررسی وضعیت» روی ext_id جست‌وجو می‌کنند
+                $this->pdo->exec("CREATE INDEX IF NOT EXISTS idx_pay_ext ON payments(ext_id)");
             } else {
                 $this->pdo->exec("CREATE TABLE IF NOT EXISTS payments (
                     id INT AUTO_INCREMENT PRIMARY KEY,

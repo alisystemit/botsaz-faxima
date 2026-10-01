@@ -48,6 +48,28 @@ class PaymentLimits
         return self::botCount($store, (int)$user['user_id']) < $limit;
     }
 
+    /**
+     * آیا کاربر صراحتاً مسدود شده است؟ (bot_limit = 0)
+     *
+     * این با «سقف پر است» فرق دارد و تفکیکش حیاتی بود: قبلاً کاربر مسدود
+     * می‌توانست از فروشگاه یک اسلات بخرد و addUserLimit سقفش را از ۰ به ۱
+     * می‌برد — یعنی مسدودی ادمین با یک پرداخت دور زده می‌شد.
+     * حالا کاربر مسدود نه می‌تواند اسلات بخرد و نه فاکتور ساخت می‌شود.
+     */
+    public static function isBlocked(Store $store, array $user, array $supers = []): bool
+    {
+        if (self::isAdminUnlimited($user, $supers)) return false;
+        if (!self::isActive($store)) return false;
+        return Payments::getUserLimit($store, (int)($user['user_id'] ?? 0)) === 0;
+    }
+
+    /** پیام یکسانِ مسدودی — جای یک منبع حقیقت */
+    public static function blockedNotice(): string
+    {
+        return "⛔️ حساب شما مسدود است و امکان ساخت ربات یا خرید اسلات وجود ندارد.\n"
+            . "اگر فکر می‌کنید اشتباه شده، با ادمین تماس بگیرید.";
+    }
+
     /** چند اسلات خالی مانده؟ نامحدود => -1 */
     public static function remaining(Store $store, array $user, array $supers = []): int
     {

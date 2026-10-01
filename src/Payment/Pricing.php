@@ -13,9 +13,8 @@ class PaymentPricing
     /** قیمت یک قالب (تومان)؛ ناشناخته => 0 */
     public static function templatePrice(Store $store, string $type): int
     {
-        $raw = $store->getSetting(self::priceKey($type), '0');
-        $v = (int)preg_replace('/[^0-9]/', '', (string)$raw);
-        return max(0, $v);
+        $raw = (string)($store->getSetting(self::priceKey($type), '0') ?? '0');
+        return (int)Payments::digitsOnly($raw);
     }
 
     public static function setTemplatePrice(Store $store, string $type, int $toman): void
@@ -26,8 +25,8 @@ class PaymentPricing
     /** قیمت هر اسلات اضافه لیمیت (تومان) */
     public static function limitUnitPrice(Store $store): int
     {
-        $raw = $store->getSetting('pay_limit_price', '50000');
-        return max(0, (int)preg_replace('/[^0-9]/', '', (string)$raw));
+        $raw = (string)($store->getSetting('pay_limit_price', '50000') ?? '50000');
+        return (int)Payments::digitsOnly($raw);
     }
 
     public static function setLimitUnitPrice(Store $store, int $toman): void
@@ -57,8 +56,8 @@ class PaymentPricing
     /** نرخ تبدیل تومان به دلار برای فاکتور NOWPayments */
     public static function tomanPerUsd(Store $store): float
     {
-        $raw = (float)($store->getSetting('pay_toman_per_usd', '100000') ?? '100000');
-        return $raw > 0 ? $raw : 100000.0;
+        $raw = Payments::toNumber((string)($store->getSetting('pay_toman_per_usd', '100000') ?? '100000'));
+        return ($raw !== null && $raw > 0) ? $raw : 100000.0;
     }
 
     public static function setTomanPerUsd(Store $store, float $rate): void
@@ -66,9 +65,23 @@ class PaymentPricing
         $store->setSetting('pay_toman_per_usd', (string)($rate > 0 ? $rate : 100000));
     }
 
+    /**
+     * کمترین مبلغ قابل قبول NOWPayments (سرویس زیر این مقدار را رد می‌کند).
+     * اگر مبلغ تومانی کاربر از این کمتر شود، به این حد می‌رسد تا فاکتور ساخته شود.
+     */
+    public const NOWPAY_MIN_USD = 0.5;
+
+    /**
+     * تبدیل تومان به دلار برای فاکتور.
+     * گِرد کردن به بالا (نه پایین): با round پایین، هر ۵۰٬۰۰۰ تومان = ۰٫۴۹ دلار
+     * می‌شد و فروشنده از هر فاکتور ضرر می‌کرد. همچنین مبالغ کوچک به صفر
+     * گِرد می‌شدند و سرویس خطا می‌داد.
+     */
     public static function tomanToUsd(int $toman, float $rate): float
     {
         if ($rate <= 0) $rate = 100000.0;
-        return round($toman / $rate, 2);
+        if ($toman <= 0) return 0.0;
+        $usd = ceil(($toman / $rate) * 100) / 100;   // همیشه رو به بالا، دو رقم
+        return max(self::NOWPAY_MIN_USD, $usd);
     }
 }

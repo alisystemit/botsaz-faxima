@@ -23,9 +23,26 @@ class PaymentNowPay
         return trim((string)(($cfg['nowpayments']['ipn_secret'] ?? '') ?? ''));
     }
 
-    public static function isConfigured(Store $store, ?array $cfg = null): bool
+    /** فقط کلید API موجود است؟ (برای پیام خطای دقیق‌تر) */
+    public static function hasApiKey(Store $store, ?array $cfg = null): bool
     {
         return self::apiKey($store, $cfg) !== '';
+    }
+
+    public static function hasIpnSecret(Store $store, ?array $cfg = null): bool
+    {
+        return self::ipnSecret($store, $cfg) !== '';
+    }
+
+    /**
+     * آیا درگاه کریپتو کامل پیکربندی شده؟
+     * هر دو کلید لازم‌اند: بدون ipn_secret هیچ IPNی تأیید نمی‌شود، پس کاربر
+     * پول می‌دهد و اعتبارش دستی باید تأیید شود — یعنی نباید اصلاً روش پرداخت
+     * کریپتو به او پیشنهاد شود. قبلاً فقط api_key چک می‌شد و همین اتفاق می‌افتاد.
+     */
+    public static function isConfigured(Store $store, ?array $cfg = null): bool
+    {
+        return self::hasApiKey($store, $cfg) && self::hasIpnSecret($store, $cfg);
     }
 
     public static function setCredentials(Store $store, string $apiKey, string $ipnSecret): void
@@ -63,11 +80,52 @@ class PaymentNowPay
         return ['ok' => true, 'invoice_id' => $invoiceId, 'pay_url' => $payUrl, 'raw' => $d];
     }
 
-    /** استعلام وضعیت پرداخت/فاکتور */
-    public static function fetchStatus(string $apiKey, string $invoiceOrPaymentId): array
+    /** استعلام وضعیت یک payment_id */
+    public static function fetchPayment(string $apiKey, string $paymentId): array
     {
-        if ($apiKey === '' || $invoiceOrPaymentId === '') return ['ok' => false, 'error' => 'invalid params'];
-        return self::http('GET', '/payment/' . rawurlencode($invoiceOrPaymentId), $apiKey, null);
+        if ($apiKey === '' || $paymentId === '') return ['ok' => false, 'error' => 'invalid params'];
+        return self::http('GET', '/payment/' . rawurlencode($paymentId), $apiKey, null);
+    }
+
+    /** استخراج payment_id از پاسخ فاکتور */
+    public static function paymentIdFromInvoice(array $invoice): string
+    {
+        foreach (['payment_id', 'paymentId'] as $k) {
+            if (!empty($invoice[$k])) return (string)$invoice[$k];
+        }
+        return '';
+    }
+
+    /**
+     * استعلام وضعیت با شناسه‌ای که ما ذخیره کرده‌ایم.
+     *
+     * ما «invoice_id» را ذخیره می‌کنیم، ولی endpoint وضعیتِ NOWPayments
+     * یعنی GET /v1/payment/{payment_id} و invoice_id را نمی‌پذیرد.
+     * پس اول فاکتور را می‌خوانیم تا payment_id را دربیاوریم و بعد وضعیت را می‌گیریم.
+     * اگر شناسه از قبل payment_id باشد، همان مسیر /payment جواب می‌دهد.
+     */
+    public static function fetchStatus(string $apiKey, string $id): array
+    {
+        if ($apiKey === '' || $id === '') return ['ok' => false, 'error' => 'invalid params'];
+
+        // مسیر مستقیم (وقتی شناسه payment_id است)
+        $res = self::fetchPayment($apiKey, $id);
+        if (!empty($res['ok'])) {
+            $res['payment_id'] = self::paymentIdFromInvoice((array)($res['data'] ?? [])) ?: $id;
+            return $res;
+        }
+
+        // مسیر فاکتور: invoice_id ⇒ payment_id ⇒ وضعیت
+        $inv = self::http('GET', '/invoice/' . rawurlencode($id), $apiKey, null);
+        if (empty($inv['ok'])) return $inv; // هر دو شکست خوردند ⇒ خطای واقعی
+        $pid = self::paymentIdFromInvoice((array)($inv['data'] ?? []));
+        if ($pid === '') {
+            // فاکتور هنوز به payment وصل نشده (مشتری هنوز صفحهٔ پرداخت را باز نکرده)
+            return ['ok' => true, 'data' => ['payment_status' => 'waiting'], 'body' => (string)($inv['body'] ?? ''), 'payment_id' => ''];
+        }
+        $out = self::fetchPayment($apiKey, $pid);
+        $out['payment_id'] = $pid;
+        return $out;
     }
 
     /** آیا وضعیت NOWPayments به معنی «پرداخت شده» است؟ */

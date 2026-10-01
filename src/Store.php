@@ -9,6 +9,7 @@ class Store
 {
     private PDO $pdo;
     private string $driver; // 'sqlite' | 'mysql'
+    private string $schemaId; // شناسهٔ یکتای دیتابیس برای کش اسکیمای ماژول‌ها
 
     public function __construct(string $sqlitePath, array $cfg = [])
     {
@@ -24,6 +25,7 @@ class Store
             $this->pdo->exec('PRAGMA journal_mode = WAL');
             $this->pdo->exec('PRAGMA synchronous = NORMAL');
             $this->driver = 'sqlite';
+            $this->schemaId = 'sqlite:' . $sqlitePath;
             $this->initSqlite();
             return;
         }
@@ -39,8 +41,12 @@ class Store
         $pdo->exec("USE `{$dbName}`");
         $this->pdo = $pdo;
         $this->driver = 'mysql';
+        $this->schemaId = 'mysql:' . $host . ':' . $port . ':' . $dbName;
         $this->initMysql();
     }
+
+    /** شناسهٔ یکتای این دیتابیس — ماژول‌ها برای کش «اسکیما آماده است» ازش استفاده می‌کنند */
+    public function getSchemaId(): string { return $this->schemaId; }
 
     public function getDriver(): string { return $this->driver; }
 
