@@ -4,7 +4,7 @@
 
 class Migrator
 {
-    private const SCHEMA_VERSION = 5;
+    private const SCHEMA_VERSION = 6;
     private PDO $pdo;
     private string $driver;
 
@@ -53,6 +53,12 @@ class Migrator
                 throw new Exception('tables missing: ' . implode(', ', $missing));
             }
             $results['v5'] = 'all tables verified';
+        }
+        if ($currentVersion < 6) {
+            // v6: سیستم پرداخت/لیمیت — جدول payments + ستون users.bot_limit
+            $this->createPaymentsTable();
+            $this->ensureUserBotLimit();
+            $results['v6'] = 'payments table + users.bot_limit ensured';
         }
 
         $this->setVersion(self::SCHEMA_VERSION);
@@ -107,6 +113,75 @@ class Migrator
             $st->execute([$version]);
         } catch (Exception $e) {
             // جدول ممکن است قبلاً وجود داشته باشد
+        }
+    }
+
+    /** v6: جدول payments */
+    private function createPaymentsTable(): void
+    {
+        try {
+            if ($this->driver === 'sqlite') {
+                $this->pdo->exec("CREATE TABLE IF NOT EXISTS payments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    kind TEXT NOT NULL,
+                    template TEXT DEFAULT '',
+                    slots INTEGER DEFAULT 0,
+                    amount INTEGER DEFAULT 0,
+                    method TEXT DEFAULT '',
+                    status TEXT DEFAULT 'pending',
+                    receipt TEXT DEFAULT '',
+                    ext_id TEXT DEFAULT '',
+                    pay_url TEXT DEFAULT '',
+                    created_at TEXT DEFAULT (datetime('now')),
+                    paid_at TEXT DEFAULT NULL,
+                    handled_at TEXT DEFAULT NULL
+                )");
+                $this->pdo->exec("CREATE INDEX IF NOT EXISTS idx_pay_user ON payments(user_id)");
+                $this->pdo->exec("CREATE INDEX IF NOT EXISTS idx_pay_status ON payments(status)");
+            } else {
+                $this->pdo->exec("CREATE TABLE IF NOT EXISTS payments (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    user_id BIGINT NOT NULL,
+                    kind VARCHAR(20) NOT NULL,
+                    template VARCHAR(20) DEFAULT '',
+                    slots INT DEFAULT 0,
+                    amount BIGINT DEFAULT 0,
+                    method VARCHAR(20) DEFAULT '',
+                    status VARCHAR(20) DEFAULT 'pending',
+                    receipt TEXT,
+                    ext_id VARCHAR(120) DEFAULT '',
+                    pay_url TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    paid_at TIMESTAMP NULL DEFAULT NULL,
+                    handled_at TIMESTAMP NULL DEFAULT NULL,
+                    INDEX idx_pay_user (user_id),
+                    INDEX idx_pay_status (status),
+                    INDEX idx_pay_ext (ext_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+            }
+        } catch (Exception $e) {
+            error_log("Migrator v6 payments skipped: " . $e->getMessage());
+        }
+    }
+
+    /** v6: ستون users.bot_limit (1- = نامحدود) */
+    private function ensureUserBotLimit(): void
+    {
+        try {
+            if ($this->driver === 'sqlite') {
+                $cols = array_column($this->pdo->query("PRAGMA table_info(users)")->fetchAll(PDO::FETCH_ASSOC), 'name');
+                if (!in_array('bot_limit', $cols, true)) {
+                    $this->pdo->exec("ALTER TABLE users ADD COLUMN bot_limit INTEGER DEFAULT 1");
+                }
+            } else {
+                $st = $this->pdo->query("SHOW COLUMNS FROM users LIKE 'bot_limit'");
+                if ($st->fetch() === false) {
+                    $this->pdo->exec("ALTER TABLE users ADD COLUMN bot_limit INT DEFAULT 1");
+                }
+            }
+        } catch (Exception $e) {
+            error_log("Migrator v6 bot_limit skipped: " . $e->getMessage());
         }
     }
 }

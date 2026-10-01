@@ -9,6 +9,13 @@ require_once __DIR__ . '/src/Manager.php';
 require_once __DIR__ . '/src/Logger.php';
 require_once __DIR__ . '/src/DbBackup.php';
 require_once __DIR__ . '/src/Nav.php';
+require_once __DIR__ . '/src/Payment/Payments.php';
+require_once __DIR__ . '/src/Payment/Gateways.php';
+require_once __DIR__ . '/src/Payment/Limits.php';
+require_once __DIR__ . '/src/Payment/Pricing.php';
+require_once __DIR__ . '/src/Payment/CardToCard.php';
+require_once __DIR__ . '/src/Payment/NowPayments.php';
+require_once __DIR__ . '/src/Payment/AdminPanel.php';
 
 $cfgFile = __DIR__ . '/config.php';
 if (!file_exists($cfgFile)) { http_response_code(500); echo json_encode(['ok'=>false,'error'=>'config.php missing']); exit; }
@@ -141,7 +148,9 @@ if ($msg) {
     $chatId = $msg['chat']['id'];
 
     // ===== ورودی غیرمتنی =====
-    if ($text === '' && !isset($msg['text'])) {
+    // استثنا: رسید کارت‌به‌کارت می‌تواند عکس/فایل باشد — آن را به handleStep می‌سپاریم
+    $isReceiptStep = ($user['step'] ?? '') === 'await_card_receipt';
+    if ($text === '' && !isset($msg['text']) && !$isReceiptStep) {
         if ($updateId !== null) $store->markUpdateProcessed($updateId);
         echo json_encode(['ok'=>true]); exit;
     }
@@ -163,22 +172,98 @@ function mainMenu(array $u, array $supers, Store $store = null): string {
     if (isAdmin($u, $supers)) {
         $pendingCount = $store ? $store->countPendingRequests() : 0;
         $pendingText = $pendingCount > 0 ? " ({$pendingCount})" : "";
+        $payPending = 0;
+        if ($store) { try { $payPending = count(Payments::pendingAdminList($store, 50)); } catch (Throwable $e) { $payPending = 0; } }
+        $payText = $payPending > 0 ? " (🧾{$payPending})" : "";
         return BotApi::kb([
             [['text' => '🤖 ساخت ربات جدید'], ['text' => '📦 ربات‌های من']],
             [['text' => '📊 آمار'], ['text' => '📣 همگانی']],
             [['text' => '⏰ کرون'], ['text' => '👥 کاربران مجاز']],
             [['text' => '💾 بکاپ دیتابیس'], ['text' => "📋 درخواست‌های جدید{$pendingText}"]],
-            [['text' => '📋 همه ربات‌ها'], ['text' => 'ℹ️ راهنما']],
+            [['text' => "💳 پرداخت‌ها{$payText}"], ['text' => 'ℹ️ راهنما']],
+            [['text' => '📋 همه ربات‌ها'], ['text' => '💳 افزایش لیمیت']],
+        ]);
+    }
+    // وقتی ادمین هر دو درگاه «لیمیت» و «قالب» را خاموش کرده، دکمهٔ خرید اصلاً نمایش داده نمی‌شود
+    if ($store && !PaymentGateways::isAnythingEnabled($store)) {
+        return BotApi::kb([
+            [['text' => '🤖 ساخت ربات جدید'], ['text' => '📦 ربات‌های من']],
+            [['text' => 'ℹ️ راهنما']],
         ]);
     }
     return BotApi::kb([
         [['text' => '🤖 ساخت ربات جدید'], ['text' => '📦 ربات‌های من']],
-        [['text' => 'ℹ️ راهنما']],
+        [['text' => '💳 افزایش لیمیت'], ['text' => 'ℹ️ راهنما']],
     ]);
 }
 
-function typeMenu(): string {
-    return Nav::typeMenu();
+/** فروشگاه لیمیت کاربر (متن + دکمه) — مشترک بین پیام و کال‌بک */
+function showLimitShop(Store $store, string $TOKEN, $chatId, array $user, array $SUPERS, int $msgId = 0): void
+{
+    try { Payments::ensureSchema($store); } catch (Throwable $e) {}
+    $t = PaymentPanel::limitShopText($store, $user, $SUPERS);
+    $kb = PaymentPanel::limitShopKb($store);
+    if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, $t, ['reply_markup' => $kb]);
+    else BotApi::send($TOKEN, $chatId, $t, ['reply_markup' => $kb]);
+}
+
+/** پنل پرداخت ادمین — مشترک بین پیام و کال‌بک */
+function showPaymentsAdmin(Store $store, string $TOKEN, $chatId, int $msgId = 0): void
+{
+    try { Payments::ensureSchema($store); } catch (Throwable $e) {}
+    $t = PaymentPanel::adminText($store);
+    $kb = PaymentPanel::adminKb($store);
+    if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, $t, ['reply_markup' => $kb]);
+    else BotApi::send($TOKEN, $chatId, $t, ['reply_markup' => $kb]);
+}
+
+/**
+ * گیت پرداخت قبل از ساخت ربات.
+ * برمی‌گرداند true یعنی «پرداخت لازم بود و منوی پرداخت نمایش داده شد، ساخت متوقف شود».
+ * false یعنی «پرداخت لازم نیست، ادامه بده».
+ */
+function gateBuildPayment(array $cfg, Store $store, string $TOKEN, array $SUPERS, array $user, $chatId, string $type): bool
+{
+    try { Payments::ensureSchema($store); } catch (Throwable $e) {}
+    // ادمین نامحدود و معاف از پرداخت است
+    if (PaymentLimits::isAdminUnlimited($user, $SUPERS)) return false;
+    // اگر هر دو درگاه خاموش باشند، اصلاً پرداختی وجود ندارد
+    if (!PaymentGateways::isAnythingEnabled($store)) return false;
+    $req = Payments::requiredForBuild($store, $user, $type, $SUPERS);
+    if ((int)$req['amount'] <= 0) return false;
+
+    $amount = (int)$req['amount'];
+    $parts = [];
+    $vars = [
+        'amount' => PaymentPricing::formatToman($amount),
+        'slots' => (string)(int)$req['slots'],
+        'count' => (string)PaymentLimits::botCount($store, (int)$user['user_id']),
+        'limit' => PaymentLimits::formatLimit(PaymentLimits::getLimit($store, $user, $SUPERS)),
+        'type' => $type,
+    ];
+    if (!empty($req['need_limit'])) $parts[] = 'سقف تعداد ربات پر است';
+    if (!empty($req['need_template'])) $parts[] = 'قالب «' . $type . '»: ' . PaymentPricing::formatToman(PaymentPricing::templatePrice($store, $type));
+
+    // متن دلخواه ادمین (اگر برای قالب یا لیمیت ثبت شده باشد)
+    $note = '';
+    if (!empty($req['need_template'])) {
+        $note = PaymentGateways::note($store, PaymentGateways::TEMPLATE, $vars);
+    } elseif (!empty($req['need_limit'])) {
+        $note = PaymentGateways::note($store, PaymentGateways::LIMIT, $vars);
+    }
+
+    $pid = Payments::createBuildPayment($store, (int)$user['user_id'], $type, $req, '');
+    $t = "💰 <b>برای ساخت این ربات پرداخت لازم است</b>\n\n" . implode(' + ', $parts)
+        . "\nمبلغ قابل پرداخت: <b>" . number_format($amount) . " تومان</b>";
+    if ($note !== '') $t .= "\n\n" . $note;
+    if (!PaymentPanel::methodsAvailable($store, $cfg)) {
+        $t .= "\n\n" . PaymentPanel::noMethodText($store);
+        BotApi::send($TOKEN, $chatId, $t, ['reply_markup' => PaymentPanel::limitShopKb($store)]);
+        return true;
+    }
+    $t .= "\n\nروش پرداخت را انتخاب کن:";
+    BotApi::send($TOKEN, $chatId, $t, ['reply_markup' => PaymentPanel::methodKb($store, $pid, $cfg)]);
+    return true;
 }
 
 // ===== helpers ناوبری (ماژولار — همه از Nav تغذیه می‌شوند) =====
@@ -189,7 +274,7 @@ function sendMyBotsList(Store $store, string $TOKEN, $chatId, int $uid, int $msg
     if (!$store->hasBot($uid)) {
         $t = $store->hasPendingRequest($uid)
             ? "⏳ هنوز رباتی ندارید. درخواست شما در انتظار تأیید ادمین است."
-            : "هنوز رباتی نساخته‌ای.\nبرای شروع، «🤖 ساخت ربات جدید» را بزنید.\nتوجه: هر کاربر فقط یک ربات می‌تواند بسازد.";
+            : "هنوز رباتی نساخته‌ای.\nبرای شروع، «🤖 ساخت ربات جدید» را بزنید.";
         if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, $t);
         else BotApi::send($TOKEN, $chatId, $t);
         return;
@@ -280,6 +365,18 @@ function handleBack(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
             case 'backup':
                 $store->clearStep($uid);
                 showBackupPanel($cfg, $store, $TOKEN, $chatId);
+                return;
+            case 'shop':
+                $store->clearStep($uid);
+                showLimitShop($store, $TOKEN, $chatId, $user, $SUPERS);
+                return;
+            case 'payments':
+                $store->clearStep($uid);
+                if (!isAdmin($user, $SUPERS)) {
+                    BotApi::send($TOKEN, $chatId, "🏠 منوی اصلی", ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
+                    return;
+                }
+                showPaymentsAdmin($store, $TOKEN, $chatId);
                 return;
             case 'bot': {
                 $botId = (int)($temp['bot_id'] ?? 0);
@@ -413,10 +510,18 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
         return;
     }
 
+    // دکمه «💳 پرداخت‌ها» شمارنده پویا دارد: «💳 پرداخت‌ها (🧾N)» — فقط ادمین
+    if ($admin && str_starts_with($text, '💳 پرداخت‌ها')) {
+        showPaymentsAdmin($store, $TOKEN, $chatId);
+        return;
+    }
+
     switch ($text) {
         case '🤖 ساخت ربات جدید':
-            if ($store->hasBot($uid)) {
-                BotApi::send($TOKEN, $chatId, "⛔️ شما قبلاً ربات دارید. هر کاربر فقط می‌تواند یک ربات بسازد.");
+            // گیت لیمیت ماژولار: ادمین نامحدود؛ بقیه طبق bot_limit
+            try { Payments::ensureSchema($store); } catch (Throwable $e) {}
+            if (!PaymentLimits::canBuild($store, $user, $SUPERS) && !$admin) {
+                showLimitShop($store, $TOKEN, $chatId, $user, $SUPERS);
                 return;
             }
             if ($store->hasPendingRequest($uid)) {
@@ -425,11 +530,22 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
             }
             // ادمین یا کاربر تأییدشده: مستقیم انتخاب نوع ربات
             if ($admin || $store->hasApprovedRequest($uid)) {
-                BotApi::send($TOKEN, $chatId, "نوع ربات را انتخاب کن 👇", ['reply_markup' => typeMenu()]);
+                BotApi::send($TOKEN, $chatId, "نوع ربات را انتخاب کن 👇", ['reply_markup' => Nav::typeMenu()]);
                 return;
             }
             $store->addPendingRequest($uid, 'bot');
             BotApi::send($TOKEN, $chatId, "📝 درخواست شما ثبت شد.\nلطفاً منتظر تأیید ادمین بمانید.");
+            return;
+
+        case '💳 افزایش لیمیت':
+            try { Payments::ensureSchema($store); } catch (Throwable $e) {}
+            if (!PaymentGateways::isAnythingEnabled($store)) {
+                BotApi::send($TOKEN, $chatId,
+                    "ℹ️ <b>فعلاً فروش لیمیت و قالب غیرفعال است.</b>\nبرای اطلاعات بیشتر با ادمین در میان بگذارید.",
+                    ['reply_markup' => Nav::stepKb()]);
+                return;
+            }
+            showLimitShop($store, $TOKEN, $chatId, $user, $SUPERS);
             return;
 
         case '📦 ربات‌های من':
@@ -586,7 +702,173 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
     }
 
     switch ($step) {
-        case 'await_backup_times': {
+    // ===== پرداخت: رسید کارت‌به‌کارت =====
+        case 'await_card_receipt': {
+            $pid = (int)($temp['payment_id'] ?? 0);
+            $p = $pid > 0 ? Payments::getPayment($store, $pid) : null;
+            if (!$p || (int)$p['user_id'] !== $uid) {
+                $store->clearStep($uid);
+                BotApi::send($TOKEN, $chatId, "⛔️ پرداخت یافت نشد. دوباره از فروشگاه لیمیت شروع کنید.",
+                    ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
+                return;
+            }
+            if ($p['status'] !== Payments::ST_AWAIT_RECEIPT) {
+                $store->clearStep($uid);
+                BotApi::send($TOKEN, $chatId, "ℹ️ وضعیت این پرداخت: " . Payments::describe($p),
+                    ['reply_markup' => PaymentPanel::limitShopKb($store)]);
+                return;
+            }
+            $hasAttachment = !empty($msg['photo']) || !empty($msg['document']);
+            if (!$hasAttachment && !PaymentCard::isValidReceipt($text, false)) {
+                BotApi::send($TOKEN, $chatId,
+                    "⛔️ رسید نامعتبر است؛ عکس فیش یا شماره پیگیری (حداقل ۴ کاراکتر) بفرستید.\n"
+                    . "برای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL,
+                    ['reply_markup' => Nav::stepKb()]);
+                return;
+            }
+            Payments::setReceipt($store, $pid, json_encode([
+                'text' => mb_substr(trim((string)$text), 0, 900),
+                'has_attachment' => $hasAttachment,
+                'user_id' => $uid,
+            ], JSON_UNESCAPED_UNICODE));
+            $store->clearStep($uid);
+            BotApi::send($TOKEN, $chatId,
+                "✅ <b>رسید شما ثبت شد.</b>\nادمین در حال بررسی است؛ به‌محض تأیید به شما اطلاع می‌دهیم.",
+                ['reply_markup' => PaymentPanel::receiptSentKb($pid)]);
+            return;
+        }
+
+        // ===== پرداخت: ورودی‌های ادمین =====
+        case 'await_pay_text': {
+            if (!$admin) { $store->clearStep($uid); return; }
+            $key = (string)($temp['key'] ?? '');
+            if (!PaymentGateways::isValidKey($key)) { $store->clearStep($uid); return; }
+            if (strtolower(trim($text)) === 'reset') {
+                PaymentGateways::resetText($store, $key);
+                BotApi::send($TOKEN, $chatId, "✅ متن «" . PaymentGateways::label($key) . "» به پیش‌فرض برگشت.");
+                showPaymentsAdmin($store, $TOKEN, $chatId);
+                return;
+            }
+            PaymentGateways::setCustomText($store, $key, $text);
+            BotApi::send($TOKEN, $chatId, "✅ متن «" . PaymentGateways::label($key) . "» ذخیره شد.");
+            showPaymentsAdmin($store, $TOKEN, $chatId);
+            return;
+        }
+
+        case 'await_pay_price': {
+            if (!$admin) { $store->clearStep($uid); return; }
+            $type = (string)($temp['type'] ?? '');
+            if (!isset(Manager::validTypes()[$type])) { $store->clearStep($uid); return; }
+            $digits = preg_replace('/[^0-9]/', '', $text);
+            if ($digits === '' || mb_strlen($digits) > 12) {
+                BotApi::send($TOKEN, $chatId, "⛔️ فقط عدد تومان را بفرستید (0 = رایگان).\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
+                return;
+            }
+            PaymentPricing::setTemplatePrice($store, $type, (int)$digits);
+            $store->clearStep($uid);
+            BotApi::send($TOKEN, $chatId, "✅ قیمت قالب «{$type}» = " . PaymentPricing::formatToman((int)$digits));
+            showPaymentsAdmin($store, $TOKEN, $chatId);
+            return;
+        }
+
+        case 'await_pay_limit_price': {
+            if (!$admin) { $store->clearStep($uid); return; }
+            $digits = preg_replace('/[^0-9]/', '', $text);
+            if ($digits === '' || mb_strlen($digits) > 12) {
+                BotApi::send($TOKEN, $chatId, "⛔️ فقط عدد تومان را بفرستید.\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
+                return;
+            }
+            PaymentPricing::setLimitUnitPrice($store, (int)$digits);
+            $store->clearStep($uid);
+            BotApi::send($TOKEN, $chatId, "✅ قیمت هر اسلات = " . PaymentPricing::formatToman((int)$digits));
+            showPaymentsAdmin($store, $TOKEN, $chatId);
+            return;
+        }
+
+        case 'await_pay_usdrate': {
+            if (!$admin) { $store->clearStep($uid); return; }
+            $digits = preg_replace('/[^0-9]/', '', $text);
+            if ($digits === '' || mb_strlen($digits) > 12) {
+                BotApi::send($TOKEN, $chatId, "⛔️ فقط عدد را بفرستید.\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
+                return;
+            }
+            PaymentPricing::setTomanPerUsd($store, (float)$digits);
+            $store->clearStep($uid);
+            BotApi::send($TOKEN, $chatId, "✅ نرخ هر دلار = " . number_format((float)$digits) . " تومان");
+            showPaymentsAdmin($store, $TOKEN, $chatId);
+            return;
+        }
+
+        case 'await_pay_card': {
+            if (!$admin) { $store->clearStep($uid); return; }
+            $digits = preg_replace('/\D/', '', $text);
+            if (strlen($digits) < 12 || strlen($digits) > 20) {
+                BotApi::send($TOKEN, $chatId, "⛔️ شماره کارت معتبر نیست (باید ۱۶ رقم باشد).\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
+                return;
+            }
+            PaymentCard::setCard($store, $digits, PaymentCard::getCardOwner($store));
+            $store->setStep($uid, 'await_pay_card_owner');
+            BotApi::send($TOKEN, $chatId,
+                "👤 <b>نام صاحب کارت</b>\n\nنام و نام خانوادگی صاحب حساب را بفرستید.\n"
+                . "برای انصراف (بدون تغییر نام): " . Nav::CANCEL,
+                ['reply_markup' => Nav::stepKb()]);
+            return;
+        }
+
+        case 'await_pay_card_owner': {
+            if (!$admin) { $store->clearStep($uid); return; }
+            PaymentCard::setCard($store, PaymentCard::getCardNumber($store), $text);
+            $store->clearStep($uid);
+            BotApi::send($TOKEN, $chatId, "✅ کارت‌به‌کارت تنظیم شد.");
+            showPaymentsAdmin($store, $TOKEN, $chatId);
+            return;
+        }
+
+        case 'await_pay_nowpay_key': {
+            if (!$admin) { $store->clearStep($uid); return; }
+            $key = trim($text);
+            if ($key === '' || mb_strlen($key) > 200) {
+                BotApi::send($TOKEN, $chatId, "⛔️ کلید نامعتبر است.\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
+                return;
+            }
+            $store->setSetting('pay_nowpay_api_key', $key);
+            $store->setStep($uid, 'await_pay_nowpay_secret');
+            BotApi::send($TOKEN, $chatId,
+                "🔐 <b>IPN Secret</b>\n\nکلید IPN Secret نوب‌پیمنت را بفرستید.\n"
+                . "آدرس IPN: <code>" . htmlspecialchars(rtrim((string)($cfg['base_url'] ?? ''), '/') . '/nowpayments_ipn.php') . "</code>\n"
+                . "برای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL,
+                ['reply_markup' => Nav::stepKb()]);
+            return;
+        }
+
+        case 'await_pay_nowpay_secret': {
+            if (!$admin) { $store->clearStep($uid); return; }
+            PaymentNowPay::setCredentials($store, PaymentNowPay::apiKey($store, $cfg), trim($text));
+            $store->clearStep($uid);
+            BotApi::send($TOKEN, $chatId, "✅ NOWPayments تنظیم شد.");
+            showPaymentsAdmin($store, $TOKEN, $chatId);
+            return;
+        }
+
+        case 'await_pay_setlimit': {
+            if (!$admin) { $store->clearStep($uid); return; }
+            if (!preg_match('/(-?\d+)\s+(-?\d+)/', $text, $m)) {
+                BotApi::send($TOKEN, $chatId, "⛔️ قالب اشتباه است. مثال: <code>1234567 3</code>\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
+                return;
+            }
+            $target = (int)$m[1];
+            $limit = (int)$m[2];
+            if ($limit < -1) {
+                BotApi::send($TOKEN, $chatId, "⛔️ لیمیت باید -۱ (نامحدود)، ۰ (مسدود) یا عدد مثبت باشد.\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
+                return;
+            }
+            Payments::setUserLimit($store, $target, $limit);
+            $store->clearStep($uid);
+            BotApi::send($TOKEN, $chatId, "✅ لیمیت کاربر <code>{$target}</code> = " . PaymentLimits::formatLimit($limit));
+            showPaymentsAdmin($store, $TOKEN, $chatId);
+            return;
+        }
+    case 'await_backup_times': {
             if (!$admin) { $store->clearStep($uid); return; }
             $parsed = DbBackup::parseTimes($text);
             if (!$parsed['ok']) {
@@ -667,6 +949,13 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
             if (!in_array($type, ['faxima', 'mirza'], true)) {
                 $type = 'faxima';
             }
+            // ===== گیت پرداخت دوباره (دفاعی) =====
+            // ممکن است بین انتخاب نوع و اینجا سقف کاربر پر شده باشد یا ادمین
+            // قالب را پولی کند؛ اگر الان پرداخت لازم است، ساخت متوقف می‌شود.
+            if (!isAdmin($user, $SUPERS) && gateBuildPayment($cfg, $store, $TOKEN, $SUPERS, $user, $chatId, $type)) {
+                $store->clearStep($uid);
+                return;
+            }
             BotApi::send($TOKEN, $chatId, "⏳ در حال ساخت ربات <b>{$slug}</b> ...");
             // ===== بررسی پیش‌نیازها قبل از ساخت =====
             $_prereq_err = Manager::checkBuildPrerequisites($type);
@@ -682,6 +971,10 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
 
                 $result = buildBot($cfg, $store, $TOKEN, $uid, $type, $temp, $slug);
                 $store->clearStep($uid);
+                // ===== ووچر قالب مصرف شود (اگر پرداختی برای همین قالب وجود داشته) =====
+                try { Payments::consumeTemplateVoucher($store, $uid, $type); } catch (Throwable $ve) {
+                    Logger::getInstance()->warning('payment', "consume voucher failed (uid {$uid}, {$type}): " . $ve->getMessage());
+                }
                 $doneMsg = $result['custom_message']
                     ?? "🎉 <b>ربات آماده شد!</b>\n\n🤖 @{$result['bot_username']}\n📁 پوشه: <code>{$slug}</code>\n🗄 دیتابیس: <code>{$result['db']}</code>\n🔗 وبهوک: ست شد ✅";
                 BotApi::send($TOKEN, $chatId, $doneMsg,
@@ -937,7 +1230,10 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
     // کاربری که درخواستش توسط ادمین تأیید شده باید بتواند ادامه دهد (newbot:…)
     // و انصراف/برگشت/منو همیشه باید کار کنند تا کاربر در مرحله گیر نکند.
     if (!canUse($user, $SUPERS) && !$store->hasApprovedRequest($uid)) {
-        if ($data === 'cancel' || $data === Nav::CB_BACK_MAIN || $data === Nav::CB_BACK_TYPE) {
+        // پرداخت/لغو همیشه باز است: کاربرِ سقف‌پر باید بتواند لیمیت بخرد
+        $openForUser = $data === 'cancel' || $data === Nav::CB_BACK_MAIN || $data === Nav::CB_BACK_TYPE
+            || str_starts_with($data, 'pay:');
+        if ($openForUser) {
             $store->clearStep($uid);
             if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, "❌ انصراف داده شد.");
             BotApi::send($TOKEN, $chatId, "🏠 منوی اصلی", ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
@@ -971,6 +1267,17 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
         sendMyBotsList($store, $TOKEN, $chatId, $uid, $msgId);
         return;
     }
+// ===== کاربر: مسیرهای پرداخت (فروشگاه/خرید/روش پرداخت) =====
+    if (str_starts_with($data, 'pay:')) {
+        handlePayCallback($cfg, $store, $TOKEN, $SUPERS, $user, $chatId, $msgId, $data);
+        return;
+    }
+
+    // ===== ادمین: مدیریت پرداخت‌ها (قیمت/درگاه/متن/تأیید) =====
+    if (str_starts_with($data, 'payadmin:')) {
+        handlePayAdminCallback($cfg, $store, $TOKEN, $SUPERS, $user, $chatId, $msgId, $data);
+        return;
+    }
     if ($data === Nav::CB_BACK_USERS) {
         if (!$admin) { BotApi::send($TOKEN, $chatId, "⛔️ فقط ادمین."); return; }
         showUsersPanel($TOKEN, $chatId, $msgId);
@@ -987,8 +1294,13 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
         $names = Manager::validTypes();
         if (!isset($names[$type])) return;
         // ===== بازبینی مجدد سقف و مجوز (همان چک‌های handleMessage) =====
-        if ($store->hasBot($uid)) {
-            BotApi::send($TOKEN, $chatId, "⛔️ شما قبلاً ربات دارید. هر کاربر فقط می‌تواند یک ربات بسازد.");
+        // قانون قدیمی «هر کاربر فقط یک ربات» با سیستم لیمیت جایگزین شده است.
+        if (!$admin && !PaymentLimits::canBuild($store, $user, $SUPERS)) {
+            showLimitShop($store, $TOKEN, $chatId, $user, $SUPERS);
+            return;
+        }
+        // ===== گیت پرداخت: سقف پر یا قالب پولی ⇒ اول فاکتور، بعد ادامهٔ ساخت =====
+        if (!$admin && gateBuildPayment($cfg, $store, $TOKEN, $SUPERS, $user, $chatId, $type)) {
             return;
         }
         if (!$admin && !$store->hasApprovedRequest($uid)) {
@@ -1130,6 +1442,366 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
     }
 }
 
+// ================= پرداخت: مسیر کاربر =================
+
+/**
+ * همهٔ کال‌بک‌های سمت کاربر (پیشوند pay:).
+ * فقط منطق «نمایش و ساخت فاکتور» اینجاست؛ دیتابیس در Payments و متن/کیبورد در PaymentPanel.
+ */
+function handlePayCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, array $user, $chatId, int $msgId, string $data): void
+{
+    $uid = (int)$user['user_id'];
+    try { Payments::ensureSchema($store); } catch (Throwable $e) {}
+    $parts = explode(':', $data);
+    $sub = $parts[1] ?? '';
+    $fail = function (string $why) use ($TOKEN, $chatId, $msgId) {
+        if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, "⛔️ {$why}", ['reply_markup' => Nav::stepKb()]);
+        else BotApi::send($TOKEN, $chatId, "⛔️ {$why}", ['reply_markup' => Nav::stepKb()]);
+    };
+
+    // فروشگاه لیمیت
+    if ($sub === 'shop' || $sub === '') {
+        showLimitShop($store, $TOKEN, $chatId, $user, $SUPERS);
+        return;
+    }
+
+    // پرداخت‌های من
+    if ($sub === 'mine') {
+        $t = PaymentPanel::myPaymentsText($store, $uid);
+        if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, $t, ['reply_markup' => PaymentPanel::limitShopKb($store)]);
+        else BotApi::send($TOKEN, $chatId, $t, ['reply_markup' => PaymentPanel::limitShopKb($store)]);
+        return;
+    }
+
+    // خرید: اسلات لیمیت یا مجوز قالب
+    if ($sub === 'buy') {
+        $what = $parts[2] ?? '';
+        if ($what === 'limit') {
+            $slots = (int)($parts[3] ?? 0);
+            if ($slots < 1 || $slots > 20) { $fail("تعداد اسلات نامعتبر است."); return; }
+            if (!PaymentGateways::isEnabled($store, PaymentGateways::LIMIT)) { $fail("فروش لیمیت غیرفعال است."); return; }
+            $unit = PaymentPricing::limitUnitPrice($store);
+            if ($unit <= 0) { $fail("قیمت اسلات توسط ادمین تعیین نشده است."); return; }
+            $amount = $unit * $slots;
+            $pid = Payments::createPayment($store, $uid, Payments::KIND_LIMIT, '', $slots, $amount, '');
+            $t = "➕ <b>خرید {$slots} اسلات</b>\n\n"
+                . "قیمت هر اسلات: " . PaymentPricing::formatToman($unit) . "\n"
+                . "مبلغ کل: <b>" . number_format($amount) . " تومان</b>\n\n"
+                . PaymentGateways::note($store, PaymentGateways::LIMIT, [
+                    'amount' => PaymentPricing::formatToman($amount),
+                    'slots' => (string)$slots,
+                    'limit' => PaymentLimits::formatLimit(PaymentLimits::getLimit($store, $user, $SUPERS)),
+                    'count' => (string)PaymentLimits::botCount($store, $uid),
+                ]) . "\n\nروش پرداخت را انتخاب کن:";
+            BotApi::send($TOKEN, $chatId, $t, ['reply_markup' => PaymentPanel::methodKb($store, $pid, $cfg)]);
+            return;
+        }
+        if ($what === 'template') {
+            $type = (string)($parts[3] ?? '');
+            if (!isset(Manager::validTypes()[$type])) { $fail("قالب نامعتبر است."); return; }
+            if (!PaymentGateways::isEnabled($store, PaymentGateways::TEMPLATE)) { $fail("پولی‌کردن قالب‌ها غیرفعال است."); return; }
+            if (!PaymentPricing::isPaid($store, $type)) { $fail("این قالب رایگان است."); return; }
+            if (Payments::countUsableTemplateVoucher($store, $uid, $type) > 0) {
+                $fail("شما هم‌اکنون مجوز ساخت این قالب را دارید."); return;
+            }
+            $amount = PaymentPricing::templatePrice($store, $type);
+            $pid = Payments::createPayment($store, $uid, Payments::KIND_TEMPLATE, $type, 0, $amount, '');
+            $note = PaymentGateways::note($store, PaymentGateways::TEMPLATE, [
+                'amount' => PaymentPricing::formatToman($amount),
+                'type' => $type,
+            ]);
+            $t = "💰 <b>خرید مجوز قالب «{$type}»</b>\n\nمبلغ: <b>" . number_format($amount) . " تومان</b>";
+            if ($note !== '') $t .= "\n\n" . $note;
+            $t .= "\n\nروش پرداخت را انتخاب کن:";
+            BotApi::send($TOKEN, $chatId, $t, ['reply_markup' => PaymentPanel::methodKb($store, $pid, $cfg)]);
+            return;
+        }
+        $fail("درخواست خرید نامعتبر است.");
+        return;
+    }
+
+    // بررسی دستی وضعیت پرداخت کریپتویی
+    // پشتیبانِ وقتی است که IPN سرویس به سرور نمی‌رسد (فایروال/پراکسی/اینترنت قطعی).
+    // markCryptoPaid خودش idempotent است، پس فشار دادن این دکمه بی‌خطر است.
+    if ($sub === 'check') {
+        $pid = (int)($parts[2] ?? 0);
+        $p = $pid > 0 ? Payments::getPayment($store, $pid) : null;
+        if (!$p || (int)$p['user_id'] !== $uid) { $fail("پرداخت یافت نشد."); return; }
+
+        if (in_array($p['status'], [Payments::ST_PAID, Payments::ST_USED], true)) {
+            BotApi::edit($TOKEN, $chatId, $msgId, "✅ " . Payments::describe($p)
+                . "\n🎁 این پرداخت قبلاً تأیید و اعمال شده است.", ['reply_markup' => PaymentPanel::limitShopKb($store)]);
+            return;
+        }
+        if ($p['method'] !== Payments::METHOD_NOWPAY || $p['status'] !== Payments::ST_AWAIT_PAY) {
+            BotApi::edit($TOKEN, $chatId, $msgId, "ℹ️ این فاکتور در انتظار پرداخت کریپتویی نیست:\n"
+                . Payments::describe($p), ['reply_markup' => PaymentPanel::limitShopKb($store)]);
+            return;
+        }
+        $apiKey = PaymentNowPay::apiKey($store, $cfg);
+        if ($apiKey === '') { $fail("کلید API ثبت نشده است."); return; }
+        $st = PaymentNowPay::fetchStatus($apiKey, (string)($p['ext_id'] ?? ''));
+        if (empty($st['ok'])) {
+            BotApi::edit($TOKEN, $chatId, $msgId, "⚠️ استعلام از سرویس ناموفق بود:\n<code>"
+                . htmlspecialchars((string)($st['error'] ?? '')) . "</code>", ['reply_markup' => PaymentPanel::invoiceKb($pid, (string)($p['pay_url'] ?? ''))]);
+            return;
+        }
+        $d = (array)($st['data'] ?? []);
+        $status = PaymentNowPay::extractStatus($d);
+        if (!PaymentNowPay::isPaidStatus($status)) {
+            BotApi::edit($TOKEN, $chatId, $msgId, "🕐 هنوز پرداخت نشده (وضعیت سرویس: <code>"
+                . htmlspecialchars($status !== '' ? $status : 'نامشخص') . "</code>).\n"
+                . "چند دقیقهٔ بعد دوباره بزن یا از لینک پرداخت استفاده کن.",
+                ['reply_markup' => PaymentPanel::invoiceKb($pid, (string)($p['pay_url'] ?? ''))]);
+            return;
+        }
+        $done = Payments::markCryptoPaid($store, $pid);
+        if (!$done) { $fail("پرداخت قابل اعمال نبود."); return; }
+        $note = (string)($done['grant_note'] ?? '');
+        BotApi::edit($TOKEN, $chatId, $msgId, "✅ <b>پرداخت کریپتویی تأیید شد!</b>\n" . Payments::describe($done)
+            . ($note !== '' ? "\n🎁 {$note}" : "")
+            . "\n\nحالا «🤖 ساخت ربات جدید» را بزنید.", ['reply_markup' => PaymentPanel::limitShopKb($store)]);
+        return;
+    }
+
+    // لغو فاکتور توسط خود کاربر
+    if ($sub === 'cancel') {
+        $pid = (int)($parts[2] ?? 0);
+        $p = $pid > 0 ? Payments::getPayment($store, $pid) : null;
+        if (!$p || (int)$p['user_id'] !== $uid) { $fail("پرداخت یافت نشد."); return; }
+        if (in_array($p['status'], [Payments::ST_PENDING, Payments::ST_AWAIT_RECEIPT], true)) {
+            Payments::setStatus($store, $pid, Payments::ST_CANCELLED);
+        }
+        if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, "🚫 پرداخت لغو شد.", ['reply_markup' => PaymentPanel::limitShopKb($store)]);
+        else BotApi::send($TOKEN, $chatId, "🚫 پرداخت لغو شد.", ['reply_markup' => PaymentPanel::limitShopKb($store)]);
+        return;
+    }
+
+    // انتخاب روش پرداخت
+    if ($sub === 'method') {
+        $method = (string)($parts[2] ?? '');
+        $pid = (int)($parts[3] ?? 0);
+        $p = $pid > 0 ? Payments::getPayment($store, $pid) : null;
+        if (!$p || (int)$p['user_id'] !== $uid) { $fail("پرداخت یافت نشد."); return; }
+        if (!in_array($p['status'], [Payments::ST_PENDING, Payments::ST_AWAIT_RECEIPT], true)) {
+            $fail("این پرداخت قبلاً ثبت/لغو شده است."); return;
+        }
+        $amount = (int)$p['amount'];
+
+        if ($method === Payments::METHOD_CARD) {
+            if (!PaymentGateways::isEnabled($store, PaymentGateways::CARD)) { $fail("درگاه کارت‌به‌کارت غیرفعال است."); return; }
+            if (!PaymentCard::isConfigured($store)) { $fail("شماره کارت ثبت نشده است؛ با ادمین تماس بگیرید."); return; }
+            Payments::setMethod($store, $pid, Payments::METHOD_CARD, Payments::ST_AWAIT_RECEIPT);
+            $store->setStep($uid, 'await_card_receipt', ['payment_id' => $pid]);
+            $t = PaymentCard::payInstructions($store, $amount, (string)$pid);
+            $t .= "\n\nبرای انصراف: " . Nav::CANCEL;
+            BotApi::send($TOKEN, $chatId, $t, ['reply_markup' => Nav::stepKb()]);
+            return;
+        }
+
+        if ($method === Payments::METHOD_NOWPAY) {
+            if (!PaymentGateways::isEnabled($store, PaymentGateways::NOWPAY)) { $fail("درگاه کریپتو غیرفعال است."); return; }
+            $apiKey = PaymentNowPay::apiKey($store, $cfg);
+            if ($apiKey === '') { $fail("کلید API ثبت نشده است؛ با ادمین تماس بگیرید."); return; }
+            $usd = PaymentPricing::tomanToUsd($amount, PaymentPricing::tomanPerUsd($store));
+            if ($usd <= 0) { $fail("مبلغ پرداخت معتبر نیست."); return; }
+            $base = rtrim((string)($cfg['base_url'] ?? ''), '/');
+            $ipnUrl = $base !== '' ? $base . '/nowpayments_ipn.php' : '';
+            $res = PaymentNowPay::createInvoice($apiKey, $usd, "PAY-{$pid}", '', '', $ipnUrl);
+            if (empty($res['ok'])) {
+                Logger::getInstance()->error('payment', "NOWPayments invoice failed for #{$pid}: " . ($res['error'] ?? '?'));
+                $fail("ساخت فاکتور کریپتو ناموفق بود:\n" . ($res['error'] ?? '') . "\nلطفاً دوباره تلاش کنید.");
+                return;
+            }
+            Payments::setMethod($store, $pid, Payments::METHOD_NOWPAY, Payments::ST_AWAIT_PAY,
+                (string)($res['invoice_id'] ?? ''), (string)($res['pay_url'] ?? ''));
+            $note = PaymentGateways::note($store, PaymentGateways::NOWPAY, [
+                'amount' => number_format($amount) . ' تومان (~' . $usd . ' USD)',
+            ]);
+            $payUrl = (string)($res['pay_url'] ?? '');
+            $t = "🪙 <b>پرداخت کریپتویی</b>\n\nمبلغ: <b>" . number_format($amount) . " تومان</b> (تقریبی {$usd} دلار)\n";
+            $t .= "شماره فاکتور: <code>PAY-{$pid}</code>\n";
+            if ($payUrl !== '') {
+                $t .= "لینک پرداخت:\n" . htmlspecialchars($payUrl) . "\n";
+            } else {
+                $t .= "⚠️ لینک پرداخت از سرویس دریافت نشد؛ با «🔄 بررسی وضعیت» دوباره چک کن.\n";
+            }
+            if ($note !== '') $t .= "\n" . $note . "\n";
+            $t .= "\nپس از پرداخت، خودکار تأیید می‌شود و همین‌جا خبرش را می‌دهیم.";
+            BotApi::send($TOKEN, $chatId, $t, ['reply_markup' => PaymentPanel::invoiceKb($pid, $payUrl)]);
+            return;
+        }
+
+        $fail("روش پرداخت نامعتبر است.");
+        return;
+    }
+
+    $fail("درخواست نامعتبر است.");
+}
+
+// ================= پرداخت: پنل ادمین =================
+
+/** همهٔ کال‌بک‌های ادمین (پیشوند payadmin:) — فعال/غیرفعال درگاه، متن دلخواه، قیمت، تأیید */
+function handlePayAdminCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, array $user, $chatId, int $msgId, string $data): void
+{
+    $uid = (int)$user['user_id'];
+    if (!isAdmin($user, $SUPERS)) { BotApi::send($TOKEN, $chatId, "⛔️ فقط ادمین."); return; }
+    try { Payments::ensureSchema($store); } catch (Throwable $e) {}
+    $parts = explode(':', $data);
+    $sub = $parts[1] ?? '';
+
+    // پنل اصلی
+    if ($sub === 'panel' || $sub === '') { showPaymentsAdmin($store, $TOKEN, $chatId, $msgId); return; }
+
+    // فعال/غیرفعال کردن درگاه
+    if ($sub === 'toggle') {
+        $key = (string)($parts[2] ?? '');
+        if (!PaymentGateways::isValidKey($key)) { BotApi::send($TOKEN, $chatId, "⛔️ درگاه نامعتبر است."); return; }
+        $now = PaymentGateways::toggle($store, $key);
+        Logger::getInstance()->info('payment', "Admin {$uid} " . ($now ? 'enabled' : 'disabled') . " gateway {$key}");
+        showPaymentsAdmin($store, $TOKEN, $chatId, $msgId);
+        return;
+    }
+
+    // متن دلخواهٔ یک بخش
+    if ($sub === 'text') {
+        $key = (string)($parts[2] ?? '');
+        if (!PaymentGateways::isValidKey($key)) { BotApi::send($TOKEN, $chatId, "⛔️ بخش نامعتبر است."); return; }
+        $cur = PaymentGateways::hasCustomText($store, $key) ? PaymentGateways::customText($store, $key) : PaymentGateways::defaultText($key);
+        $store->setStep($uid, 'await_pay_text', ['key' => $key]);
+        BotApi::send($TOKEN, $chatId,
+            "📝 <b>متن دلخواه — " . PaymentGateways::label($key) . "</b>\n\n"
+            . "متن فعلی (پیش‌فرض):\n<code>" . htmlspecialchars($cur) . "</code>\n\n"
+            . "متن جدید را بفرستید.\nمی‌توانید از این جای‌نگهدارها استفاده کنید: "
+            . "<code>‹amount› ‹slots› ‹count› ‹limit› ‹remaining› ‹type›</code>\n"
+            . "برای حذف متن و برگشت به پیش‌فرض، کلمهٔ <code>reset</code> را بفرستید.\n"
+            . "برای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL,
+            ['reply_markup' => Nav::stepKb()]);
+        return;
+    }
+
+    // بازگردانی متن پیش‌فرض
+    if ($sub === 'resettxt') {
+        $key = (string)($parts[2] ?? '');
+        if (!PaymentGateways::isValidKey($key)) { BotApi::send($TOKEN, $chatId, "⛔️ بخش نامعتبر است."); return; }
+        PaymentGateways::resetText($store, $key);
+        showPaymentsAdmin($store, $TOKEN, $chatId, $msgId);
+        return;
+    }
+
+    // فهرست پرداخت‌های در انتظار بررسی + دکمهٔ تأیید/رد
+    if ($sub === 'list') {
+        $pms = Payments::pendingAdminList($store, 20);
+        if (!$pms) { BotApi::send($TOKEN, $chatId, "✅ هیچ پرداختی در انتظار بررسی نیست.", ['reply_markup' => PaymentPanel::adminKb($store)]); return; }
+        BotApi::send($TOKEN, $chatId, "🧾 <b>پرداخت‌های در انتظار</b> (" . count($pms) . "):");
+        foreach ($pms as $p) {
+            $ownerId = (int)$p['user_id'];
+            $u = $store->user($ownerId);
+            $name = trim((string)($u['first_name'] ?? ''));
+            $t = Payments::describe($p) . "\n";
+            $t .= "کاربر: <code>{$ownerId}</code>" . ($name !== '' ? " — " . htmlspecialchars($name) : "") . "\n";
+            if (!empty($p['template'])) $t .= "قالب: <code>{$p['template']}</code>\n";
+            $receipt = (string)($p['receipt'] ?? '');
+            if ($receipt !== '') {
+                $decoded = json_decode($receipt, true);
+                $t .= "رسید: " . ($decoded['text'] ?? $receipt) . "\n";
+            }
+            if (!empty($p['pay_url'])) $t .= "لینک پرداخت: " . htmlspecialchars((string)$p['pay_url']) . "\n";
+            BotApi::send($TOKEN, $chatId, $t, ['reply_markup' => PaymentPanel::reviewKb((int)$p['id'])]);
+            usleep(80000);
+        }
+        return;
+    }
+
+    // تأیید دستی (کارت‌به‌کارت)
+    if ($sub === 'approve') {
+        $pid = (int)($parts[2] ?? 0);
+        $p = $pid > 0 ? Payments::approveByAdmin($store, $pid) : null;
+        if (!$p) { BotApi::send($TOKEN, $chatId, "⛔️ پرداخت یافت نشد یا قبلاً نهایی شده است."); return; }
+        $ownerId = (int)$p['user_id'];
+        $note = (string)($p['grant_note'] ?? '');
+        BotApi::send($TOKEN, $chatId, "✅ پرداخت #{$pid} تأیید شد.\n{$note}", ['reply_markup' => PaymentPanel::adminKb($store)]);
+        BotApi::send($TOKEN, $ownerId,
+            "✅ <b>پرداخت شما تأیید شد!</b>\n{$note}\n\nحالا می‌توانید «🤖 ساخت ربات جدید» را بزنید.",
+            ['reply_markup' => mainMenu($store->user($ownerId), $SUPERS, $store)]);
+        return;
+    }
+
+    // رد دستی
+    if ($sub === 'decline') {
+        $pid = (int)($parts[2] ?? 0);
+        $p = $pid > 0 ? Payments::getPayment($store, $pid) : null;
+        if (!$p) { BotApi::send($TOKEN, $chatId, "⛔️ پرداخت یافت نشد."); return; }
+        if (in_array($p['status'], [Payments::ST_PAID, Payments::ST_USED], true)) {
+            BotApi::send($TOKEN, $chatId, "⛔️ این پرداخت قبلاً نهایی شده و قابل رد نیست."); return;
+        }
+        $ownerId = (int)$p['user_id'];
+        Payments::setStatus($store, $pid, Payments::ST_DECLINED);
+        BotApi::send($TOKEN, $chatId, "❌ پرداخت #{$pid} رد شد.", ['reply_markup' => PaymentPanel::adminKb($store)]);
+        BotApi::send($TOKEN, $ownerId, "❌ پرداخت شما رد شد. اگر پول کسر شده، با ادمین تماس بگیرید.");
+        return;
+    }
+
+    // ورودی‌های عددی/متنی ⇒ مرحلهٔ انتظار
+    if ($sub === 'setprice') {
+        $type = (string)($parts[2] ?? '');
+        if (!isset(Manager::validTypes()[$type])) { BotApi::send($TOKEN, $chatId, "⛔️ قالب نامعتبر است."); return; }
+        $store->setStep($uid, 'await_pay_price', ['type' => $type]);
+        BotApi::send($TOKEN, $chatId,
+            "💰 <b>قیمت قالب «{$type}»</b>\n\nمبلغ به تومان را بفرستید (0 = رایگان).\n"
+            . "قیمت فعلی: <b>" . PaymentPricing::formatToman(PaymentPricing::templatePrice($store, $type)) . "</b>\n"
+            . "برای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL,
+            ['reply_markup' => Nav::stepKb()]);
+        return;
+    }
+    if ($sub === 'limitprice') {
+        $store->setStep($uid, 'await_pay_limit_price');
+        BotApi::send($TOKEN, $chatId,
+            "📈 <b>قیمت هر اسلات لیمیت</b>\n\nمبلغ به تومان را بفرستید.\n"
+            . "قیمت فعلی: <b>" . PaymentPricing::formatToman(PaymentPricing::limitUnitPrice($store)) . "</b>\n"
+            . "برای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL,
+            ['reply_markup' => Nav::stepKb()]);
+        return;
+    }
+    if ($sub === 'usdrate') {
+        $store->setStep($uid, 'await_pay_usdrate');
+        BotApi::send($TOKEN, $chatId,
+            "💵 <b>نرخ تومان به دلار</b>\n\nعدد را بفرستید (مثلاً <code>100000</code> یعنی هر دلار = ۱۰۰٬۰۰۰ تومان).\n"
+            . "نرخ فعلی: <b>" . number_format(PaymentPricing::tomanPerUsd($store)) . "</b>\n"
+            . "برای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL,
+            ['reply_markup' => Nav::stepKb()]);
+        return;
+    }
+    if ($sub === 'card') {
+        $store->setStep($uid, 'await_pay_card');
+        BotApi::send($TOKEN, $chatId,
+            "💳 <b>شماره کارت</b>\n\nشماره کارت را بفرستید (اعداد، خط‌تیره یا فاصله).\n"
+            . "کارت فعلی: <code>" . htmlspecialchars(PaymentCard::getCardNumber($store) ?: 'ثبت نشده') . "</code>\n"
+            . "برای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL,
+            ['reply_markup' => Nav::stepKb()]);
+        return;
+    }
+    if ($sub === 'nowpay') {
+        $store->setStep($uid, 'await_pay_nowpay_key');
+        BotApi::send($TOKEN, $chatId,
+            "🪙 <b>کلید API نوب‌پیمنت</b>\n\nکلید API را بفرستید.\n"
+            . "برای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL,
+            ['reply_markup' => Nav::stepKb()]);
+        return;
+    }
+    if ($sub === 'setlimit') {
+        $store->setStep($uid, 'await_pay_setlimit');
+        BotApi::send($TOKEN, $chatId,
+            "👤 <b>تعیین لیمیت کاربر</b>\n\nقالب ارسال: <code>ID_KARBAR 5</code>\n"
+            . "مثال: <code>1234567 3</code> یعنی حداکثر ۳ ربات.\n"
+            . "مقدار <code>-1</code> یعنی نامحدود و <code>0</code> یعنی مسدود.\n"
+            . "برای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL,
+            ['reply_markup' => Nav::stepKb()]);
+        return;
+    }
+
+    BotApi::send($TOKEN, $chatId, "⛔️ دستور نامعتبر است.", ['reply_markup' => PaymentPanel::adminKb($store)]);
+}
 /** پنل بکاپ دیتابیس — وضعیت + دکمه‌های کنترل ساعت (فقط ادمین) */
 function showBackupPanel(array $cfg, Store $store, string $TOKEN, $chatId, int $msgId = 0): void
 {

@@ -112,6 +112,18 @@ class Nav
             case 'await_user_remove': return ['kind' => 'users'];
             case 'await_backup_times': return ['kind' => 'backup'];
             case 'await_child_broadcast': return ['kind' => 'bot'];
+            // ===== پرداخت =====
+            // رسید کارت: فروشگاه لیمیت (کاربر) — مراحل تنظیم ادمین: پنل پرداخت
+            case 'await_card_receipt': return ['kind' => 'shop'];
+            case 'await_pay_text':
+            case 'await_pay_price':
+            case 'await_pay_limit_price':
+            case 'await_pay_usdrate':
+            case 'await_pay_card':
+            case 'await_pay_card_owner':
+            case 'await_pay_nowpay_key':
+            case 'await_pay_nowpay_secret':
+            case 'await_pay_setlimit': return ['kind' => 'payments'];
             case 'await_broadcast':
             default: return ['kind' => 'menu'];
         }

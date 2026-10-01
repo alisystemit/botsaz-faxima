@@ -19,6 +19,42 @@ require_once $root.'/src/Store.php';
 $store = new Store($cfg['manager_db'], $cfg);
 echo "manager DB OK (driver: {$store->getDriver()})\n";
 
+// ===== پیش‌فرض‌های سیستم پرداخت (فقط اگر قبلاً ست نشده‌اند) =====
+// مقادیر از config.php خوانده می‌شوند تا هاست و ربات از اول هماهنگ باشند.
+require_once $root.'/src/Payment/Payments.php';
+require_once $root.'/src/Payment/Gateways.php';
+require_once $root.'/src/Payment/Limits.php';
+require_once $root.'/src/Payment/Pricing.php';
+require_once $root.'/src/Payment/NowPayments.php';
+require_once $root.'/src/Payment/CardToCard.php';
+Payments::ensureSchema($store);
+$payCfg = $cfg['payment'] ?? [];
+if ($store->getSetting('pay_limit_price') === null) {
+    $store->setSetting('pay_limit_price', (string)(int)($payCfg['limit_price'] ?? 50000));
+}
+foreach (['faxima', 'mirza'] as $_t) {
+    if ($store->getSetting(PaymentPricing::priceKey($_t)) === null) {
+        $store->setSetting(PaymentPricing::priceKey($_t), (string)(int)(($payCfg['template_prices'][$_t] ?? 0)));
+    }
+}
+if ($store->getSetting('pay_card_number') === null) $store->setSetting('pay_card_number', (string)($payCfg['card_number'] ?? ''));
+if ($store->getSetting('pay_card_owner') === null) $store->setSetting('pay_card_owner', (string)($payCfg['card_owner'] ?? ''));
+if ($store->getSetting('pay_toman_per_usd') === null) $store->setSetting('pay_toman_per_usd', (string)($payCfg['toman_per_usd'] ?? 100000));
+if ($store->getSetting('pay_nowpay_api_key') === null) $store->setSetting('pay_nowpay_api_key', (string)($cfg['nowpayments']['api_key'] ?? ''));
+if ($store->getSetting('pay_nowpay_ipn_secret') === null) $store->setSetting('pay_nowpay_ipn_secret', (string)($cfg['nowpayments']['ipn_secret'] ?? ''));
+
+// وضعیت فعال/غیرفعال درگاه‌ها — فقط اگر قبلاً ست نشده باشند.
+// نکتهٔ مهم: config.php قدیمی اصلاً کلید payment.enabled را ندارد؛ در آن حالت
+// همه فعال می‌شوند (همان رفتار «غیبت کلید = فعال») وگرنه کل پرداخت بی‌دلیل خاموش می‌شد.
+$enabledCfg = is_array($payCfg['enabled'] ?? null) ? $payCfg['enabled'] : [];
+foreach (PaymentGateways::keys() as $_k) {
+    if ($store->getSetting(PaymentGateways::enabledKey($_k)) === null) {
+        $on = array_key_exists($_k, $enabledCfg) ? (bool)$enabledCfg[$_k] : true;
+        $store->setSetting(PaymentGateways::enabledKey($_k), $on ? '1' : '0');
+    }
+}
+echo "payment defaults OK\n";
+
 // محافظت از پوشه data (Apache 2.4 — سینتکس قدیمی Deny from all فقط با mod_access_compat کار می‌کند)
 // محتوا باید «دقیقاً» با نسخهٔ tracked در مخزن یکی باشد؛ قبلاً فقط «Require all denied» نوشته
 // می‌شد و کامنت فارسی حذف می‌شد؛ در نتیجه هر بار اجرای install.php فایل را dirty می‌کرد.
