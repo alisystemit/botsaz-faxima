@@ -126,7 +126,7 @@ class Nav
 
     /**
      * مقصد «برگشت» برای هر step — خالص و بدون وابستگی، تا قابل تست بماند.
-     * kind: type (انتخاب نوع) | step (یک مرحله قبل) | menu | users | backup | bot
+     * kind: type (انتخاب نوع) | step (یک مرحله قبل) | menu | users | backup | bot | texts
      */
     public static function backTarget(string $step): array
     {
@@ -150,6 +150,8 @@ class Nav
             case 'await_pay_nowpay_key':
             case 'await_pay_nowpay_secret':
             case 'await_pay_setlimit': return ['kind' => 'payments'];
+            // ویرایش متن‌های پویا ⇒ برگشت به فهرست گروه‌ها
+            case 'await_text_edit': return ['kind' => 'texts'];
             case 'await_broadcast':
             default: return ['kind' => 'menu'];
         }

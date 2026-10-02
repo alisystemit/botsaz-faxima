@@ -45,6 +45,7 @@ require_once __DIR__ . '/src/Payment/Pricing.php';
 require_once __DIR__ . '/src/Payment/CardToCard.php';
 require_once __DIR__ . '/src/Payment/NowPayments.php';
 require_once __DIR__ . '/src/Payment/AdminPanel.php';
+require_once __DIR__ . '/src/Texts.php';
 
 $cfgFile = __DIR__ . '/config.php';
 if (!file_exists($cfgFile)) { http_response_code(500); webhookDone(['ok' => false, 'error' => 'config.php missing']); }
@@ -305,6 +306,7 @@ function stepLabel(string $step): string
         'await_pay_nowpay_key'   => 'کلید API نوب‌پیمنت',
         'await_pay_nowpay_secret'=> 'IPN Secret نوب‌پیمنت',
         'await_pay_setlimit'  => 'لیمیت کاربر',
+        'await_text_edit'     => 'ویرایش متن پویا',
     ];
     return $map[$step] ?? $step;
 }
@@ -385,7 +387,7 @@ function mainMenu(array $u, array $supers, Store $store = null): string {
             [['text' => '💾 بکاپ دیتابیس'], ['text' => "📋 درخواست‌های جدید{$pendingText}"]],
             [['text' => "💳 پرداخت‌ها{$payText}"], ['text' => 'ℹ️ راهنما']],
             [['text' => '🔍 دیاگنوز'], ['text' => '📋 همه ربات‌ها']],
-            [['text' => '💳 افزایش لیمیت']],
+            [['text' => '📝 متن‌ها'], ['text' => '💳 افزایش لیمیت']],
         ]);
     }
     // وقتی ادمین هر دو درگاه «لیمیت» و «قالب» را خاموش کرده، دکمهٔ خرید اصلاً نمایش داده نمی‌شود
@@ -420,6 +422,386 @@ function showPaymentsAdmin(Store $store, string $TOKEN, $chatId, int $msgId = 0)
     $kb = PaymentPanel::adminKb($store);
     if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, $t, ['reply_markup' => $kb]);
     else BotApi::send($TOKEN, $chatId, $t, ['reply_markup' => $kb]);
+}
+
+// ================= متن‌های پویا (ویرایش توسط مدیر ربات) =================
+//
+// رابط کامل: فهرست گروه‌ها → فهرست متن‌های گروه → صفحهٔ هر متن (ویرایش /
+// بازگشت به پیش‌فرض). منطق ذخیره در src/Texts.php است؛ اینجا فقط نمایش است.
+
+/**
+ * آیا خطای تلگرام دقیقاً به‌خاطر تگ‌های HTML نامتوازنِ همین متن است؟
+ * فقط 400 + «parse entities» تقصیر متن است؛ بقیه (توکن نامعتبر، شبکه، چت)
+ * ربطی به متن ندارند و نباید باعث رفتار عجیب شوند.
+ */
+function isHtmlParseError(array $r): bool
+{
+    if (!is_array($r) || !empty($r['ok'])) return false;
+    if ((int)($r['error_code'] ?? 0) !== 400) return false;
+    return stripos((string)($r['description'] ?? ''), 'parse entities') !== false;
+}
+
+/**
+ * ارسال پیامی که ممکن است HTML خراب داشته باشد (متن دلخواه ادمین).
+ * اول با parse_mode تلگرام می‌رود؛ اگر رد شد، همان پیام بدون تگ به‌همراه علت
+ * دقیق API فرستاده می‌شود تا ادمین هیچ‌وقت صفحهٔ خالی نبیند و بتواند متن
+ * خراب را ببیند و اصلاح کند.
+ */
+function sendHtmlSafe(string $TOKEN, $chatId, string $text, array $extra = []): void
+{
+    $r = BotApi::send($TOKEN, $chatId, $text, $extra);
+    if (!isHtmlParseError($r)) return;
+    $plain = "⚠️ نمایش این متن با تگ‌های HTML ممکن نبود؛ نسخهٔ بدون تگ آمد.\n"
+        . "علت دقیق تلگرام: " . (string)$r['description'] . "\n"
+        . "برای اصلاح، متن را از «✏️ ویرایش» دوباره بفرست.\n\n"
+        . strip_tags($text);
+    BotApi::send($TOKEN, $chatId, $plain, $extra + ['parse_mode' => null]);
+}
+
+/** کوتاه‌کردن متنِ بلند برای نمایش در پیام (بدون بریدن وسط کاراکتر) */
+function textsTrim(string $s, int $max = 1200): string
+{
+    $s = trim($s);
+    if ($s === '') return '— (خالی — از متن پیش‌فرض استفاده می‌شود)';
+    if (mb_strlen($s) <= $max) return $s;
+    return mb_substr($s, 0, $max) . "\n… (ادامه حذف شد)";
+}
+
+/** کیبورد فهرست گروه‌ها */
+function textsGroupsKb(): string
+{
+    $rows = [];
+    $groups = Texts::groups();
+    for ($i = 0; $i < count($groups); $i += 2) {
+        $row = [];
+        for ($j = $i; $j < count($groups) && $j < $i + 2; $j++) {
+            $g = $groups[$j];
+            $row[] = ['text' => $g['icon'] . ' ' . $g['label'] . ' (' . $g['count'] . ')',
+                      'callback_data' => 'texts:g:' . $g['key']];
+        }
+        $rows[] = $row;
+    }
+    $rows[] = [['text' => Nav::MENU, 'callback_data' => Nav::CB_BACK_MAIN]];
+    return BotApi::ikb($rows);
+}
+
+/** نمایش فهرست گروه‌ها (صفحهٔ اول پنل) */
+function showTextsGroups(Store $store, string $TOKEN, $chatId, int $msgId = 0): void
+{
+    $t = "📝 <b>ویرایش متن‌های ربات</b>\n\n"
+        . "هر بخشِ ربات متنِ پیش‌فرض خودش را دارد؛ اینجا می‌توانی هر کدام را عوض کنی"
+        . " یا به حالت پیش‌فرض برگردانی.\n"
+        . "جایگذین‌ها مثل ‹role› هنگام نمایش با مقدار واقعی عوض می‌شوند.\n\n";
+    foreach (Texts::groups() as $g) {
+        $t .= $g['icon'] . ' <b>' . $g['label'] . '</b> — ' . $g['count'] . " متن\n";
+    }
+    $t .= "\n✍️ یعنی متن دلخواه ذخیره شده • 📌 یعنی متن پیش‌فرض.";
+    $kb = textsGroupsKb();
+    if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, $t, ['reply_markup' => $kb]);
+    else BotApi::send($TOKEN, $chatId, $t, ['reply_markup' => $kb]);
+}
+
+/** کیبورد فهرست متن‌های یک گروه */
+function textsListKb(string $group): string
+{
+    $rows = [];
+    foreach (Texts::keys($group) as $key) {
+        $rows[] = [['text' => Texts::label($key), 'callback_data' => 'texts:show:' . $key]];
+    }
+    $rows[] = [['text' => '↩️ گروه‌ها', 'callback_data' => 'texts:list'],
+               ['text' => Nav::MENU, 'callback_data' => Nav::CB_BACK_MAIN]];
+    return BotApi::ikb($rows);
+}
+
+/** نمایش متن‌های یک گروه با وضعیت هر کدام */
+function showTextsList(Store $store, string $TOKEN, $chatId, string $group, int $msgId = 0): void
+{
+    $icon = '•';
+    $label = $group;
+    foreach (Texts::groups() as $g) { if ($g['key'] === $group) { $icon = $g['icon']; $label = $g['label']; } }
+    $t = "📝 <b>متن‌های «{$icon} {$label}»</b>\n\n";
+    $keys = Texts::keys($group);
+    if (!$keys) {
+        $t .= "در این گروه متنی ثبت نشده است.\n";
+    } else {
+        foreach ($keys as $key) {
+            $t .= Texts::statusIcon($store, $key) . ' ' . Texts::label($key) . "\n";
+        }
+    }
+    $t .= "\n✍️ متن دلخواه • 📌 متن پیش‌فرض\nروی هر متن بزن تا متن و پیش‌نمایشش را ببینی.";
+    $kb = textsListKb($group);
+    if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, $t, ['reply_markup' => $kb]);
+    else BotApi::send($TOKEN, $chatId, $t, ['reply_markup' => $kb]);
+}
+
+/**
+ * صفحهٔ یک متن: وضعیت + جایگذین‌ها + متن فعلی + پیش‌نمایش با مقدار نمونه.
+ * $notice پیام کوتاهی است که بالای صفحه می‌آید (مثلاً «به پیش‌فرض برگشت»).
+ */
+function showTextItem(Store $store, string $TOKEN, $chatId, string $key, int $msgId = 0, string $notice = ''): void
+{
+    if (!Texts::isValid($key)) {
+        BotApi::send($TOKEN, $chatId,
+            "⛔️ کلید متن نامعتبر است: <code>" . htmlspecialchars($key, ENT_QUOTES, 'UTF-8') . "</code>\n"
+            . "محل دقیق: bot.php → showTextItem()");
+        showTextsGroups($store, $TOKEN, $chatId);
+        return;
+    }
+    $custom = Texts::hasCustom($store, $key);
+    $raw = Texts::text($store, $key);
+    $unknown = Texts::unknownVars($key, $raw);
+
+    $t = ($notice !== '' ? $notice . "\n\n" : '')
+        . Texts::statusIcon($store, $key) . ' <b>' . Texts::label($key) . "</b>\n"
+        . 'گروه: ' . Texts::groupLabel($key) . " • وضعیت: "
+        . ($custom ? '✍️ متن دلخواه' : '📌 متن پیش‌فرض') . "\n";
+
+    $vars = Texts::vars($key);
+    if ($vars) {
+        $parts = [];
+        foreach ($vars as $n => $d) $parts[] = '‹' . $n . '› (' . $d . ')';
+        $parts[] = '‹nav› (خط برگشت/انصراف)';
+        $t .= "\n🧩 جایگذین‌ها:\n" . implode("\n", $parts) . "\n";
+    } else {
+        $t .= "\n🧩 بدون جایگذین (متن ثابت)\n";
+    }
+    if ($unknown) {
+        $esc = [];
+        foreach ($unknown as $n) $esc[] = '‹' . htmlspecialchars($n, ENT_QUOTES, 'UTF-8') . '›';
+        $t .= "\n⚠️ جایگذینِ ناشناخته: " . implode('، ', $esc)
+            . "\nاین‌ها هنگام نمایش حذف می‌شوند؛ املایشان را درست کن.\n";
+    }
+
+    $t .= "\n— <b>متن فعلی</b> —\n" . textsTrim($raw) . "\n";
+    $t .= "\n— <b>پیش‌نمایش با مقدار نمونه</b> —\n" . textsTrim(Texts::preview($store, $key));
+
+    $rows = [];
+    $row = [['text' => '✏️ ویرایش', 'callback_data' => 'texts:edit:' . $key]];
+    if ($custom) $row[] = ['text' => '📌 بازگشت به پیش‌فرض', 'callback_data' => 'texts:reset:' . $key];
+    $rows[] = $row;
+    $rows[] = [['text' => '↩️ گروه‌ها', 'callback_data' => 'texts:list'],
+               ['text' => Nav::MENU, 'callback_data' => Nav::CB_BACK_MAIN]];
+    $kb = BotApi::ikb($rows);
+
+    if ($msgId > 0) {
+        $r = BotApi::edit($TOKEN, $chatId, $msgId, $t, ['reply_markup' => $kb]);
+        if (isHtmlParseError($r)) {
+            // متن ذخیره‌شده تگ خراب دارد (مثلاً از پنل قدیمی) ⇒ پیام تازهٔ بدون تگ
+            sendHtmlSafe($TOKEN, $chatId, $t, ['reply_markup' => $kb]);
+        }
+    } else {
+        sendHtmlSafe($TOKEN, $chatId, $t, ['reply_markup' => $kb]);
+    }
+}
+
+/** متن راهنمای مرحلهٔ «متن جدید را بفرست» */
+function textsEditPrompt(string $key): string
+{
+    $vars = Texts::vars($key);
+    $names = [];
+    foreach ($vars as $n => $d) $names[] = '‹' . $n . '›';
+    $placeholderLine = $vars
+        ? "🧩 جایگذین‌ها: " . implode('، ', $names) . " و ‹nav› (خط برگشت/انصراف)\n"
+        : "🧩 بدون جایگذین؛ در صورت نیاز ‹nav› (خط برگشت/انصراف) را می‌توانی در متن بگذاری.\n";
+    return "✏️ <b>متن جدید برای «" . Texts::label($key) . "» را بفرست.</b>\n\n"
+        . $placeholderLine
+        . "✳️ برای خط جدید <code>\\n</code> را بنویس (یا متن را چندخطی بفرست).\n"
+        . "✳️ اگر متن دقیقاً یکی از دکمه‌های ناوبری است (مثل «" . Nav::BACK
+        . "» یا «" . Nav::MENU . "») با <code>=</code> شروعش کن؛ مثلاً <code>=منو</code>.\n"
+        . "✳️ متنِ خالی ذخیره نمی‌شود؛ برای بازگشت به حالت پیش‌فرض از دکمهٔ «📌 بازگشت به پیش‌فرض» استفاده کن.\n\n"
+        . "برای انصراف از ویرایش: " . Nav::CANCEL
+        . " • برای خروج کامل به منو: " . Nav::MENU . " یا <code>/start</code>";
+}
+
+/**
+ * پردازش متن دریافت‌شده در مرحلهٔ ویرایش یک متن.
+ * این تابع عمداً قبل از چک‌های ناوبریِ handleStep اجرا می‌شود تا ادمین بتواند
+ * متنی شبیه دکمه‌ها هم ذخیره کند (با پیشوند =).
+ */
+function handleTextEditStep(Store $store, string $TOKEN, array $SUPERS, array $user, $chatId, string $text, array $temp): void
+{
+    $uid = (int)$user['user_id'];
+    $key = (string)($temp['key'] ?? '');
+
+    if (!Texts::isValid($key)) {
+        $store->clearStep($uid);
+        BotApi::send($TOKEN, $chatId,
+            "⛔️ کلید متن پیدا نشد: <code>" . htmlspecialchars($key, ENT_QUOTES, 'UTF-8') . "</code>\n"
+            . "محل دقیق: bot.php → handleTextEditStep() — از فهرست دوباره انتخاب کن.",
+            ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
+        showTextsGroups($store, $TOKEN, $chatId);
+        return;
+    }
+
+    // پیشوند = یعنی «دقیقاً همین متن را ذخیره کن»؛ بدون آن، دکمه‌های ناوبری برنده‌اند
+    $literal = false;
+    if (str_starts_with($text, '=')) {
+        $literal = true;
+        $text = substr($text, 1);
+    }
+
+    if (!$literal) {
+        if (Nav::isMenu($text) || $text === '/start' || str_starts_with($text, '/start ')) {
+            $store->clearStep($uid);
+            BotApi::send($TOKEN, $chatId, "🏠 منوی اصلی", ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
+            return;
+        }
+        if (Nav::isBack($text)) {
+            $store->clearStep($uid);
+            showTextsGroups($store, $TOKEN, $chatId);
+            return;
+        }
+        if (Nav::isCancel($text)) {
+            $store->clearStep($uid);
+            BotApi::send($TOKEN, $chatId,
+                "✏️ ویرایش «" . Texts::label($key) . "» لغو شد؛ متن قبلی دست‌نخورده ماند.",
+                ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
+            return;
+        }
+    }
+
+    // \n داخل متن ⇐ خط جدید (در موبایل تایپ چندخطی سخت است)
+    $value = str_replace(['\\n', '\\t'], ["\n", "\t"], $text);
+
+    if (trim($value) === '') {
+        BotApi::send($TOKEN, $chatId,
+            "⛔️ متن خالی ذخیره نمی‌شود.\n"
+            . "یک متن بفرست، یا برای بازگرداندن متن پیش‌فرض از «📌 بازگشت به پیش‌فرض» استفاده کن.\n"
+            . "برای انصراف: " . Nav::CANCEL,
+            ['reply_markup' => Nav::stepKb()]);
+        return;
+    }
+
+    if (mb_strlen($value) > Texts::MAX_LEN) {
+        BotApi::send($TOKEN, $chatId,
+            "⚠️ متن بیش از " . Texts::MAX_LEN . " کاراکتر است؛ فقط همین مقدار ذخیره می‌شود.",
+            ['reply_markup' => Nav::stepKb()]);
+    }
+
+    // اگر تلگرام HTML متن را نپذیرد باید بتوانیم به حالت قبل برگردیم
+    $hadCustom = Texts::hasCustom($store, $key);
+    $before = Texts::text($store, $key);
+
+    if (!Texts::set($store, $key, $value)) {
+        BotApi::send($TOKEN, $chatId,
+            "⛔️ ذخیرهٔ متن انجام نشد (کلید: <code>" . htmlspecialchars($key, ENT_QUOTES, 'UTF-8')
+            . "</code>) — متن خالی یا کلید نامعتبر؛ دوباره تلاش کن.",
+            ['reply_markup' => Nav::stepKb()]);
+        return;
+    }
+
+    $unknown = Texts::unknownVars($key, $value);
+    $msg = "✅ ذخیره شد: «" . Texts::label($key) . "»";
+    if ($unknown) {
+        $esc = [];
+        foreach ($unknown as $n) $esc[] = '‹' . htmlspecialchars($n, ENT_QUOTES, 'UTF-8') . '›';
+        $msg .= "\n\n⚠️ جایگذینِ ناشناخته: " . implode('، ', $esc)
+            . "\nاین‌ها هنگام نمایش به کاربر حذف می‌شوند؛ اگر منظورت جایگذین بود، املایش را درست کن.";
+    }
+    $msg .= "\n\n— <b>پیش‌نمایش</b> —\n" . textsTrim(Texts::preview($store, $key));
+
+    $rows = [
+        [['text' => '✏️ دوباره ویرایش', 'callback_data' => 'texts:edit:' . $key]],
+        [['text' => '📌 بازگشت به پیش‌فرض', 'callback_data' => 'texts:reset:' . $key]],
+        [['text' => '↩️ گروه‌ها', 'callback_data' => 'texts:list'],
+         ['text' => Nav::MENU, 'callback_data' => Nav::CB_BACK_MAIN]],
+    ];
+    $r = BotApi::send($TOKEN, $chatId, $msg, ['reply_markup' => BotApi::ikb($rows)]);
+
+    // ===== تگ‌های HTML نامتوازن =====
+    // تلگرام چنین متنی را رد می‌کند؛ اگر ذخیره بماند، همهٔ پیام‌های بعدیِ ربات
+    // هم خراب می‌شود. پس متن برمی‌گردد و ادمین همان‌جا علت دقیق API را می‌گیرد.
+    if (!isHtmlParseError($r)) {
+        $store->clearStep($uid);
+        return;
+    }
+    $errDesc = (string)($r['description'] ?? '');
+    if ($hadCustom) Texts::set($store, $key, $before); else Texts::reset($store, $key);
+    // step عمداً باقی می‌ماند تا ادمین همان‌جا اصلاح کند
+    BotApi::send($TOKEN, $chatId,
+        "⛔️ متن ذخیره نشد: تلگرام تگ‌های HTML را نپذیرفت.\n"
+        . "علت دقیق تلگرام: <code>" . htmlspecialchars($errDesc, ENT_QUOTES, 'UTF-8') . "</code>\n"
+        . "محل: bot.php → handleTextEditStep() (کلید <code>"
+        . htmlspecialchars($key, ENT_QUOTES, 'UTF-8') . "</code>)\n\n"
+        . "• تگ‌های باز و بسته را جفت کن: <code>&lt;b&gt;…&lt;/b&gt;</code>\n"
+        . "• کاراکترهای <b>غیرتگی</b>ِ <code>&lt;</code> و <code>&amp;</code> را "
+        . "<code>&amp;lt;</code> و <code>&amp;amp;</code> کن.\n"
+        . "• متن قبلی دست‌نخورده ماند؛ نسخهٔ درست را دوباره بفرست.\n\n"
+        . "— متنِ فرستاده‌شده (بدون تگ) —\n" . mb_substr(strip_tags($value), 0, 800),
+        ['reply_markup' => Nav::stepKb()]);
+}
+
+/** کال‌بک‌های پنل «📝 متن‌ها» — فقط ادمین */
+function handleTextsCallback(Store $store, string $TOKEN, $chatId, int $msgId, bool $admin, string $data, array $user, array $SUPERS): void
+{
+    if (!$admin) { BotApi::send($TOKEN, $chatId, "⛔️ فقط ادمین."); return; }
+    $uid = (int)$user['user_id'];
+    $parts = explode(':', $data);
+    $cmd = (string)($parts[1] ?? '');
+    $arg = (string)($parts[2] ?? '');
+
+    switch ($cmd) {
+        case 'list':
+            $store->clearStep($uid);
+            showTextsGroups($store, $TOKEN, $chatId, $msgId);
+            return;
+
+        case 'g':
+            if (!Texts::isValidGroup($arg)) {
+                BotApi::send($TOKEN, $chatId,
+                    "⛔️ گروه نامعتبر: <code>" . htmlspecialchars($arg, ENT_QUOTES, 'UTF-8') . "</code>\n"
+                    . "محل دقیق: bot.php → handleTextsCallback() — یکی از گروه‌های فهرست را بزن.");
+                showTextsGroups($store, $TOKEN, $chatId);
+                return;
+            }
+            $store->clearStep($uid);
+            showTextsList($store, $TOKEN, $chatId, $arg, $msgId);
+            return;
+
+        case 'show':
+            if (!Texts::isValid($arg)) {
+                BotApi::send($TOKEN, $chatId,
+                    "⛔️ کلید متن نامعتبر: <code>" . htmlspecialchars($arg, ENT_QUOTES, 'UTF-8') . "</code>\n"
+                    . "محل دقیق: bot.php → handleTextsCallback()");
+                showTextsGroups($store, $TOKEN, $chatId);
+                return;
+            }
+            $store->clearStep($uid);
+            showTextItem($store, $TOKEN, $chatId, $arg, $msgId);
+            return;
+
+        case 'edit':
+            if (!Texts::isValid($arg)) {
+                BotApi::send($TOKEN, $chatId,
+                    "⛔️ کلید متن نامعتبر: <code>" . htmlspecialchars($arg, ENT_QUOTES, 'UTF-8') . "</code>\n"
+                    . "محل دقیق: bot.php → handleTextsCallback()");
+                showTextsGroups($store, $TOKEN, $chatId);
+                return;
+            }
+            $store->setStep($uid, 'await_text_edit', ['key' => $arg, 'group' => Texts::groupOf($arg)]);
+            BotApi::send($TOKEN, $chatId, textsEditPrompt($arg), ['reply_markup' => Nav::stepKb()]);
+            return;
+
+        case 'reset':
+            if (!Texts::isValid($arg)) {
+                BotApi::send($TOKEN, $chatId,
+                    "⛔️ کلید متن نامعتبر: <code>" . htmlspecialchars($arg, ENT_QUOTES, 'UTF-8') . "</code>\n"
+                    . "محل دقیق: bot.php → handleTextsCallback()");
+                showTextsGroups($store, $TOKEN, $chatId);
+                return;
+            }
+            $store->clearStep($uid);
+            Texts::reset($store, $arg);
+            showTextItem($store, $TOKEN, $chatId, $arg, $msgId,
+                "↩️ «" . Texts::label($arg) . "» به متن پیش‌فرض برگردانده شد.");
+            return;
+
+        default:
+            BotApi::send($TOKEN, $chatId,
+                "⛔️ دستور ناشناختهٔ پنل متن‌ها: <code>" . htmlspecialchars($data, ENT_QUOTES, 'UTF-8') . "</code>\n"
+                . "محل دقیق: bot.php → handleTextsCallback() → default");
+            return;
+    }
 }
 
 /**
@@ -652,7 +1034,7 @@ function handleBack(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
         switch ($target['kind']) {
             case 'type':
                 $store->clearStep($uid);
-                BotApi::send($TOKEN, $chatId, "نوع ربات را انتخاب کن 👇", ['reply_markup' => Nav::typeMenu()]);
+                BotApi::send($TOKEN, $chatId, Texts::get($store, 'type_prompt'), ['reply_markup' => Nav::typeMenu()]);
                 return;
             case 'step': {
                 $prev = (string)($target['step'] ?? 'idle');
@@ -660,24 +1042,24 @@ function handleBack(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
                     $type = (string)($temp['type'] ?? '');
                     if ($type === '') { // temp گم شده (مثلاً ری‌استارت) → انتخاب نوع
                         $store->clearStep($uid);
-                        BotApi::send($TOKEN, $chatId, "نوع ربات را انتخاب کن 👇", ['reply_markup' => Nav::typeMenu()]);
+                        BotApi::send($TOKEN, $chatId, Texts::get($store, 'type_prompt'), ['reply_markup' => Nav::typeMenu()]);
                         return;
                     }
                     $store->setStep($uid, 'await_bot_token', ['type' => $type]);
                     $names = Manager::validTypes();
                     $label = $names[$type] ?? $type;
-                    BotApi::send($TOKEN, $chatId, "توکن ربات <b>{$label}</b> را بفرست.\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
+                    BotApi::send($TOKEN, $chatId, Texts::get($store, 'token_prompt', ['type' => $label]), ['reply_markup' => Nav::stepKb()]);
                     return;
                 }
                 // برگشت به await_admin_id — بدون توکن معتبر نمی‌شود ادامه داد
                 $hasToken = !empty($temp['token']);
                 if (!$hasToken) {
                     $store->clearStep($uid);
-                    BotApi::send($TOKEN, $chatId, "نوع ربات را انتخاب کن 👇", ['reply_markup' => Nav::typeMenu()]);
+                    BotApi::send($TOKEN, $chatId, Texts::get($store, 'type_prompt'), ['reply_markup' => Nav::typeMenu()]);
                     return;
                 }
                 $store->setStep($uid, 'await_admin_id');
-                BotApi::send($TOKEN, $chatId, "آیدی عددی ادمین را بفرست:\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
+                BotApi::send($TOKEN, $chatId, Texts::get($store, 'admin_prompt'), ['reply_markup' => Nav::stepKb()]);
                 return;
             }
             case 'users':
@@ -701,6 +1083,14 @@ function handleBack(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
                     return;
                 }
                 showPaymentsAdmin($store, $TOKEN, $chatId);
+                return;
+            case 'texts':
+                $store->clearStep($uid);
+                if (!isAdmin($user, $SUPERS)) {
+                    BotApi::send($TOKEN, $chatId, "🏠 منوی اصلی", ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
+                    return;
+                }
+                showTextsGroups($store, $TOKEN, $chatId);
                 return;
             case 'bot': {
                 $botId = (int)($temp['bot_id'] ?? 0);
@@ -839,6 +1229,7 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
             ['command' => 'stats', 'description' => '📊 آمار ربات‌ساز'],
             ['command' => 'cron', 'description' => '⏰ وضعیت کرون (ادمین)'],
             ['command' => 'diagnose', 'description' => '🔍 بررسی سیستم (ادمین)'],
+            ['command' => 'texts', 'description' => '📝 ویرایش متن‌های ربات (ادمین)'],
             ['command' => 'cancel', 'description' => '❌ انصراف از مرحلهٔ فعلی'],
             ['command' => 'help', 'description' => 'ℹ️ راهنما'],
         ]);
@@ -846,8 +1237,10 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
         $deepNote = $deepLink !== null
             ? "🔗 لینک شما: <code>" . htmlspecialchars($deepLink, ENT_QUOTES, 'UTF-8') . "</code>\n\n"
             : '';
+        $types = implode('، ', array_values(Manager::availableTypes()));
+        if ($types === '') $types = 'هیچ قالبی روی سرور نصب نیست';
         BotApi::send($TOKEN, $chatId,
-            $deepNote . "👋 سلام! به <b>ربات‌ساز</b> خوش آمدی.\nنقش شما: {$role}\n\nبا دکمه «🤖 ساخت ربات جدید» در چند ثانیه ربات فاکسیما یا میرزا بساز.\nفقط توکن ربات + آیدی ادمین + یک نام لازم است.",
+            $deepNote . Texts::get($store, 'welcome', ['role' => $role, 'types' => $types]),
             ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
         return;
     }
@@ -859,6 +1252,7 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
         case '/stats':  $text = $admin ? '📊 آمار' : 'ℹ️ راهنما'; break;
         case '/cron':   $text = $admin ? '⏰ کرون' : 'ℹ️ راهنما'; break;
         case '/diagnose': $text = $admin ? '🔍 دیاگنوز' : 'ℹ️ راهنما'; break;
+        case '/texts':    $text = $admin ? '📝 متن‌ها' : 'ℹ️ راهنما'; break;
     }
 
     // دکمه «📋 درخواست‌های جدید» شمارنده پویا دارد: «📋 درخواست‌های جدید (N)»
@@ -888,18 +1282,16 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
                 return;
             }
             if ($store->hasPendingRequest($uid)) {
-                BotApi::send($TOKEN, $chatId, "⏳ درخواست شما قبلاً ثبت شده و در انتظار تأیید ادمین است.
-لطفاً صبر کنید.");
+                BotApi::send($TOKEN, $chatId, Texts::get($store, 'request_pending_again'));
                 return;
             }
             // ادمین یا کاربر تأییدشده: مستقیم انتخاب نوع ربات
             if ($admin || $store->hasApprovedRequest($uid)) {
-                BotApi::send($TOKEN, $chatId, "نوع ربات را انتخاب کن 👇", ['reply_markup' => Nav::typeMenu()]);
+                BotApi::send($TOKEN, $chatId, Texts::get($store, 'type_prompt'), ['reply_markup' => Nav::typeMenu()]);
                 return;
             }
             $store->addPendingRequest($uid, 'bot');
-            BotApi::send($TOKEN, $chatId, "📝 درخواست شما ثبت شد.
-لطفاً منتظر تأیید ادمین بمانید.");
+            BotApi::send($TOKEN, $chatId, Texts::get($store, 'request_pending'));
             return;
 
         case '💳 افزایش لیمیت':
@@ -933,13 +1325,24 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
         }
 
         case 'ℹ️ راهنما': {
-            $help = "📖 <b>راهنما</b>\n\n1️⃣ از @BotFather با /newbot یک ربات بساز و توکن را کپی کن.\n2️⃣ در ربات‌ساز «🤖 ساخت ربات جدید» → انتخاب فاکسیما/میرزا.\n3️⃣ توکن، آیدی عددی ادمین (@userinfobot) و یک نام انگلیسی بده.\n4️⃣ ربات‌ساز خودش: پوشه + دیتابیس + کانفیگ + وبهوک.\n\n⚠️ توکن را به کسی نده.";
+            // بخش‌های پویای راهنما: پرداخت (فقط اگر درگاهی فعال باشد)، اشاره به
+            // لاگ/دیاگنوز (فقط برای ادمین) و راه‌های ارتباطی (اگر ادمین پر کرده باشد).
+            $helpPay = '';
             try {
                 if (PaymentGateways::isAnythingEnabled($store)) {
-                    $help .= "\n\n💳 <b>پرداخت</b>\nسقف ساخت ربات و بعضی قالب‌ها پولی است.\n"
-                        . "از «💳 افزایش لیمیت» اسلات یا مجوز قالب بخر و با «🧾 پرداخت‌های من» پیگیری کن.";
+                    $helpPay = "\n\n💳 <b>پرداخت</b>\nسقف ساخت ربات و بعضی قالب‌ها پولی است.\n"
+                        . "از «💳 افزایش لیمیت» اسلات یا مجوز قالب بخر و با «🧾 پرداخت‌های من» پیگیری کن.\n"
+                        . "کارت‌به‌کارت: عکس فیش یا شماره پیگیری بفرست تا ادمین بررسی کند.\n"
+                        . "کریپتو: بعد از پرداخت خودکار تأیید می‌شود؛ اگر نشد «🔄 بررسی وضعیت» را بزن.";
                 }
             } catch (Throwable $e) {}
+            $helpContact = trim(Texts::get($store, 'contact'));
+            $helpContact = $helpContact !== '' ? "\n\n📞 <b>ارتباط با ادمین</b>\n" . $helpContact : '';
+            $help = Texts::get($store, 'help', [
+                'payment' => $helpPay,
+                'diag'    => $admin ? "لاگ کامل هم در <code>data/logs/</code> و «🔍 دیاگنوز» است." : '',
+                'contact' => $helpContact,
+            ]);
             BotApi::send($TOKEN, $chatId, $help, ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
             return;
         }
@@ -962,6 +1365,12 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
             return;
         }
         switch ($text) {
+            // ===== 📝 ویرایش متن‌های پویای ربات (فقط ادمین) =====
+            case '/texts':
+            case '📝 متن‌ها': {
+                showTextsGroups($store, $TOKEN, $chatId);
+                return;
+            }
 
             // ===== 🔍 دیاگنوز سیستم (فقط ادمین) =====
             case '/diagnose':
@@ -991,7 +1400,7 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
 
             case '📣 همگانی':
                 $store->setStep($uid, 'await_broadcast');
-                BotApi::send($TOKEN, $chatId, "متن پیام همگانی را بفرست.\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
+                BotApi::send($TOKEN, $chatId, Texts::get($store, 'broadcast_prompt'), ['reply_markup' => Nav::stepKb()]);
                 return;
 
             case '👥 کاربران مجاز':
@@ -1011,7 +1420,13 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
         }
     }
 
-    BotApi::send($TOKEN, $chatId, "⛔️ دستور نامعتبر است.", ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
+    BotApi::send($TOKEN, $chatId,
+        Texts::get($store, 'invalid', [
+            'input' => $text !== ''
+                ? htmlspecialchars(mb_substr($text, 0, 80), ENT_QUOTES, 'UTF-8')
+                : '—',
+        ]),
+        ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
 }
 
 // ================= steps =================
@@ -1023,6 +1438,15 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
     // دکمه‌های ناوبری همیشه باید کار کنند — حتی وسط یک مرحلهٔ ورودی.
     // ترتیب مهم است: این چک‌ها قبل از switch اصلی هستند تا متن «برگشت» در
     // stepهای همگانی (await_broadcast/await_child_broadcast) به‌اشتباه برای همه ارسال نشود.
+    //
+    // استثنا: مرحلهٔ «ویرایش متن» عمداً قبل از همه بررسی می‌شود چون ادمین ممکن
+    // است متنی دقیقاً شبیه یک دکمه («منو»/«برگشت») بفرستد؛ با پیشوند = ذخیره
+    // می‌شود و بدون آن، ناوبری برنده است تا هیچ‌کس وسط کار گیر نکند.
+    if ($step === 'await_text_edit') {
+        handleTextEditStep($store, $TOKEN, $SUPERS, $user, $chatId, $text, $temp);
+        return;
+    }
+
     if (Nav::isMenu($text)) {
         $store->clearStep($uid);
         BotApi::send($TOKEN, $chatId, "🏠 منوی اصلی", ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
@@ -1336,7 +1760,7 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
                 'bot_username' => $me['result']['username'] ?? '',
                 'bot_id' => $me['result']['id'] ?? 0,
             ]);
-            BotApi::send($TOKEN, $chatId, "✅ ربات شناسایی شد: @" . ($me['result']['username'] ?? '?') . "\n\nحالا آیدی عددی ادمین را بفرست:\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
+            BotApi::send($TOKEN, $chatId, Texts::get($store, 'token_ok', ['username' => (string)($me['result']['username'] ?? '?')]), ['reply_markup' => Nav::stepKb()]);
             return;
         }
 
@@ -1346,7 +1770,7 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
                 return;
             }
             $store->setStep($uid, 'await_folder', ['admin_id' => (int)$text]);
-            BotApi::send($TOKEN, $chatId, "حالا یک نام انگلیسی کوتاه بفرست (مثلا: <code>shop1</code>)\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
+            BotApi::send($TOKEN, $chatId, Texts::get($store, 'folder_prompt'), ['reply_markup' => Nav::stepKb()]);
             return;
         }
 
@@ -1393,12 +1817,12 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
                 $store->clearStep($uid);
                 return;
             }
-            BotApi::send($TOKEN, $chatId, "⏳ در حال ساخت ربات <b>{$slug}</b> ...");
+            BotApi::send($TOKEN, $chatId, Texts::get($store, 'build_running', ['slug' => $slug]));
             // ===== بررسی پیش‌نیازها قبل از ساخت =====
             $_prereq_err = Manager::checkBuildPrerequisites($type);
             if ($_prereq_err !== '') {
                 Logger::getInstance()->error('build', "Prerequisites failed for {$slug} ({$type}): {$_prereq_err}");
-                BotApi::send($TOKEN, $chatId, "❌ خطا در ساخت ربات:\n{$_prereq_err}\nنام دیگری بفرست، یا برگرد / انصراف بده.", ['reply_markup' => Nav::stepKb()]);
+                BotApi::send($TOKEN, $chatId, Texts::get($store, 'build_failed', ['error' => $_prereq_err]), ['reply_markup' => Nav::stepKb()]);
                 return;
             }
             try {
@@ -1417,7 +1841,11 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
                     }
                 }
                 $doneMsg = $result['custom_message']
-                    ?? "🎉 <b>ربات آماده شد!</b>\n\n🤖 @{$result['bot_username']}\n📁 پوشه: <code>{$slug}</code>\n🗄 دیتابیس: <code>{$result['db']}</code>\n🔗 وبهوک: ست شد ✅";
+                    ?? Texts::get($store, 'build_done', [
+                        'username' => (string)($result['bot_username'] ?? ''),
+                        'slug'     => $slug,
+                        'db'       => (string)($result['db'] ?? ''),
+                    ]);
                 BotApi::send($TOKEN, $chatId, $doneMsg,
                     ['reply_markup' => mainMenu($store->user($uid), $SUPERS, $store)]);
             } catch (Throwable $e) {
@@ -1426,7 +1854,9 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
                 Logger::getInstance()->error('build', "Build failed ({$slug}): " . $e->getMessage());
                 // مرحله عمداً باقی می‌ماند تا کاربر بتواند همان‌جا نام دیگری بفرستد
                 // («دوباره تلاش کن» یعنی همین). انصراف با ❌ انصراف / 🏠 منو.
-                BotApi::send($TOKEN, $chatId, "❌ خطا در ساخت ربات: " . htmlspecialchars(Manager::sanitizeDbError($e->getMessage())) . "\nنام دیگری بفرست، یا برگرد / انصراف بده.", ['reply_markup' => Nav::stepKb()]);
+                BotApi::send($TOKEN, $chatId, Texts::get($store, 'build_failed', [
+                    'error' => htmlspecialchars(Manager::sanitizeDbError($e->getMessage()), ENT_QUOTES, 'UTF-8'),
+                ]), ['reply_markup' => Nav::stepKb()]);
             }
             return;
         }
@@ -1463,7 +1893,16 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
                 }
             }
             $store->clearStep($uid);
-            BotApi::send($TOKEN, $chatId, "✅ همگانی تمام شد: {$ok}/{$total}", ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
+            $skipped = $total - $ok;
+            BotApi::send($TOKEN, $chatId,
+                Texts::get($store, 'broadcast_done', [
+                    'ok'    => $ok,
+                    'total' => $total,
+                    'skipped_note' => $skipped > 0
+                        ? "\n⚠️ {$skipped} نفر دریافت نکردند (ربات را بلاک کرده‌اند یا آیدیشان نامعتبر است)."
+                        : '',
+                ]),
+                ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
             return;
         }
 
@@ -1541,7 +1980,11 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
                 }
             }
             $store->clearStep($uid);
-            BotApi::send($TOKEN, $chatId, "✅ همگانی {$bot['folder']}: {$ok}/{$total}", ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
+            BotApi::send($TOKEN, $chatId, Texts::get($store, 'broadcast_child_done', [
+                'folder' => (string)($bot['folder'] ?? ''),
+                'ok'     => $ok,
+                'total'  => $total,
+            ]), ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
             return;
         }
     }
@@ -1800,7 +2243,7 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
             // بقیهٔ مسیرها باید با منطق خودشان پردازش شوند (پرداخت/فروشگاه/ساخت)
             if ($data === Nav::CB_BACK_TYPE) {
                 $store->clearStep($uid);
-                BotApi::send($TOKEN, $chatId, "نوع ربات را انتخاب کن 👇", ['reply_markup' => Nav::typeMenu()]);
+                BotApi::send($TOKEN, $chatId, Texts::get($store, 'type_prompt'), ['reply_markup' => Nav::typeMenu()]);
                 return;
             }
             if ($data === Nav::CB_MY_BOTS) {
@@ -1809,7 +2252,7 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
             }
             // پرداخت یا انتخاب نوع ⇒ ادامهٔ پردازش عادی پایین‌تر (بدون ردشدن از این گیت)
         } else {
-            BotApi::send($TOKEN, $chatId, "⛔️ دسترسی ندارید.",
+            BotApi::send($TOKEN, $chatId, Texts::get($store, 'denied'),
                 ['reply_markup' => BotApi::kb([[['text' => '🤖 ساخت ربات جدید'], ['text' => 'ℹ️ راهنما']]])]);
             return;
         }
@@ -1831,8 +2274,8 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
     }
     if ($data === Nav::CB_BACK_TYPE) {
         $store->clearStep($uid);
-        if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, "نوع ربات را انتخاب کن 👇");
-        BotApi::send($TOKEN, $chatId, "نوع ربات را انتخاب کن 👇", ['reply_markup' => Nav::typeMenu()]);
+        if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, Texts::get($store, 'type_prompt'));
+        BotApi::send($TOKEN, $chatId, Texts::get($store, 'type_prompt'), ['reply_markup' => Nav::typeMenu()]);
         return;
     }
     if ($data === Nav::CB_MY_BOTS) {
@@ -1873,6 +2316,12 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
         return;
     }
 
+    // ===== ادمین: ویرایش متن‌های پویای ربات =====
+    if (str_starts_with($data, 'texts:')) {
+        handleTextsCallback($store, $TOKEN, $chatId, $msgId, $admin, $data, $user, $SUPERS);
+        return;
+    }
+
     if (str_starts_with($data, 'newbot:')) {
         $type = substr($data, 7);
         // availableTypes نه validTypes: دکمه‌های منوی قبلی ممکن است «مرده» باشند
@@ -1900,12 +2349,10 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
         // مجوز نداشت پول می‌داد بی‌آنکه بتواند بسازد. اول مجوز، بعد پول.
         if (!$admin && !$store->hasApprovedRequest($uid)) {
             if ($store->hasPendingRequest($uid)) {
-                BotApi::send($TOKEN, $chatId, "⏳ درخواست شما در انتظار تأیید ادمین است.
-تا تأیید، امکان خرید اسلات یا مجوز قالب وجود ندارد.");
+                BotApi::send($TOKEN, $chatId, Texts::get($store, 'request_pending_again'));
             } else {
                 $store->addPendingRequest($uid, 'bot');
-                BotApi::send($TOKEN, $chatId, "📝 درخواست شما ثبت شد.
-پس از تأیید ادمین می‌توانید ساخت (و در صورت نیاز خرید) را انجام دهید.");
+                BotApi::send($TOKEN, $chatId, Texts::get($store, 'request_pending'));
             }
             return;
         }
@@ -1914,7 +2361,7 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
             return;
         }
         $store->setStep($uid, 'await_bot_token', ['type' => $type]);
-        BotApi::send($TOKEN, $chatId, "توکن ربات <b>" . (string)($names[$type] ?? $type) . "</b> را بفرست.\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL,
+        BotApi::send($TOKEN, $chatId, Texts::get($store, 'token_prompt', ['type' => (string)($names[$type] ?? $type)]),
             ['reply_markup' => Nav::stepKb()]);
         return;
     }
@@ -1949,7 +2396,7 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
         if (!$req) { BotApi::send($TOKEN, $chatId, "⛔️ درخواست یافت نشد."); return; }
         $store->approveRequest($requestId);
         BotApi::send($TOKEN, $chatId, "✅ درخواست تأیید شد!");
-        BotApi::send($TOKEN, (int)$req['user_id'], "🎉 درخواستت تأیید شد! حالا «🤖 ساخت ربات جدید» را بزن و نوع ربات را انتخاب کن.");
+        BotApi::send($TOKEN, (int)$req['user_id'], Texts::get($store, 'request_approved'));
         return;
     }
 
@@ -2631,7 +3078,9 @@ function handlePayAdminCallback(array $cfg, Store $store, string $TOKEN, array $
         return;
     }
 
-    BotApi::send($TOKEN, $chatId, "⛔️ دستور نامعتبر است.", ['reply_markup' => PaymentPanel::adminKb($store)]);
+    BotApi::send($TOKEN, $chatId,
+        Texts::get($store, 'invalid', ['input' => htmlspecialchars(mb_substr((string)$data, 0, 80), ENT_QUOTES, 'UTF-8')]),
+        ['reply_markup' => PaymentPanel::adminKb($store)]);
 }
 /**
  * گزارش عیب‌یابی سیستم (فقط ادمین).
@@ -2927,7 +3376,9 @@ function botAction(array $cfg, Store $store, string $TOKEN, array $SUPERS, array
                 return;
             }
             $store->setStep($uid, 'await_child_broadcast', ['bot_id' => $bot['id']]);
-            BotApi::send($TOKEN, $chatId, "پیام همگانی برای ربات <b>{$bot['folder']}</b> را بفرست:\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
+            BotApi::send($TOKEN, $chatId, Texts::get($store, 'broadcast_child_prompt', [
+                'folder' => (string)($bot['folder'] ?? ''),
+            ]), ['reply_markup' => Nav::stepKb()]);
             return;
         }
         case 'webhook': {

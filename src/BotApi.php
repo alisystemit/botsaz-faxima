@@ -201,12 +201,12 @@ class BotApi
      * پیام را ارسال می‌کند.
      * بدون این، یک کال‌بک بدون message_id عملاً «هیچ» به کاربر نشان می‌داد و
      * لاگ هم فقط یک خط بی‌مورد می‌ساخت.
+     * خروجی: نتیجهٔ API — تا فراخواننده بتواند خطای تگ HTML را تشخیص دهد و جایگزین بفرستد.
      */
-    public static function edit(string $token, $chatId, $msgId, string $text, array $extra = []): void
+    public static function edit(string $token, $chatId, $msgId, string $text, array $extra = []): array
     {
         if (!is_numeric($msgId) || (int)$msgId <= 0) {
-            self::send($token, $chatId, $text, $extra);
-            return;
+            return self::send($token, $chatId, $text, $extra);
         }
         $r = self::call($token, 'editMessageText', array_merge([
             'chat_id' => $chatId, 'message_id' => (int)$msgId, 'text' => $text, 'parse_mode' => 'HTML',
@@ -214,6 +214,7 @@ class BotApi
         if (!is_array($r) || empty($r['ok'])) {
             self::logFail('editMessageText', 'chat=' . $chatId . ' — ' . (($r['description'] ?? '') ?: 'no response'));
         }
+        return is_array($r) ? $r : [];
     }
 
     public static function setMyCommands(string $token, array $commands): array

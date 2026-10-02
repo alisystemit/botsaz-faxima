@@ -22,6 +22,8 @@ $classes = [
     'PaymentCard'     => '/src/Payment/CardToCard.php',
     'PaymentNowPay'   => '/src/Payment/NowPayments.php',
     'PaymentPanel'    => '/src/Payment/AdminPanel.php',
+    // Texts به Nav و PaymentGateways وابسته است ⇒ بعد از آن‌ها
+    'Texts'           => '/src/Texts.php',
 ];
 
 // ---- ۱) متدها و ثابت‌های هر کلاس ----
