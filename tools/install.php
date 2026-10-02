@@ -16,6 +16,7 @@ if (!file_exists($root.'/config.php')) {
 
 $cfg = require $root.'/config.php';
 require_once $root.'/src/Store.php';
+require_once $root.'/src/Manager.php';
 $store = new Store($cfg['manager_db'], $cfg);
 echo "manager DB OK (driver: {$store->getDriver()})\n";
 
@@ -32,7 +33,9 @@ $payCfg = $cfg['payment'] ?? [];
 if ($store->getSetting('pay_limit_price') === null) {
     $store->setSetting('pay_limit_price', (string)(int)($payCfg['limit_price'] ?? 50000));
 }
-foreach (['faxima', 'mirza'] as $_t) {
+// از رجیستری قالب‌ها خوانده می‌شود، نه از آرایهٔ ثابت — تا قالب تازه خودکار
+// کلید قیمتش ساخته شود و در پنل «قیمت قالب» قابل تنظیم باشد.
+foreach (array_keys(Manager::templates()) as $_t) {
     if ($store->getSetting(PaymentPricing::priceKey($_t)) === null) {
         $store->setSetting(PaymentPricing::priceKey($_t), (string)(int)(($payCfg['template_prices'][$_t] ?? 0)));
     }

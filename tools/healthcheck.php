@@ -101,12 +101,20 @@ if (!empty($cfg['base_url']) && $cfg['base_url'] !== 'http://botsaz-faxima.test'
 
 // ===== ۲. بررسی پوشه‌ها =====
 echo "[2] بررسی پوشه‌ها...\n";
-$dirs = ['bots', 'data', 'templates/faxima', 'templates/mirza'];
-foreach ($dirs as $dir) {
-    if (is_dir(__DIR__ . "/../{$dir}")) {
-        $ok[] = "Directory exists: {$dir}";
+// مسیر هر قالب از رجیستری می‌آید (بعضی قالب‌ها پوشه‌شان نام دیگری دارد)،
+// و فایل «لازم برای اجرا» هم همان است که ربات‌ساز هنگام ساخت می‌سنجد.
+$dirs = ['bots', 'data'];
+foreach (Manager::templates() as $tplKey => $tplSpec) {
+    $rel = 'templates/' . basename(Manager::templateDir($tplKey));
+    if (is_dir(__DIR__ . '/../' . $rel)) {
+        $need = (string)($tplSpec['autoload'] ?? 'vendor/autoload.php');
+        if (is_file(Manager::templateDir($tplKey) . '/' . $need)) {
+            $ok[] = "Template {$tplKey}: {$rel} (+{$need})";
+        } else {
+            $errors[] = "Template {$tplKey}: {$rel} exists but {$need} is missing — git pull";
+        }
     } else {
-        $errors[] = "Directory missing: {$dir}";
+        $errors[] = "Template {$tplKey}: directory missing ({$rel}) — git pull";
     }
 }
 

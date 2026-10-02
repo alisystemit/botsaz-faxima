@@ -46,14 +46,27 @@ class Nav
         ]);
     }
 
-    /** منوی انتخاب نوع ربات — همیشه دارای انصراف و برگشت */
+    /**
+     * منوی انتخاب نوع ربات — همیشه دارای انصراف و برگشت.
+     *
+     * از رجیستری قالب‌ها ساخته می‌شود، پس افزودن قالب تازه فقط ویرایش
+     * Manager::templates() است. قالبی که روی سرور نباشد اصلاً نشان داده نمی‌شود
+     * (وگرنه کاربر دکمه می‌زند و با خطای «قالب روی سرور نیست» روبه‌رو می‌شود).
+     */
     public static function typeMenu(): string
     {
-        return BotApi::ikb([
-            [['text' => '✨ فاکسیما (فروش VPN)', 'callback_data' => 'newbot:faxima']],
-            [['text' => '🌙 میرزا (فروش VPN)', 'callback_data' => 'newbot:mirza']],
-            [['text' => self::BACK, 'callback_data' => self::CB_BACK_MAIN], ['text' => self::CANCEL, 'callback_data' => self::CB_CANCEL]],
-        ]);
+        $rows = [];
+        foreach (Manager::availableTypes() as $key => $label) {
+            $spec = Manager::templateSpec($key);
+            $icon = (string)($spec['icon'] ?? '🤖');
+            $rows[] = [['text' => $icon . ' ' . $label, 'callback_data' => 'newbot:' . $key]];
+        }
+        if ($rows === []) {
+            $rows[] = [['text' => '⚠️ هیچ قالبی روی سرور نصب نیست', 'callback_data' => 'noop']];
+        }
+        $rows[] = [['text' => self::BACK, 'callback_data' => self::CB_BACK_MAIN],
+                   ['text' => self::CANCEL, 'callback_data' => self::CB_CANCEL]];
+        return BotApi::ikb($rows);
     }
 
     /** پنل مدیریت کاربران مجاز — همیشه دارای برگشت */

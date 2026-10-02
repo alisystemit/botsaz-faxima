@@ -341,18 +341,46 @@ function showUsersPanel(string $TOKEN, $chatId, int $msgId = 0): void
     else BotApi::send($TOKEN, $chatId, "مدیریت کاربران مجاز 👇", ['reply_markup' => $kb]);
 }
 
+/**
+ * متن دیتابیس یک ربات فرزند برای نمایش — قالب SQLite دیتابیس جدا ندارد
+ * و نام خالی («<code></code>») بد به نظر می‌رسید.
+ */
+function botDbLabel(array $bot): string
+{
+    $name = (string)($bot['db_name'] ?? '');
+    if ($name !== '') return htmlspecialchars($name, ENT_QUOTES, 'UTF-8');
+    return 'SQLite (داخل پوشه)';
+}
+
+/**
+ * آیا این قالب جدول کاربر قابل‌خواندن دارد؟
+ *
+ * «پیام همگانی» و «👥 کاربران» فقط برای قالب‌هایی معنا دارد که جدول `user`
+ * با ستون `id` تلگرامی دارند (فاکسیما/میرزا). قالب SQLite پاسارگاد جدول
+ * `users` دارد ولی آن جدول نمایندگان پنل است، نه کاربران تلگرام — پس خواندنش
+ * یعنی پیام همگانی به آدم‌های اشتباه.
+ */
+function botHasUserTable(array $bot): bool
+{
+    $type = (string)($bot['type'] ?? '');
+    return $type === 'faxima' || $type === 'mirza';
+}
+
 /** متن پنل یک ربات (مشترک بین edit و send) */
 function botPanelText(array $cfg, array $bot): string
 {
     $pdo = childPdo($cfg, $bot);
-    $count = $pdo ? childCount($pdo, $bot) : -1;
-    $countTxt = $count >= 0 ? $count : 'نامشخص';
+    $hasUsers = botHasUserTable($bot);
+    $count = ($pdo && $hasUsers) ? childCount($pdo, $bot) : -1;
+    $countTxt = $count >= 0 ? (string)$count : '—';
     $st = ($bot['status'] ?? '') === 'active' ? '🟢 فعال' : '🔴 غیرفعال';
-    return "🤖 <b>{$bot['folder']}</b> ({$bot['type']})\n\n"
-        . "🔹 یوزرنیم: @{$bot['bot_username']}\n"
+    $name = htmlspecialchars((string)($bot['bot_username'] ?? ''), ENT_QUOTES, 'UTF-8');
+    $label = Manager::templateLabel((string)($bot['type'] ?? ''));
+    return "🤖 <b>" . htmlspecialchars((string)($bot['folder'] ?? ''), ENT_QUOTES, 'UTF-8') . "</b> ({$label})\n\n"
+        . "🔹 یوزرنیم: @{$name}\n"
         . "🔹 وضعیت: {$st}\n"
         . "🔹 ادمین: <code>{$bot['admin_id']}</code>\n"
-        . "🔹 دیتابیس: <code>{$bot['db_name']}</code>\n"
+        . "🔹 دیتابیس: <code>" . botDbLabel($bot) . "</code>\n"
         . "👥 کاربران: {$countTxt}";
 }
 
@@ -461,12 +489,32 @@ function handleBack(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
     }
 }
 
+/**
+ * اتصال به دیتابیس ربات فرزند.
+ *
+ * قالب‌های SQLite (پاسارگاد) دیتابیس جدا ندارند؛ فایلشان داخل پوشهٔ خودشان است.
+ * قبلاً همیشه DSN از نوع MySQL ساخته می‌شد که برای این قالب یعنی «اتصال به
+ * دیتابیسی به نام تهی» ⇒ همیشه null ⇒ شمارش کاربر و پیام همگانی بی‌صدا از کار
+ * می‌افتاد. حالا اول db_name خالی را می‌بیند و مسیر فایل SQLite را می‌سازد.
+ */
 function childPdo(array $cfg, array $bot): ?PDO {
+    $dbName = (string)($bot['db_name'] ?? '');
     try {
+        if ($dbName === '') {
+            // قالب SQLite ⇒ فایل دیتابیس داخل پوشهٔ ربات
+            $folder = (string)($bot['folder'] ?? '');
+            if ($folder === '') return null;
+            $sqlitePath = Manager::childBotsDir() . '/' . $folder . '/data/bot.sqlite';
+            if (!is_file($sqlitePath)) return null;
+            return new PDO('sqlite:' . $sqlitePath, null, null, [
+                PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+                PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+            ]);
+        }
         $port = $cfg['db_port'] ?? 3306;
-        $dsn = "mysql:host={$cfg['db_host']};port={$port};dbname={$bot['db_name']};charset=utf8mb4";
+        $dsn = "mysql:host={$cfg['db_host']};port={$port};dbname={$dbName};charset=utf8mb4";
         return new PDO($dsn, $cfg['db_user'], $cfg['db_pass'], [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
-    } catch (Exception $e) { return null; }
+    } catch (Throwable $e) { return null; }
 }
 
 // ===== جدول کاربران ربات فرزند (با پیشوند احتمالی db_table_prefix) =====
@@ -711,6 +759,8 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
                 $totalChildUsers = 0;
                 foreach ($bots as $b) {
                     if ($b['status'] !== 'active') continue;
+                    // فقط قالب‌هایی که جدول کاربر تلگرامی دارند شمرده می‌شوند
+                    if (!botHasUserTable($b)) continue;
                     $pdo = childPdo($cfg, $b);
                     if ($pdo) {
                         $c = childCount($pdo, $b);
@@ -1109,8 +1159,11 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
             // اینجا پایین‌تر بود و بعد از checkBuildPrerequisites() خوانده
             // می‌شد؛ ولی همان چک باید بداند کدام قالب دارد ساخته می‌شود تا
             // vendor همان قالب را بسنجد، نه هر دو را با هم.
-            $type = $temp['type'] ?? 'faxima';
-            if (!in_array($type, ['faxima', 'mirza'], true)) {
+            $type = (string)($temp['type'] ?? 'faxima');
+            if (Manager::templateSpec($type) === null) {
+                // رجیستری، نه یک آرایهٔ ثابت: قالب تازه نباید اینجا جا بیفتد.
+                // fallback به فاکسیما فقط برای temp خراب/قدیمی است.
+                Logger::getInstance()->warning('build', "unknown template type in step for uid {$uid}: {$type}");
                 $type = 'faxima';
             }
             // ===== گیت پرداخت دوباره (دفاعی) =====
@@ -1203,6 +1256,13 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
             $botId = (int)($temp['bot_id'] ?? 0);
             $bot = $store->botById($botId);
             if (!$bot || ((int)$bot['owner_id'] !== $uid && !$admin)) { $store->clearStep($uid); return; }
+            // قالب‌هایی مثل پاسارگاد اصلاً جدول کاربر تلگرامی ندارند؛
+            // بدون این گارد کاربر «⛔️ کاربری یافت نشد» می‌گرفت و فکر می‌کرد خراب است.
+            if (!botHasUserTable($bot)) {
+                $store->clearStep($uid);
+                BotApi::send($TOKEN, $chatId, "ℹ️ قالب «" . Manager::templateLabel((string)($bot['type'] ?? '')) . "» فهرست کاربر تلگرامی ندارد؛ پیام همگانی برایش ممکن نیست.");
+                return;
+            }
             $pdo = childPdo($cfg, $bot);
             if (!$pdo) { $store->clearStep($uid); BotApi::send($TOKEN, $chatId, "⛔️ اتصال دیتابیس ناموفق."); return; }
             $ids = childUsers($pdo, $bot);
@@ -1230,17 +1290,22 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
 }
 
 // ================= build bot =================
+// ساخت ربات فرزند کاملاً از روی رجیستری Manager::templates() انجام می‌شود.
+// قبلاً این تابع با if ($type === 'mirza') و «else = فاکسیما» نوشته شده بود؛
+// یعنی هر قالب تازه یعنی کپی‌کردن ۴۰ خط و خطر فراموشی یکی از مراحل نصب.
+// الان تفاوت‌ها در همان رجیستری تعریف شده‌اند و این تابع برای همه یکسان است.
 function buildBot(array $cfg, Store $store, string $TOKEN, int $owner, string $type, array $temp, string $slug): array
 {
-    $types = Manager::validTypes();
-    if (!isset($types[$type])) throw new Exception("نوع ربات نامعتبر است");
+    $spec = Manager::templateSpec($type);
+    if ($spec === null) throw new Exception("نوع ربات نامعتبر است");
 
     // پیش‌بررسی نسخهٔ PHP — قبل از mkdir/دیتابیس تا هیچ منبعی ساخته نشود.
-    // بدون این، ربات «موفقیت‌آمیز» ساخته می‌شود ولی index.php و table.php اش 500 می‌دهند.
+    // بدون این، ربات «موفقیت‌آمیز» ساخته می‌شود ولی صفحه‌هایش 500 می‌دهند.
     Manager::assertTemplatePhpCompatible($type);
 
     $tplDir = Manager::templateDir($type);
     $botDir = Manager::childBotsDir() . '/' . $slug;
+    $sqlite = Manager::templateDb($type) === 'sqlite';
 
     // توکن در مرحله قبل رمزنگاری‌شده ذخیره شده؛ برای استفاده واقعی رمزگشایی کن
     $plainToken = childToken(['token' => $temp['token'] ?? '']);
@@ -1249,6 +1314,10 @@ function buildBot(array $cfg, Store $store, string $TOKEN, int $owner, string $t
     $dbCreated = false;
     $dbName = '';
     $dirCreated = false;
+    $webhookSet = false;
+    $webhookNote = '';
+    $tableOk = true;
+    $notes = [];
 
     // ===== ادعای اتمیک پوشه =====
     // mkdir در صورت وجود از قبل شکست می‌خورد؛ بنابراین دو ساخت همزمان با یک نام،
@@ -1258,11 +1327,20 @@ function buildBot(array $cfg, Store $store, string $TOKEN, int $owner, string $t
         if (file_exists($botDir)) throw new Exception("⛔️ این نام قبلاً استفاده شده.");
         // Detailed diagnostic: show path, parent perms, owner
         $_parent = dirname($botDir);
+        $_uid = @fileowner($_parent);
         $_perm = @stat($_parent) ? substr(sprintf('%o', @fileperms($_parent)), -4) : '?';
-        $_owner = @stat($_parent) ? (function_exists('posix_getpwuid') ? (posix_getpwuid(@fileowner($_parent)) ?: ['name'=>$_owner_uid])['name'] : '?') : '?';
-        $_owner_uid = @fileowner($_parent) ?? '?';
+        // اسم کاربری فقط اگر posix موجود باشد؛ بدون آن همان uid نمایش داده می‌شود
+        $_owner = '?';
+        if ($_uid !== false) {
+            $_owner = (string)$_uid;
+            if (function_exists('posix_getpwuid')) {
+                $pw = posix_getpwuid($_uid);
+                if (is_array($pw) && !empty($pw['name'])) $_owner = (string)$pw['name'];
+            }
+        }
+        $_owner_uid = $_uid === false ? '?' : (string)$_uid;
         throw new Exception("ساخت پوشه «{$slug}» ممکن نشد ❌\n"
-            ."مسیر: {$botDir}\n"
+            ."مسار: {$botDir}\n"
             ."پوشه والد: {$_parent}\n"
             ."پرمیشن: {$_perm} (owner: {$_owner_uid}:{$_owner})\n"
             ."علت احتمالی: پوشه bots/ مال www-data نیست\n"
@@ -1271,78 +1349,95 @@ function buildBot(array $cfg, Store $store, string $TOKEN, int $owner, string $t
     $dirCreated = true;
 
     try {
-        // توجه: vendor/ حتماً کپی می‌شود — هر دو سورس به vendor/autoload.php نیاز حیاتی دارند
-        Manager::copyDir($tplDir, $botDir, ['docker/', 'docker-compose.yml', '.env.example', 'vpnbot/', 'install.sh', 'images.jpeg', 'composer.json', 'composer.lock', 'installer/']);
+        // ===== ۱) کپی سورس قالب =====
+        // exclude از رجیستری می‌آید؛ نکتهٔ مهم اینکه پوشهٔ کاربری/داده هم نباید کپی شود
+        // (یک SQLite خالی که بعداً فایل واقعی را بازنویسی می‌کند، یا یک .sqlite ناقص).
+        // هیچ قالبی نباید متادیتای گیت را با خود بیاورد.
+        $exclude = array_merge(
+            (array)($spec['exclude'] ?? []),
+            ['.git/', '.gitignore', '.gitattributes']
+        );
+        Manager::copyDir($tplDir, $botDir, $exclude);
 
-        if ($type === 'mirza') {
+        // ===== ۲) دیتابیس =====
+        $parts = parse_url(rtrim($cfg['base_url'] ?? '', '/'));
+        $domainPath = ($parts['host'] ?? '') . ($parts['path'] ?? '') . '/bots/' . $slug;
+        $baseUrl = rtrim($cfg['base_url'] ?? '', '/') . '/bots/' . $slug;
+        $adminId = (int)($temp['admin_id'] ?? $owner);
+        $botUsername = (string)($temp['bot_username'] ?? '');
+
+        if ($sqlite) {
+            // قالب SQLite دیتابیس جدا نمی‌خواهد؛ فایلش داخل data/ ربات خودش ساخته می‌شود.
+            $dbName = '';
+        } else {
             [$dbName, $tablePrefix] = Manager::createDatabase($cfg, $slug, null);
             $dbCreated = true;
-            $parts = parse_url(rtrim($cfg['base_url'], '/'));
-            $domainPath = ($parts['host'] ?? '') . ($parts['path'] ?? '') . '/bots/' . $slug;
-
-            Manager::patchMirzaConfig($botDir, $cfg, $dbName, $plainToken, (int)($temp['admin_id'] ?? $owner), $temp['bot_username'] ?? '', $domainPath);
-            Manager::removeDir($botDir . '/installer');
-
-            // ===== پاکسازی فایل‌های اضافی (بدون دست‌زدن به vendor/) =====
-            Manager::cleanupExtraFiles($botDir, ['docker/', 'docker-compose.yml', '.env.example', 'vpnbot/', 'install.sh', 'images.jpeg', 'composer.json', 'composer.lock', 'installer/']);
-
-            $webhook = Manager::webhookUrl($cfg, $slug, 'mirza');
-            $set = BotApi::setWebhook($plainToken, $webhook);
-            $webhookSet = true;
-            $webhookNote = empty($set['ok']) ? ' (خطای وبهوک)' : '';
-            $tableOk = Manager::runMirzaTable(
-                dirname($webhook) . '/table.php',
-                Manager::mirzaTableSecret($plainToken)
-            );
-
-            // ===== رمزنگاری توکن =====
-            $secretKey = $GLOBALS['secretKey'] ?? Manager::DEFAULT_SECRET_KEY;
-            $encToken = encryptToken($plainToken, $secretKey);
-
-            $store->addBot([
-                'owner_id' => $owner, 'type' => 'mirza', 'folder' => $slug,
-                'token' => $encToken, 'bot_username' => $temp['bot_username'] ?? '',
-                'bot_id' => $temp['bot_id'] ?? 0, 'admin_id' => (int)($temp['admin_id'] ?? $owner),
-                'db_name' => $dbName, 'db_table_prefix' => '', 'webhook_url' => $webhook,
-                'status' => 'active',
-            ]);
-            $store->incrementBuildCount($owner);
-            $approved = $store->getApprovedRequestByUser($owner);
-            if ($approved) $store->markRequestUsed((int)$approved['id']);
-
-            $msg = "🎉 <b>ربات میرزا آماده شد!</b>\n🤖 @{$temp['bot_username']}\n📁 پوشه: <code>{$slug}</code>\n🗄 دیتابیس: <code>{$dbName}</code>\n🔗 وبهوک: " . ($webhookNote !== '' ? '⚠️ خطا' : 'ست شد ✅') . "\n🗂 جدول‌ها: " . ($tableOk ? '✅' : '⚠️ دستی بازش کن');
-            return ['bot_username' => $temp['bot_username'] ?? '', 'db' => $dbName, 'custom_message' => $msg];
         }
 
-        // فاکسیما
-        [$dbName, $tablePrefix] = Manager::createDatabase($cfg, $slug, null);
-        $dbCreated = true;
-        $parts = parse_url(rtrim($cfg['base_url'], '/'));
-        $domainPath = ($parts['host'] ?? '') . ($parts['path'] ?? '') . '/bots/' . $slug;
+        // ===== ۳) پچ config.php =====
+        $staticSecret = '';
+        switch ($type) {
+            case 'faxima':
+                Manager::patchFaximaConfig($botDir, $cfg, $dbName, $plainToken, $adminId, $botUsername, $domainPath);
+                break;
+            case 'mirza':
+                Manager::patchMirzaConfig($botDir, $cfg, $dbName, $plainToken, $adminId, $botUsername, $domainPath);
+                break;
+            case 'uptime':
+                Manager::patchUptimeConfig($botDir, $cfg, $dbName, $plainToken, $adminId, $botUsername, $domainPath, $baseUrl);
+                break;
+            case 'pasargad':
+                $res = Manager::writePasargadConfig($botDir, $plainToken, $adminId, $botUsername, $baseUrl);
+                $staticSecret = $res['secret'];
+                break;
+            default:
+                throw new Exception("نصب قالب «{$type}» پیاده‌سازی نشده است");
+        }
 
-        Manager::patchFaximaConfig($botDir, $cfg, $dbName, $plainToken, (int)($temp['admin_id'] ?? $owner), $temp['bot_username'] ?? '', $domainPath);
-        Manager::removeDir($botDir . '/installer');
+        // ===== ۴) نصب جدول‌ها =====
+        // روش از رجیستری خوانده می‌شود:
+        //   table.php ⇒ فراخوانی HTTP (فاکسیما/میرزا/آپ‌تایم)
+        //   migrate   ⇒ مایگریشن درون‌فرایندی (پاسارگاد، چون SQLite است و table.php ندارد)
+        $tableFile = (string)($spec['table'] ?? '');
+        $schema = Manager::templateSchema($type);
+        if ($schema === 'http' && $tableFile !== '') {
+            $tableOk = Manager::triggerTable(
+                $baseUrl . '/' . $tableFile,
+                Manager::tableSecret($type, $plainToken)
+            );
+        } elseif ($schema === 'migrate') {
+            $inst = Manager::installTemplateSchema($type, $botDir);
+            if (!$inst['migrated']) {
+                throw new Exception("نصب دیتابیس قالب ناموفق بود: " . $inst['note']);
+            }
+            if ($inst['note'] !== '') $notes[] = $inst['note'];
+        } elseif ($schema !== 'none') {
+            throw new Exception("روش نصب جدول برای قالب «{$type}» ناشناخته است: {$schema}");
+        }
 
-        // ===== پاکسازی فایل‌های اضافی (بدون دست‌زدن به vendor/) =====
-        Manager::cleanupExtraFiles($botDir, ['docker/', 'docker-compose.yml', '.env.example', 'vpnbot/', 'install.sh', 'images.jpeg', 'composer.json', 'composer.lock', 'installer/']);
+        // ===== ۵) پاکسازی فایل‌های اضافی (بدون دست‌زدن به vendor/) =====
+        // فقط «cleanup» — نه exclude. این دو کلید فرق دارند: exclude یعنی «کپی نشود»
+        // (که خودِ copyDir رعایت می‌کند) و cleanup یعنی «کپی لازم بود ولی نباید تحویل شود».
+        // اگر exclude را اینجا هم می‌دادیم، مثلاً data/logs/ پاسارگاد که قالب خودش
+        // لاگ می‌نویسد، بعد از کپی حذف می‌شد؛ tools/dryrun.php دقیقاً همین را گرفت.
+        Manager::cleanupExtraFiles($botDir, (array)($spec['cleanup'] ?? []));
 
-        $webhook = Manager::webhookUrl($cfg, $slug, 'faxima');
-        $secret = Manager::faximaWebhookSecret($plainToken);
+        // ===== ۶) وبهوک =====
+        $secret = Manager::webhookSecret($type, $plainToken, $staticSecret);
+        $webhook = Manager::webhookUrl($cfg, $slug, $type, $secret);
         $set = BotApi::setWebhook($plainToken, $webhook, $secret);
         $webhookSet = true;
-        $webhookNote = empty($set['ok']) ? ' (خطای وبهوک: ' . htmlspecialchars($set['description'] ?? 'unknown') . ')' : '';
-        $tableOk = Manager::triggerTable(
-            dirname($webhook) . '/table.php',
-            Manager::faximaTableSecret($plainToken)
-        );
+        if (empty($set['ok'])) {
+            $webhookNote = '⚠️ خطای وبهوک: ' . htmlspecialchars((string)($set['description'] ?? 'unknown'), ENT_QUOTES, 'UTF-8');
+        }
 
-        // ===== رمزنگاری توکن =====
+        // ===== ۷) ثبت در دیتابیس =====
         $encToken = encryptToken($plainToken, $GLOBALS['secretKey'] ?? Manager::DEFAULT_SECRET_KEY);
 
         $store->addBot([
-            'owner_id' => $owner, 'type' => 'faxima', 'folder' => $slug,
-            'token' => $encToken, 'bot_username' => $temp['bot_username'] ?? '',
-            'bot_id' => $temp['bot_id'] ?? 0, 'admin_id' => (int)($temp['admin_id'] ?? $owner),
+            'owner_id' => $owner, 'type' => $type, 'folder' => $slug,
+            'token' => $encToken, 'bot_username' => $botUsername,
+            'bot_id' => $temp['bot_id'] ?? 0, 'admin_id' => $adminId,
             'db_name' => $dbName, 'db_table_prefix' => '', 'webhook_url' => $webhook,
             'status' => 'active',
         ]);
@@ -1350,14 +1445,33 @@ function buildBot(array $cfg, Store $store, string $TOKEN, int $owner, string $t
         $approved = $store->getApprovedRequestByUser($owner);
         if ($approved) $store->markRequestUsed((int)$approved['id']);
 
-        $msg = "🎉 <b>ربات فاکسیما آماده شد!</b>\n🤖 @{$temp['bot_username']}\n📁 پوشه: <code>{$slug}</code>\n🗄 دیتابیس: <code>{$dbName}</code>\n🔗 وبهوک: " . ($webhookNote !== '' ? '⚠️ خطا' : 'ست شد ✅') . "\n🗂 جدول‌ها: " . ($tableOk ? '✅' : '⚠️ دستی بازش کن') . $webhookNote;
-        return ['bot_username' => $temp['bot_username'] ?? '', 'db' => $dbName, 'custom_message' => $msg];
+        // ===== ۸) پیام نتیجه =====
+        $label = Manager::templateLabel($type);
+        $lines = ["🎉 <b>ربات {$label} آماده شد!</b>"];
+        if ($botUsername !== '') $lines[] = "🤖 @" . htmlspecialchars($botUsername, ENT_QUOTES, 'UTF-8');
+        $lines[] = "📁 پوشه: <code>{$slug}</code>";
+        if ($sqlite) {
+            $lines[] = "🗄 دیتابیس: SQLite (داخل پوشه)";
+        } else {
+            $lines[] = "🗄 دیتابیس: <code>{$dbName}</code>";
+        }
+        $lines[] = "🔗 وبهوک: " . ($webhookNote === '' ? 'ست شد ✅' : $webhookNote);
+        if ($tableFile !== '') {
+            $lines[] = "🗂 جدول‌ها: " . ($tableOk ? '✅' : '⚠️ دستی بازش کن');
+        }
+        $cronFile = (string)($spec['cron'] ?? '');
+        if ($cronFile !== '') {
+            $lines[] = "⏰ کرون: با کرون‌دیسپچر مرکزی اجرا می‌شود ✅ (<code>{$cronFile}</code>)";
+        }
+        foreach ($notes as $n) $lines[] = 'ℹ️ ' . htmlspecialchars($n, ENT_QUOTES, 'UTF-8');
+
+        return ['bot_username' => $botUsername, 'db' => $dbName, 'custom_message' => implode("\n", $lines)];
     } catch (Throwable $e) {
         // ===== ROLLBACK =====
         // Throwable (نه فقط Exception) تا TypeErrorها و خطاهای هسته هم rollback شوند؛
         // وگرنه پوشه/دیتابیس/وبهوک نیمه‌کاره می‌ماند.
         // ۱) وبهوک ثبت‌شده روی تلگرام باید برداشته شود تا ربات حذف‌شده دیگر پینگ نگیرد
-        if (!empty($webhookSet) && $plainToken !== '') {
+        if ($webhookSet && $plainToken !== '') {
             try {
                 $whR = BotApi::deleteWebhook($plainToken);
                 // نتیجه قبلاً دور ریخته می‌شد؛ حالا شکست rollback هم دیده می‌شود
@@ -1367,7 +1481,7 @@ function buildBot(array $cfg, Store $store, string $TOKEN, int $owner, string $t
             }
             catch (Throwable $whErr) { error_log("Rollback webhook: " . $whErr->getMessage()); }
         }
-        // ۲) دیتابیس ساخته‌شده حذف شود
+        // ۲) دیتابیس ساخته‌شده حذف شود (قالب SQLite فایلش با حذف پوشه می‌رود)
         if ($dbCreated && $dbName !== '') {
             try {
                 $port = $cfg['db_port'] ?? 3306;
@@ -1459,7 +1573,10 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
 
     if (str_starts_with($data, 'newbot:')) {
         $type = substr($data, 7);
-        $names = Manager::validTypes();
+        // availableTypes نه validTypes: دکمه‌های منوی قبلی ممکن است «مرده» باشند
+        // (مثلاً پس از deploy قالبی حذف شده، یا vendor ناقص روی سرور است).
+        // کاربر نباید بتواند قالبی را انتخاب کند که نصب نمی‌شود و وسط کار خطا بگیرد.
+        $names = Manager::availableTypes();
         if (!isset($names[$type])) return;
         // ===== مسدودی صریح ادمین ===== 
         // جدا از «سقف پر» است: خرید اسلات سقف را از ۰ به ۱ می‌برد و مسدودی را دور می‌زند،
@@ -2243,21 +2360,25 @@ function botAction(array $cfg, Store $store, string $TOKEN, array $SUPERS, array
     $uid = (int)$user['user_id'];
     switch ($action) {
         case 'stats': {
-            $pdo = childPdo($cfg, $bot);
+            $pdo = botHasUserTable($bot) ? childPdo($cfg, $bot) : null;
             $c = $pdo ? childCount($pdo, $bot) : -1;
-            BotApi::send($TOKEN, $chatId, "📊 آمار <b>{$bot['folder']}</b>: " . ($c >= 0 ? $c : 'نامشخص') . " کاربر");
+            $folder = htmlspecialchars((string)($bot['folder'] ?? ''), ENT_QUOTES, 'UTF-8');
+            BotApi::send($TOKEN, $chatId, "📊 آمار <b>{$folder}</b>: " . ($c >= 0 ? (string)$c : '—') . " کاربر");
             return;
         }
         case 'broadcast': {
+            if (!botHasUserTable($bot)) {
+                BotApi::send($TOKEN, $chatId, "ℹ️ قالب «" . Manager::templateLabel((string)($bot['type'] ?? '')) . "» فهرست کاربر تلگرامی ندارد؛ پیام همگانی برایش ممکن نیست.");
+                return;
+            }
             $store->setStep($uid, 'await_child_broadcast', ['bot_id' => $bot['id']]);
             BotApi::send($TOKEN, $chatId, "پیام همگانی برای ربات <b>{$bot['folder']}</b> را بفرست:\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
             return;
         }
         case 'webhook': {
             $tok = childToken($bot);
-            $secret = $bot['type'] === 'faxima' ? Manager::faximaWebhookSecret($tok) : null;
-            $url = Manager::webhookUrl($cfg, $bot['folder'], $bot['type']);
-            $r = BotApi::setWebhook($tok, $url, $secret ?? null);
+            $url = Manager::webhookUrlForBot($cfg, $bot);
+            $r = BotApi::setWebhook($tok, $url, Manager::resolveWebhookSecret($bot));
             BotApi::send($TOKEN, $chatId, !empty($r['ok']) ? "✅ وبهوک مجدد ست شد:\n<code>{$url}</code>" : "❌ خطا: " . htmlspecialchars($r['description'] ?? 'unknown'));
             return;
         }
@@ -2272,9 +2393,8 @@ function botAction(array $cfg, Store $store, string $TOKEN, array $SUPERS, array
                 }
             } else {
                 $tok = childToken($bot);
-                $secret = $bot['type'] === 'faxima' ? Manager::faximaWebhookSecret($tok) : null;
-                $url = Manager::webhookUrl($cfg, $bot['folder'], $bot['type']);
-                $setR = BotApi::setWebhook($tok, $url, $secret);
+                $url = Manager::webhookUrlForBot($cfg, $bot);
+                $setR = BotApi::setWebhook($tok, $url, Manager::resolveWebhookSecret($bot));
                 if (!is_array($setR) || empty($setR['ok'])) {
                     Logger::getInstance()->warning('toggle', "setWebhook برای {$bot['folder']} ناموفق: " . (($setR['description'] ?? '') ?: 'no response'));
                 }

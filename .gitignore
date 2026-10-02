@@ -25,3 +25,26 @@
 /.env.prod
 /.env.dev
 /vendor/
+
+# ===== قالب‌های تازه: فقط سورس، نه فایل زمان‌اجرا =====
+# قالب uptime-bot-telegram لاگ و قفل دورهٔ توسعه دارد (logs/*.log تا مگابایت)
+templates/uptime-bot-telegram/logs/
+templates/uptime-bot-telegram/*.lock
+templates/uptime-bot-telegram/install.log
+templates/uptime-bot-telegram/config.local.php
+templates/uptime-bot-telegram/tests/
+
+# قالب پاسارگاد دیتابیس SQLite توسعه و قفل/لاگ runtime دارد
+templates/Pasargad*/data/*.sqlite
+templates/Pasargad*/data/*.sqlite-*
+templates/Pasargad*/data/*.lock
+templates/Pasargad*/data/logs/
+templates/Pasargad*/data/receipts/
+templates/Pasargad*/data/cache/
+templates/Pasargad*/config.php
+templates/Pasargad*/tests/
+templates/Pasargad*/vendor/
+templates/Pasargad*/node_modules/
+
+# هیچ قالبی نباید .git داشته باشد (کلون تودرتو ⇒ فایل‌ها وارد ریپو نمی‌شوند)
+templates/**/.git/

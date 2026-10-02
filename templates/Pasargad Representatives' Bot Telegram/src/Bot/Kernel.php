@@ -1,0 +1,1223 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Pasargad\Bot;
+
+use Pasargad\Payment\NowPaymentsGateway;
+use Pasargad\Payment\PaymentService;
+use Pasargad\Store\OrderRepository;
+use Pasargad\Store\PackageRepository;
+use Pasargad\Store\Provisioner;
+use Pasargad\Store\Settings;
+use Pasargad\Store\UserRepository;
+use Pasargad\Support\Config;
+use Pasargad\Support\Logger;
+use Pasargad\Support\Str;
+use Pasargad\Telegram\BotApi;
+use Pasargad\Telegram\Keyboard;
+use Pasargad\Telegram\Update;
+
+/**
+ * کنترلرر اصلی ربات: مسیریابی آپدیت‌ها، مدیریت نشست کاربر و ارائهٔ منوها.
+ *
+ * جریان کلی:
+ *   آپدیت → AuthService (احراز هویت کاربر) → Router (callback یا پیام) → Handler
+ */
+final class Kernel
+{
+    private BotApi $bot;
+    private Notifier $notifier;
+    private UserRepository $users;
+    private PackageRepository $packages;
+    private OrderRepository $orders;
+    private Provisioner $provisioner;
+    private PaymentService $payments;
+    private Settings $settings;
+    private SessionStore $sessions;
+    private \Pasargad\Store\FeatureFlags $flags;
+    private ?\Pasargad\Panel\PasarGuardClient $panel = null;
+    private ?UserCreator $userCreator = null;
+    private ?AdminController $adminController = null;
+
+    public function __construct(
+        ?BotApi $bot = null,
+        ?Notifier $notifier = null,
+        ?UserRepository $users = null,
+        ?PackageRepository $packages = null,
+        ?OrderRepository $orders = null,
+        ?Provisioner $provisioner = null,
+        ?PaymentService $payments = null,
+        ?Settings $settings = null,
+        ?SessionStore $sessions = null,
+        ?\Pasargad\Panel\PasarGuardClient $panel = null,
+        ?\Pasargad\Store\FeatureFlags $flags = null
+    ) {
+        $this->bot        = $bot ?? new BotApi();
+        $this->notifier   = $notifier ?? new Notifier($this->bot);
+        $this->users      = $users ?? new UserRepository();
+        $this->packages   = $packages ?? new PackageRepository();
+        $this->orders     = $orders ?? new OrderRepository();
+        $this->settings   = $settings ?? new Settings();
+        $this->sessions   = $sessions ?? new SessionStore();
+        $this->flags      = $flags ?? new \Pasargad\Store\FeatureFlags($this->settings);
+        $this->panel      = $panel;
+        $this->provisioner = $provisioner ?? new Provisioner($panel, $this->orders, $this->users, $this->settings);
+        $this->payments   = $payments ?? new PaymentService($this->orders, $this->provisioner, $this->settings, $this->flags);
+
+        $this->payments->setNotifier($this->notifier);
+    }
+
+    /**
+     * سوییچ‌های فعال/غیرفعال ربات.
+     */
+    public function flags(): \Pasargad\Store\FeatureFlags
+    {
+        return $this->flags;
+    }
+
+    /**
+     * ابزار ساخت/تمدید کاربر (با اعتبار خریداری‌شده).
+     */
+    private function userCreator(): UserCreator
+    {
+        if ($this->userCreator === null) {
+            $this->userCreator = new UserCreator(
+                $this->users,
+                new \Pasargad\Store\UserProvisioner($this->users, $this->panelClient()),
+                $this->bot
+            );
+        }
+
+        return $this->userCreator;
+    }
+
+    public function notifier(): Notifier
+    {
+        return $this->notifier;
+    }
+
+    public function botApi(): BotApi
+    {
+        return $this->bot;
+    }
+
+    /**
+     * پردازش یک آپدیت تلگرام.
+     */
+    public function handle(Update $update): void
+    {
+        $userId = $update->userId();
+        $chatId = $update->chatId();
+
+        if ($userId === null || $chatId === null) {
+            return;
+        }
+
+        // ثبت/به‌روزرسانی کاربر
+        $user = $this->users->upsertByTelegram($userId, [
+            'username'      => $update->username(),
+            'first_name'    => $update->firstName(),
+            'language_code' => $update->languageCode(),
+        ]);
+
+        if (!empty($user['is_blocked'])) {
+            if ($update->isCallbackQuery()) {
+                $this->bot->answerCallback((string) $update->raw()['callback_query']['id'], Text::blocked((string) $user['blocked_reason']));
+            } elseif (($update->text()) !== '' && $update->text() !== '/start') {
+                $this->bot->sendMessage($chatId, Text::blocked((string) $user['blocked_reason']));
+            }
+
+            return;
+        }
+
+        $isAdmin = $this->notifier->isAdmin($userId);
+
+        // کل ربات خاموش است: فقط سوپرادمین‌ها راه دسترسی دارند تا بتوانند
+        // دوباره روشنش کنند (وگرنه ربات برای همیشه خاموش می‌ماند).
+        if (!$this->flags->isBotEnabled() && !$isAdmin) {
+            $this->handleDisabledBot($update, $chatId);
+            return;
+        }
+
+        try {
+            if ($update->isCallbackQuery()) {
+                $this->handleCallback($update, $user, $isAdmin);
+            } else {
+                $this->handleMessage($update, $user, $isAdmin);
+            }
+        } catch (\Throwable $e) {
+            Logger::error('Update handling failed', [
+                'user_id' => $userId,
+                'update'  => $update->updateId(),
+                'error'   => $e->getMessage(),
+                'file'    => $e->getFile() . ':' . $e->getLine(),
+            ]);
+
+            $this->safeReply($chatId, '⚠️ خطایی رخ داد. لطفاً دوباره تلاش کنید.');
+        }
+    }
+
+    /**
+     * پاسخ به کاربر وقتی کل ربات خاموش است.
+     *
+     * متن نمایشی از تنظیمات خوانده می‌شود تا سوپرادمین بتواند پیام دلخواه بگذارد.
+     * برای callback فقط یک پاسخ کوتاه (toast) داده می‌شود تا صفحه عوض نشود.
+     */
+    private function handleDisabledBot(Update $update, int $chatId): void
+    {
+        $notice = $this->flags->disabledNotice();
+
+        if ($update->isCallbackQuery()) {
+            $this->bot->answerCallback(
+                (string) ($update->raw()['callback_query']['id'] ?? ''),
+                Str::truncate(strip_tags($notice), 180),
+                true
+            );
+            return;
+        }
+
+        // فقط به پیام‌های معنادار پاسخ می‌دهیم تا در صورت انبوه پیام، اسپم نشود.
+        $text = $update->text();
+        if ($text === '' || $text === '/start') {
+            $this->bot->sendMessage($chatId, $notice, [
+                'reply_markup' => $this->bot->buildMarkup(
+                    \Pasargad\Telegram\Keyboard::link('📞 پشتیبانی', $this->supportLink())
+                ),
+            ]);
+            return;
+        }
+
+        $this->bot->sendMessage($chatId, $notice);
+    }
+
+    /**
+     * لینک پشتیبانی از تنظیمات (در صورت نبود، خالی برمی‌گردد).
+     */
+    private function supportLink(): string
+    {
+        return Config::str('notifications.support_link', 'https://t.me/');
+    }
+
+    // ------------------------------------------------------------------
+    // پیام‌های متنی
+    // ------------------------------------------------------------------
+
+    private function handleMessage(Update $update, array $user, bool $isAdmin): void
+    {
+        $chatId = (int) $update->chatId();
+        $text   = $update->text();
+        $state  = $this->sessions->get($update->userId());
+
+        // مسیر ویرایش متن غیرفعالی (فقط سوپرادمین)
+        if ($isAdmin && ($state['step'] ?? '') === 'admin_notice') {
+            $this->sessions->clear((int) $update->userId());
+
+            if ($text === '' || $update->command() === 'cancel') {
+                $this->bot->sendMessage($chatId, '❌ لغو شد.');
+            } else {
+                $this->adminController()->saveNotice($chatId, $text);
+            }
+
+            return;
+        }
+
+        // مسیر ورود (state machine ساده)
+        if ($state !== null && $this->handleSessionState($update, $user, $state)) {
+            return;
+        }
+
+        // مسیر ساخت/تمدید کاربر با اعتبار خریداری‌شده
+        if ($state !== null && str_starts_with($state['step'] ?? '', 'user_credit:')) {
+            $this->handleUserCreatorState($update, $user, $state);
+            return;
+        }
+
+        // مدیریت رسید کارت‌به‌کارت
+        if ($update->hasPhoto() || $update->hasDocument()) {
+            $this->handleReceipt($update, $user);
+            return;
+        }
+
+        if ($text === '') {
+            return;
+        }
+
+        // دستورها
+        if ($update->isCommand()) {
+            $this->handleCommand($update, $user, $isAdmin);
+            return;
+        }
+
+        // مدیریت بسته‌ها با پیام متنی (فقط سوپرادمین)
+        if ($isAdmin && str_contains($text, '|')) {
+            $editor = new PackageEditor($this->packages, $this->bot);
+
+            // اگر ادمین قبلاً روی «✏️ ویرایش» زده باشد، این پیام باید بستهٔ
+            // موجود را به‌روزرسانی کند نه اینکه بستهٔ تکراری بسازد.
+            $editingId = $this->adminController()->editingPackageId((int) $update->userId());
+
+            if ($editor->tryHandle($chatId, $text, (int) $update->userId(), $editingId)) {
+                if ($editingId !== null) {
+                    $this->sessions->clear((int) $update->userId());
+                }
+
+                return;
+            }
+        }
+
+        // پاسخ به دکمه‌های متنی منو
+        $this->handleMenuText($update, $user, $isAdmin, $text);
+    }
+
+    private function handleCommand(Update $update, array $user, bool $isAdmin): void
+    {
+        $chatId = (int) $update->chatId();
+
+        switch ($update->command()) {
+            case 'start':
+            case 'menu':
+                $this->sessions->clear((int) $update->userId());
+                $name = (string) ($user['first_name'] ?? $user['username'] ?? 'دوست عزیز');
+                $this->bot->sendMessage($chatId, Text::welcome($name, $this->isLinked($user)));
+                $this->showMainMenu($chatId, $user, $isAdmin);
+                break;
+
+            case 'shop':
+                $this->showShop($chatId, $user);
+                break;
+
+            case 'account':
+            case 'profile':
+                $this->showAccount($chatId, $user);
+                break;
+
+            case 'orders':
+                $this->showOrders($chatId, $user, 0);
+                break;
+
+            case 'login':
+                $this->sessions->set((int) $update->userId(), ['step' => 'await_username']);
+                $this->bot->sendMessage($chatId, Text::loginAskUsername(), [
+                    'reply_markup' => $this->bot->buildMarkup(Keyboard::back('menu', '❌ انصراف')),
+                ]);
+                break;
+
+            case 'logout':
+                $this->users->unlinkPanel((int) $user['id']);
+                $this->bot->sendMessage($chatId, "🔌 <b>اتصال پنل قطع شد.</b>\n\nبرای استفاده دوباره /login را بزنید.");
+                $this->showMainMenu($chatId, $user, $isAdmin, false);
+                break;
+
+            case 'help':
+                $this->bot->sendMessage($chatId, Text::help(), [
+                    'reply_markup' => $this->bot->buildMarkup(Keyboard::rows([Keyboard::back('menu')])),
+                ]);
+                break;
+
+            case 'buy':
+                $this->handleBuyCommand($update, $user);
+                break;
+
+            default:
+                $this->bot->sendMessage($chatId, '❓ دستور ناشناخته. /help را ببینید.');
+        }
+    }
+
+    private function handleMenuText(Update $update, array $user, bool $isAdmin, string $text): void
+    {
+        $chatId = (int) $update->chatId();
+        $this->bot->sendMessage($chatId, 'برای مشاهدهٔ گزینه‌ها روی دکمه‌های زیر بزنید 👇', [
+            'reply_markup' => $this->bot->buildMarkup($this->mainMenuKeyboard($user, $isAdmin)),
+        ]);
+    }
+
+    // ------------------------------------------------------------------
+    // نشست ورود
+    // ------------------------------------------------------------------
+
+    /**
+     * پردازش پیام بر اساس وضعیت نشست جاری (مثلاً مراحل ورود).
+     *
+     * @param  array<string, mixed> $user
+     * @param  array<string, mixed> $state وضعیت خوانده‌شده از SessionStore
+     * @return bool true یعنی پیام در این مسیر مصرف شد
+     */
+    private function handleSessionState(Update $update, array $user, array $state): bool
+    {
+        $chatId  = (int) $update->chatId();
+        $telegramId = (int) $update->userId();
+        $text     = $update->text();
+        $step     = (string) ($state['step'] ?? '');
+
+        switch ($step) {
+            case 'await_username':
+                // کاربر می‌تواند با /cancel یا دکمهٔ «❌ انصراف» (پیام خالی) عملیات را لغو کند.
+                if ($update->command() === 'cancel' || $update->command() === 'start') {
+                    $this->sessions->clear($telegramId);
+                    $this->bot->sendMessage($chatId, '❌ لغو شد.');
+                    return true;
+                }
+
+                $username = \Pasargad\Support\Str::toEnglishDigits(trim($text));
+                if (!\Pasargad\Support\Str::isValidPanelUsername($username)) {
+                    $this->bot->sendMessage($chatId, '⚠️ نام کاربری نامعتبر است. فقط حروف انگلیسی، عدد و _ مجاز است.');
+                    return true;
+                }
+
+                $this->sessions->set($telegramId, ['step' => 'await_password', 'username' => $username]);
+                $this->bot->sendMessage($chatId, Text::loginAskPassword(), [
+                    'reply_markup' => $this->bot->buildMarkup(Keyboard::back('menu', '❌ انصراف')),
+                ]);
+                return true;
+
+            case 'await_password':
+                $password = $text;
+                $session  = $this->sessions->pull($telegramId);
+                $username = (string) ($session['username'] ?? '');
+
+                if ($password === '' || $username === '') {
+                    $this->bot->sendMessage($chatId, '❌ ورود ناموفق بود. دوباره تلاش کنید.');
+                    return true;
+                }
+
+                $this->attemptLogin($chatId, $user, $username, $password);
+                return true;
+
+            default:
+                // نکتهٔ حیاتی: اینجا نباید نشست پاک شود.
+                //
+                // این متد فقط مراحل «ورود» را می‌شناسد، ولی Kernel برای هر
+                // نشست غیرتهی آن را صدا می‌زند. اگر اینجا clear می‌شد:
+                //   • نشست pkg:edit می‌مرد → ویرایش بسته به ساخت بستهٔ تکراری
+                //     تبدیل می‌شد (فروش با قیمت اشتباه).
+                //   • نشست user_credit:* می‌مرد → با اولین خطای اعتبارسنجی،
+                //     نام کاربری که کاربر فرستاده بود پاک می‌شد و جریان می‌شکست.
+                //
+                // پس فقط مسیرهای شناخته‌شده پیام را مصرف می‌کنند.
+                return false;
+        }
+    }
+
+    /**
+     * جریان گام‌به‌گام ساخت/تمدید کاربر با اعتبار خریداری‌شده.
+     *
+     * @param array<string, mixed> $user
+     * @param array<string, mixed> $state
+     */
+    private function handleUserCreatorState(Update $update, array $user, array $state): void
+    {
+        $chatId = (int) $update->chatId();
+        $telegramId = (int) $update->userId();
+        $text = $update->text();
+        $step = (string) ($state['step'] ?? '');
+        $mode = (string) ($state['mode'] ?? 'new');
+        $creator = $this->userCreator();
+
+        // دکمهٔ انصراف (پیام خالی) یا دستور لغو
+        if ($text === '' || $update->command() === 'cancel') {
+            $this->sessions->clear($telegramId);
+            $this->bot->sendMessage($chatId, '❌ لغو شد.');
+            return;
+        }
+
+        // اگر قابلیت مربوطه در پنل خاموش شده، جریان متوقف می‌شود.
+        if (!$this->flags->isUserToolsEnabled()) {
+            $this->sessions->clear($telegramId);
+            $this->bot->sendMessage($chatId, '⚙️ ابزار ساخت کاربر موقتاً غیرفعال است.');
+            return;
+        }
+
+        if ($mode === 'extend' && !$this->flags->isRenewalEnabled()) {
+            $this->sessions->clear($telegramId);
+            $this->bot->sendMessage($chatId, '⏸️ قابلیت تمدید کاربر موقتاً غیرفعال است.');
+            return;
+        }
+
+        switch ($step) {
+            case 'user_credit:username':
+                $username = Str::toEnglishDigits(trim($text));
+                if (!Str::isValidPanelUsername($username)) {
+                    $this->bot->sendMessage($chatId, '⚠️ نام کاربری نامعتبر است. فقط حروف انگلیسی، عدد، _ و - مجاز است.');
+                    return;
+                }
+
+                $this->sessions->set($telegramId, [
+                    'step'     => 'user_credit:volume',
+                    'mode'     => $mode,
+                    'username' => $username,
+                ]);
+
+                $this->bot->sendMessage($chatId, "حجم مورد نیاز را به گیگابایت بفرستید.\n\n💾 اعتبار فعلی شما: <b>"
+                    . Str::formatBytes((int) $user['user_credit']) . '</b>', [
+                    'reply_markup' => $this->bot->buildMarkup(Keyboard::back('user.credit', '❌ انصراف')),
+                ]);
+                return;
+
+            case 'user_credit:volume':
+                $volume = (float) Str::toEnglishDigits(trim($text));
+
+                // اعتبارسنجی بر اساس بایت نهایی: عددی مثل 0.0000000001 به صفر
+                // بایت تبدیل می‌شود که در پنل «نامحدود» است.
+                $needed = Str::gbToBytes($volume);
+
+                if ($needed < \Pasargad\Store\UserProvisioner::MIN_BYTES) {
+                    $this->bot->sendMessage($chatId, '⚠️ حداقل حجم قابل سفارش ۱ گیگابایت است.');
+                    return;
+                }
+
+                if ($needed > \Pasargad\Store\UserProvisioner::MAX_BYTES) {
+                    $this->bot->sendMessage($chatId, '⚠️ حداکثر حجم در یک درخواست ۱۰ ترابایت است.');
+                    return;
+                }
+
+                if ($needed > (int) $user['user_credit']) {
+                    $this->bot->sendMessage($chatId, implode("\n", [
+                        '❌ اعتبار کافی ندارید.',
+                        '',
+                        '💾 نیاز: <b>' . Str::formatBytes($needed) . '</b>',
+                        '💰 موجودی: <b>' . Str::formatBytes((int) $user['user_credit']) . '</b>',
+                    ]), [
+                        'reply_markup' => $this->bot->buildMarkup(Keyboard::rows([
+                            [['text' => '🛒 خرید اعتبار', 'data' => BotApi::encodeData('shop', ['kind' => 'user_credit'])]],
+                            Keyboard::back('user.credit'),
+                        ])),
+                    ]);
+                    return;
+                }
+
+                $this->sessions->set($telegramId, [
+                    'step'     => 'user_credit:duration',
+                    'mode'     => $mode,
+                    'username' => (string) ($state['username'] ?? ''),
+                    'volume'   => $volume,
+                ]);
+                $this->bot->sendMessage($chatId, "مدت زمان را به روز بفرستید.\n\nمثال: <code>۳۰</code>", [
+                    'reply_markup' => $this->bot->buildMarkup(Keyboard::back('user.credit', '❌ انصراف')),
+                ]);
+                return;
+
+            case 'user_credit:duration':
+                $days = (int) Str::toEnglishDigits(trim($text));
+                if ($days <= 0 || $days > 3650) {
+                    $this->bot->sendMessage($chatId, '⚠️ مدت زمان نامعتبر است. عددی بین ۱ تا ۳۶۵۰ بفرستید.');
+                    return;
+                }
+
+                $this->sessions->clear($telegramId);
+                $creator->handleDuration(
+                    $chatId,
+                    $user,
+                    $mode,
+                    (string) ($state['username'] ?? ''),
+                    (float) ($state['volume'] ?? 0),
+                    (string) $days
+                );
+                return;
+
+            default:
+                $this->sessions->clear($telegramId);
+        }
+    }
+
+    private function attemptLogin(int $chatId, array $user, string $username, string $password): void
+    {
+        try {
+            $panel   = $this->panelClient();
+            $admin   = $panel->getAdmin($username, $username, $password);
+
+            $this->users->linkPanel((int) $user['id'], $username, $password, $admin);
+
+            $fresh = $this->users->findById((int) $user['id']) ?? $user;
+            $this->bot->sendMessage($chatId, Text::loginSuccess($admin));
+            $this->showMainMenu($chatId, $fresh, $this->notifier->isAdmin((int) $user['telegram_id']));
+        } catch (\Pasargad\Panel\PanelException $e) {
+            $this->bot->sendMessage($chatId, Text::loginFailed($e->getMessage()), [
+                'reply_markup' => $this->bot->buildMarkup([[
+                    ['text' => '🔁 تلاش مجدد', 'data' => \Pasargad\Telegram\BotApi::encodeData('user.login')],
+                ], Keyboard::back('menu')]),
+            ]);
+        } catch (\Throwable $e) {
+            Logger::error('Login attempt failed', ['error' => $e->getMessage()]);
+            $this->bot->sendMessage($chatId, Text::loginFailed('خطای غیرمنتظره هنگام اتصال به پنل.'));
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // رسید کارت‌به‌کارت
+    // ------------------------------------------------------------------
+
+    private function handleReceipt(Update $update, array $user): void
+    {
+        $chatId = (int) $update->chatId();
+
+        // آخرین سفارش در انتظار پرداخت این کاربر
+        $orders = $this->orders->listByUser((int) $user['id'], 1, 0, OrderRepository::STATUS_AWAITING_PAYMENT);
+        if ($orders === []) {
+            $this->bot->sendMessage($chatId, '❗️ سفارش در انتظار پرداختی ندارید. ابتدا یک بسته انتخاب کنید.');
+            return;
+        }
+
+        $order = $orders[0];
+        $photo = $update->largestPhoto();
+        $fileId = $photo['file_id'] ?? ($update->document()['file_id'] ?? null);
+
+        if ($fileId === null) {
+            $this->bot->sendMessage($chatId, '⚠️ لطفاً تصویر رسید را به‌صورت عکس بفرستید.');
+            return;
+        }
+
+        $result = $this->payments->submitReceipt($order, (string) $fileId);
+
+        $this->bot->sendMessage($chatId, $result['message'], [
+            'reply_markup' => $this->bot->buildMarkup(Keyboard::rows([
+                [[
+                    'text' => '🔄 بررسی وضعیت',
+                    'data' => \Pasargad\Telegram\BotApi::encodeData('order.check', ['id' => (int) $order['id']]),
+                ]],
+                Keyboard::back('orders'),
+            ])),
+        ]);
+    }
+
+    // ------------------------------------------------------------------
+    // callback ها
+    // ------------------------------------------------------------------
+
+    private function handleCallback(Update $update, array $user, bool $isAdmin): void
+    {
+        $chatId = (int) $update->chatId();
+        $data   = $update->callbackPayload();
+        $ns     = (string) ($data['n'] ?? '');
+        $callbackId = (string) ($update->raw()['callback_query']['id'] ?? '');
+
+        // بستن پیام
+        if ($ns === 'close') {
+            $this->bot->answerCallback($callbackId);
+            $this->bot->deleteMessage($chatId, (int) $update->messageId());
+            return;
+        }
+
+        // دکمهٔ نمایشی (غیرفعال) — فقط بازخورد می‌دهد
+        if ($ns === 'noop') {
+            $this->bot->answerCallback($callbackId, 'این قابلیت در حال حاضر غیرفعال است.');
+            return;
+        }
+
+        if ($ns === 'menu') {
+            $this->bot->answerCallback($callbackId);
+            $this->showMainMenu($chatId, $user, $isAdmin);
+            return;
+        }
+
+        if ($ns === 'help') {
+            $this->bot->answerCallback($callbackId);
+            $this->bot->edit($chatId, (int) $update->messageId(), Text::help(), Keyboard::rows([Keyboard::back('menu')]));
+            return;
+        }
+
+        if ($ns === 'user.login') {
+            $this->bot->answerCallback($callbackId);
+            $this->sessions->set((int) $update->userId(), ['step' => 'await_username']);
+            $this->bot->sendMessage($chatId, Text::loginAskUsername(), [
+                'reply_markup' => $this->bot->buildMarkup(Keyboard::back('menu', '❌ انصراف')),
+            ]);
+            return;
+        }
+
+        if ($ns === 'user.account') {
+            $this->bot->answerCallback($callbackId);
+            $this->showAccount($chatId, $user);
+            return;
+        }
+
+        if ($ns === 'user.refresh') {
+            $this->bot->answerCallback($callbackId);
+            $result = $this->provisioner->syncUser($user);
+            $fresh  = $this->users->findById((int) $user['id']) ?? $user;
+            $this->bot->edit($chatId, (int) $update->messageId(), Text::account($fresh) . "\n\nℹ️ " . $result['message']);
+            return;
+        }
+
+        if ($ns === 'shop') {
+            $this->bot->answerCallback($callbackId);
+            $kind = (string) ($data['kind'] ?? PackageRepository::KIND_PANEL_QUOTA);
+            $this->showShop($chatId, $user, $kind);
+            return;
+        }
+
+        if ($ns === 'pkg') {
+            $this->bot->answerCallback($callbackId);
+            $this->showPackage($chatId, $user, (int) ($data['id'] ?? 0));
+            return;
+        }
+
+        if ($ns === 'pkg.buy') {
+            $this->bot->answerCallback($callbackId);
+            $this->createOrder($chatId, $user, (int) ($data['id'] ?? 0));
+            return;
+        }
+
+        if ($ns === 'pay') {
+            $this->bot->answerCallback($callbackId);
+            $this->startPayment($chatId, $user, (int) ($data['id'] ?? 0), (string) ($data['m'] ?? ''));
+            return;
+        }
+
+        if ($ns === 'order.list') {
+            $this->bot->answerCallback($callbackId);
+            $this->showOrders($chatId, $user, (int) ($data['page'] ?? 0));
+            return;
+        }
+
+        if ($ns === 'order.view') {
+            $this->bot->answerCallback($callbackId);
+            $this->showOrderDetails($chatId, $user, (int) ($data['id'] ?? 0));
+            return;
+        }
+
+        if ($ns === 'order.check') {
+            $this->bot->answerCallback($callbackId, 'در حال بررسی...');
+            $this->checkOrder($chatId, $user, (int) ($data['id'] ?? 0));
+            return;
+        }
+
+        if ($ns === 'user.credit') {
+            $this->bot->answerCallback($callbackId);
+            $fresh = $this->users->findById((int) $user['id']) ?? $user;
+            $this->userCreator()->showMenu($chatId, $fresh);
+            return;
+        }
+
+        // ابزارهای ساخت/تمدید کاربر
+        if ($ns === 'uc.new' || $ns === 'uc.extend') {
+            $this->bot->answerCallback($callbackId);
+
+            if (!$this->flags->isUserToolsEnabled()) {
+                $this->bot->sendMessage($chatId, '⚙️ ابزار ساخت کاربر موقتاً غیرفعال است.');
+                return;
+            }
+
+            $isExtend = $ns === 'uc.extend';
+
+            // تمدید کاربر جداگانه کنترل می‌شود تا بتوان آن را خاموش کرد.
+            if ($isExtend && !$this->flags->isRenewalEnabled()) {
+                $this->bot->sendMessage($chatId, '⏸️ قابلیت تمدید کاربر موقتاً غیرفعال است.');
+                return;
+            }
+
+            // بدون اعتبار، ساخت/تمدید کاربر معنا ندارد. این بررسی لازم است چون
+            // کاربر ممکن است دکمهٔ قدیمی را در چت اسکرول‌شده نگه داشته باشد.
+            $fresh = $this->users->findById((int) $user['id']) ?? $user;
+            if ((int) ($fresh['user_credit'] ?? 0) <= 0) {
+                $this->bot->sendMessage($chatId, implode("\n", [
+                    '⚠️ اعتبار کافی ندارید.',
+                    '',
+                    'برای ساخت یا تمدید کاربر باید ابتدا بستهٔ «اعتبار کاربر» بخرید.',
+                ]), [
+                    'reply_markup' => $this->bot->buildMarkup(Keyboard::rows([
+                        [['text' => '🛒 خرید اعتبار', 'data' => BotApi::encodeData('shop', ['kind' => PackageRepository::KIND_USER_CREDIT])]],
+                        Keyboard::back('menu'),
+                    ])),
+                ]);
+                return;
+            }
+
+            $mode = $isExtend ? 'extend' : 'new';
+            $this->sessions->set((int) $update->userId(), ['step' => 'user_credit:username', 'mode' => $mode]);
+            $this->userCreator()->askUsername($chatId, $mode);
+            return;
+        }
+
+        if ($ns === 'uc.list') {
+            $this->bot->answerCallback($callbackId);
+            $fresh = $this->users->findById((int) $user['id']) ?? $user;
+            $this->userCreator()->showUsers($chatId, $fresh);
+            return;
+        }
+
+        // مسیرهای مخصوص سوپرادمین
+        if ($isAdmin && str_starts_with($ns, 'admin.')) {
+            $this->bot->answerCallback($callbackId);
+            $this->adminRouter($update, $user, $data, $ns, $isAdmin);
+            return;
+        }
+
+        $this->bot->answerCallback($callbackId, 'این گزینه در دسترس نیست.');
+    }
+
+    // ------------------------------------------------------------------
+    // نمایش‌ها
+    // ------------------------------------------------------------------
+
+    private function showMainMenu(int $chatId, array $user, bool $isAdmin, bool $force = false): void
+    {
+        $linked = $this->isLinked($user);
+
+        $this->bot->sendMessage($chatId, Text::mainMenu($isAdmin, $linked, $this->settings->bool(Settings::SHOP_OPENED, true)), [
+            'reply_markup' => $this->bot->buildMarkup($this->mainMenuKeyboard($user, $isAdmin)),
+        ]);
+    }
+
+    /**
+     * @return array<int, array<int, array<string, mixed>>>
+     */
+    private function mainMenuKeyboard(array $user, bool $isAdmin): array
+    {
+        $linked = $this->isLinked($user);
+
+        $rows = [];
+
+        if ($linked) {
+            $rows[] = [
+                ['text' => '🛒 خرید بسته', 'data' => \Pasargad\Telegram\BotApi::encodeData('shop', ['kind' => PackageRepository::KIND_PANEL_QUOTA])],
+                ['text' => '👤 حساب من', 'data' => \Pasargad\Telegram\BotApi::encodeData('user.account')],
+            ];
+            $rows[] = [
+                ['text' => '🧾 سفارش‌ها', 'data' => \Pasargad\Telegram\BotApi::encodeData('order.list')],
+                ['text' => '🎁 اعتبار کاربر', 'data' => \Pasargad\Telegram\BotApi::encodeData('user.credit')],
+            ];
+        } else {
+            $rows[] = [['text' => '🔐 اتصال به پنل', 'data' => \Pasargad\Telegram\BotApi::encodeData('user.login')]];
+        }
+
+        $rows[] = [['text' => '❓ راهنما', 'data' => \Pasargad\Telegram\BotApi::encodeData('help')]];
+
+        if ($isAdmin) {
+            $rows[] = [['text' => '🛠 پنل مدیریت', 'data' => \Pasargad\Telegram\BotApi::encodeData('admin.home')]];
+        }
+
+        return $rows;
+    }
+
+    private function showAccount(int $chatId, array $user): void
+    {
+        $linked = ($user['panel_username'] ?? null) !== null;
+
+        if (!$linked) {
+            $this->bot->sendMessage($chatId, '⚠️ ابتدا باید به پنل وصل شوید.', [
+                'reply_markup' => $this->bot->buildMarkup([[
+                    ['text' => '🔐 اتصال به پنل', 'data' => \Pasargad\Telegram\BotApi::encodeData('user.login')],
+                ], Keyboard::back('menu')]),
+            ]);
+            return;
+        }
+
+        $keyboard = Keyboard::rows([
+            [['text' => '🔄 بروزرسانی از پنل', 'data' => \Pasargad\Telegram\BotApi::encodeData('user.refresh')]],
+            Keyboard::back('menu'),
+        ]);
+
+        $this->bot->sendMessage($chatId, Text::account($user), [
+            'reply_markup' => $this->bot->buildMarkup($keyboard),
+        ]);
+    }
+
+    private function showShop(int $chatId, array $user, string $kind = PackageRepository::KIND_PANEL_QUOTA): void
+    {
+        if (!$this->shopIsOpen()) {
+            $this->bot->sendMessage($chatId, Text::shopClosed());
+            return;
+        }
+
+        if (!$this->flags->isBotEnabled()) {
+            $this->bot->sendMessage($chatId, $this->flags->disabledNotice());
+            return;
+        }
+
+        if (($user['panel_username'] ?? null) === null) {
+            $this->bot->sendMessage($chatId, '⚠️ برای خرید ابتدا به پنل وصل شوید.', [
+                'reply_markup' => $this->bot->buildMarkup([[
+                    ['text' => '🔐 اتصال به پنل', 'data' => \Pasargad\Telegram\BotApi::encodeData('user.login')],
+                ]]),
+            ]);
+            return;
+        }
+
+        $packages = $this->packages->activePackagesByKind($kind);
+
+        if ($packages === []) {
+            $this->bot->sendMessage($chatId, '📦 در حال حاضر بسته‌ای در این بخش موجود نیست.', [
+                'reply_markup' => $this->bot->buildMarkup(Keyboard::rows([Keyboard::back('menu')])),
+            ]);
+            return;
+        }
+
+        $keyboard = [];
+        foreach ($packages as $package) {
+            $keyboard[] = [[
+                'text' => Str::truncate((string) $package['title'], 30),
+                'data' => \Pasargad\Telegram\BotApi::encodeData('pkg', ['id' => (int) $package['id']]),
+            ]];
+        }
+
+        $otherKind = $kind === PackageRepository::KIND_PANEL_QUOTA
+            ? PackageRepository::KIND_USER_CREDIT
+            : PackageRepository::KIND_PANEL_QUOTA;
+
+        $keyboard[] = [['text' => '🔄 بخش دیگر', 'data' => \Pasargad\Telegram\BotApi::encodeData('shop', ['kind' => $otherKind])]];
+        $keyboard[] = Keyboard::back('menu');
+
+        $this->bot->sendMessage($chatId, Text::shopList($kind), [
+            'reply_markup' => $this->bot->buildMarkup($keyboard),
+        ]);
+    }
+
+    private function showPackage(int $chatId, array $user, int $packageId): void
+    {
+        // کلید فروشگاه هم اینجا بررسی می‌شود، نه فقط در صفحهٔ فروشگاه.
+        // دلیل: پیام تأیید خرید قبلاً در چت کاربر مانده و دکمهٔ «خرید» روی آن
+        // هنوز کلیک‌پذیر است؛ اگر اینجا کلید بررسی نشود، بستن فروشگاه عملاً
+        // هیچ اثری روی این کاربران ندارد.
+        if (!$this->shopIsOpen()) {
+            $this->bot->sendMessage($chatId, Text::shopClosed());
+            return;
+        }
+
+        $package = $this->packages->find($packageId);
+        if ($package === null || (int) $package['is_active'] !== 1) {
+            $this->bot->sendMessage($chatId, Text::notFound());
+            return;
+        }
+
+        $keyboard = Keyboard::rows([
+            [[
+                'text' => '🛒 خرید این بسته',
+                'data' => \Pasargad\Telegram\BotApi::encodeData('pkg.buy', ['id' => $packageId]),
+            ]],
+            [['text' => '⬅️ بازگشت به فروشگاه', 'data' => \Pasargad\Telegram\BotApi::encodeData('shop', ['kind' => (string) $package['kind']])]],
+        ]);
+
+        $this->bot->sendMessage($chatId, Text::confirmPurchase($package) . "\n\n" . Text::packageDetails($package), [
+            'reply_markup' => $this->bot->buildMarkup($keyboard),
+        ]);
+    }
+
+    /**
+     * آیا فروشگاه باز است؟
+     */
+    private function shopIsOpen(): bool
+    {
+        return $this->settings->bool(Settings::SHOP_OPENED, true);
+    }
+
+    private function createOrder(int $chatId, array $user, int $packageId): void
+    {
+        if (!$this->shopIsOpen()) {
+            $this->bot->sendMessage($chatId, Text::shopClosed());
+            return;
+        }
+
+        $package = $this->packages->find($packageId);
+        if ($package === null || (int) $package['is_active'] !== 1) {
+            $this->bot->sendMessage($chatId, Text::notFound());
+            return;
+        }
+
+        $minOrder = Config::int('store.min_order_toman', 50000);
+        if ((int) $package['price_toman'] < $minOrder) {
+            $this->bot->sendMessage($chatId, '⚠️ قیمت این بسته کمتر از حداقل مجاز است.');
+            return;
+        }
+
+        $order = null;
+
+        // ------------------------------------------------------------------
+        // بررسی سقف خرید و ساخت سفارش، داخل یک تراکنش.
+        //
+        // بدون تراکنش، دو کلیک سریع روی دکمهٔ خرید (که تلگرام به‌صورت دو
+        // callback_query جدا می‌فرستد و دو پروسهٔ جدا پردازش می‌کنند) هر دو
+        // مقدار یکسانی می‌خوانند، هر دو از سقف عبور می‌کنند و کاربر دو برابر
+        // حجم می‌گیرد — در حالی که max_per_user = 1 است.
+        // ------------------------------------------------------------------
+        try {
+            $this->orders->transaction(function () use ($user, $package, &$order): void {
+                $maxPerUser = (int) $package['max_per_user'];
+
+                if ($maxPerUser > 0) {
+                    $purchased = $this->packages->purchasedCount((int) $user['id'], (string) $package['kind']);
+
+                    if ($purchased >= $maxPerUser) {
+                        throw new ShopException(
+                            '⚠️ شما حداکثر <b>' . Str::faNumber($maxPerUser) . '</b> بسته از این نوع خریده‌اید.'
+                        );
+                    }
+                }
+
+                $order = $this->orders->create((int) $user['id'], [
+                    'package_id'    => (int) $package['id'],
+                    'package_title' => (string) $package['title'],
+                    'kind'          => (string) $package['kind'],
+                    'volume_gb'     => (float) $package['volume_gb'],
+                    'bonus_gb'      => (float) ($package['bonus_gb'] ?? 0),
+                    'duration_days' => (int) $package['duration_days'],
+                    'price_toman'   => (int) $package['price_toman'],
+                    'status'        => OrderRepository::STATUS_CREATED,
+                ]);
+            });
+        } catch (ShopException $e) {
+            // خطای قابل انتظار (سقف خرید) — فقط پیام را نشان می‌دهیم.
+            $this->bot->sendMessage($chatId, $e->getMessage());
+            return;
+        }
+
+        if ($order === null) {
+            return;
+        }
+
+        $this->users->refreshOrderStats((int) $user['id']);
+        $this->showPaymentMethods($chatId, $order);
+    }
+
+    private function showPaymentMethods(int $chatId, array $order): void
+    {
+        $gateways = $this->payments->activeGateways();
+
+        if ($gateways === []) {
+            $this->bot->sendMessage($chatId, '⚠️ هیچ روش پرداختی فعال نیست. با پشتیبانی تماس بگیرید.');
+            return;
+        }
+
+        $keyboard = [];
+        foreach ($gateways as $gateway) {
+            $keyboard[] = [[
+                'text' => $gateway->title(),
+                'data' => \Pasargad\Telegram\BotApi::encodeData('pay', ['id' => (int) $order['id'], 'm' => $gateway->name()]),
+            ]];
+        }
+
+        $keyboard[] = Keyboard::back('menu');
+
+        $this->bot->sendMessage($chatId, Text::paymentMethods() . "\n\n💳 سفارش: <code>" . $order['code'] . '</code>', [
+            'reply_markup' => $this->bot->buildMarkup($keyboard),
+        ]);
+    }
+
+    private function startPayment(int $chatId, array $user, int $orderId, string $method): void
+    {
+        $order = $this->orders->findForUser($orderId, (int) $user['id']);
+        if ($order === null) {
+            $this->bot->sendMessage($chatId, Text::notFound());
+            return;
+        }
+
+        // سفارش‌هایی که قبلاً ساخته شده‌اند باید قابل پرداخت بمانند، حتی اگر
+        // فروشگاه بسته شود — کاربر پولش را در راه است. فقط سفارش «جدید» متوقف
+        // می‌شود که در createOrder کنترل شده است.
+        $result = $this->payments->startPayment($order, $method, $chatId);
+
+        if (!($result['ok'] ?? false)) {
+            $this->bot->sendMessage($chatId, '❌ ' . Str::escape((string) $result['message']));
+            return;
+        }
+
+        $keyboard = [];
+
+        if (!empty($result['pay_url'])) {
+            $keyboard[] = Keyboard::link('💳 پرداخت در درگاه', (string) $result['pay_url']);
+        }
+
+        // اگر درگاه لینک نداده، کاربر هیچ راهی برای پرداخت ندارد. صریح بگوییم
+        // به‌جای اینکه پیام موفق نشان داده شود و دکمه بی‌صدا حذف شود.
+        if ($method === NowPaymentsGateway::NAME && $keyboard === []) {
+            $this->bot->sendMessage($chatId, implode("\n", [
+                '⚠️ <b>درگاه ارز دیجیتال لینک پرداخت برنگرداند.</b>',
+                '',
+                'لطفاً روش پرداخت دیگری را انتخاب کنید یا با پشتیبانی تماس بگیرید.',
+                'اگر پولی واریز کرده‌اید، رسید را نگه دارید.',
+            ]), [
+                'reply_markup' => $this->bot->buildMarkup(Keyboard::rows([
+                    [['text' => '🧾 جزئیات سفارش', 'data' => \Pasargad\Telegram\BotApi::encodeData('order.view', ['id' => $orderId])]],
+                    Keyboard::back('menu'),
+                ])),
+            ]);
+
+            return;
+        }
+
+        $keyboard[] = [['text' => '🔄 بررسی وضعیت', 'data' => \Pasargad\Telegram\BotApi::encodeData('order.check', ['id' => $orderId])]];
+        $keyboard[] = [['text' => '🧾 جزئیات سفارش', 'data' => \Pasargad\Telegram\BotApi::encodeData('order.view', ['id' => $orderId])]];
+        $keyboard[] = Keyboard::back('menu');
+
+        $this->bot->sendMessage($chatId, (string) $result['message'], [
+            'reply_markup' => $this->bot->buildMarkup($keyboard),
+        ]);
+    }
+
+    private function showOrders(int $chatId, array $user, int $page): void
+    {
+        $all   = $this->orders->listByUser((int) $user['id'], 50);
+        $items = array_map(static fn (array $o): array => ['id' => (int) $o['id'], 'title' => (string) $o['package_title'] . ' • ' . $o['code']], $all);
+
+        $keyboard = [];
+        foreach (array_chunk($items, 5) as $index => $chunk) {
+            if ($index !== $page) {
+                continue;
+            }
+            foreach ($chunk as $item) {
+                $keyboard[] = [[
+                    'text' => Str::truncate((string) $item['title'], 34),
+                    'data' => \Pasargad\Telegram\BotApi::encodeData('order.view', ['id' => (int) $item['id']]),
+                ]];
+            }
+        }
+
+        $totalPages = max(1, (int) ceil(count($items) / 5));
+        $nav = [];
+        if ($page > 0) {
+            $nav[] = ['text' => '◀️ قبلی', 'data' => \Pasargad\Telegram\BotApi::encodeData('order.list', ['page' => $page - 1])];
+        }
+        if ($page < $totalPages - 1) {
+            $nav[] = ['text' => 'بعدی ▶️', 'data' => \Pasargad\Telegram\BotApi::encodeData('order.list', ['page' => $page + 1])];
+        }
+        if ($nav !== []) {
+            $keyboard[] = $nav;
+        }
+        $keyboard[] = Keyboard::back('menu');
+
+        $this->bot->sendMessage($chatId, Text::orderList(array_slice($all, $page * 5, 5)), [
+            'reply_markup' => $this->bot->buildMarkup($keyboard),
+        ]);
+    }
+
+    private function showOrderDetails(int $chatId, array $user, int $orderId): void
+    {
+        $order = $this->orders->findForUser($orderId, (int) $user['id']);
+        if ($order === null) {
+            $this->bot->sendMessage($chatId, Text::notFound());
+            return;
+        }
+
+        $keyboard = [];
+
+        if ($order['status'] === OrderRepository::STATUS_AWAITING_PAYMENT) {
+            $keyboard[] = [['text' => '🔄 بررسی وضعیت', 'data' => \Pasargad\Telegram\BotApi::encodeData('order.check', ['id' => $orderId])]];
+        }
+
+        $keyboard[] = Keyboard::back('orders');
+
+        $this->bot->sendMessage($chatId, Text::orderDetails($order), [
+            'reply_markup' => $this->bot->buildMarkup($keyboard),
+        ]);
+    }
+
+    private function checkOrder(int $chatId, array $user, int $orderId): void
+    {
+        $order = $this->orders->findForUser($orderId, (int) $user['id']);
+        if ($order === null) {
+            $this->bot->sendMessage($chatId, Text::notFound());
+            return;
+        }
+
+        $result = $this->payments->checkAndMaybeApply($order);
+        $fresh  = $this->orders->find($orderId) ?? $order;
+
+        $icon = ($result['paid'] ?? false) ? '✅' : '⏳';
+
+        $this->bot->sendMessage(
+            $chatId,
+            $icon . ' ' . Str::escape((string) $result['message']) . "\n\n" . Text::orderDetails($fresh),
+            ['reply_markup' => $this->bot->buildMarkup(Keyboard::rows([Keyboard::back('orders')]))]
+        );
+    }
+
+    /**
+     * کلاینت پنل (در صورت تزریق‌نشدن، از تنظیمات ساخته می‌شود).
+     */
+    private function panelClient(): \Pasargad\Panel\PasarGuardClient
+    {
+        if ($this->panel === null) {
+            $this->panel = new \Pasargad\Panel\PasarGuardClient();
+        }
+
+        return $this->panel;
+    }
+
+    /**
+     * آیا کاربر به پنل متصل و فعال است؟
+     *
+     * @param  array<string, mixed> $user
+     */
+    private function isLinked(array $user): bool
+    {
+        return $this->isLinkedUser($user);
+    }
+
+    /**
+     * @param array<string, mixed> $user
+     */
+    private function isLinkedUser(array $user): bool
+    {
+        return ($user['panel_username'] ?? null) !== null
+            && in_array((string) $user['panel_status'], ['active', 'limited'], true);
+    }
+
+    /**
+     * دستور /buy با کد سفارش — نمایش جزئیات سفارش برای خود کاربر.
+     *
+     * @param array<string, mixed> $user
+     */
+    private function handleBuyCommand(Update $update, array $user): void
+    {
+        $chatId = (int) $update->chatId();
+        $args   = $update->args();
+        $code   = $args[0] ?? '';
+
+        if ($code === '') {
+            $this->bot->sendMessage($chatId, "ℹ️ قالب دستور: <code>/buy ORD-XXXXXX</code>\n\nسفارش‌های من: /orders");
+            return;
+        }
+
+        $order = $this->orders->findForUser(
+            (int) ($this->orders->findByCode(strtoupper($code))['id'] ?? 0),
+            (int) $user['id']
+        );
+
+        if ($order === null) {
+            $this->bot->sendMessage($chatId, Text::notFound());
+            return;
+        }
+
+        $this->showOrderDetails($chatId, $user, (int) $order['id']);
+    }
+
+    /**
+     * کنترلرر پنل مدیریت (یک‌بار ساخته و نگه داشته می‌شود).
+     */
+    private function adminController(): AdminController
+    {
+        if ($this->adminController === null) {
+            $this->adminController = new AdminController(
+                $this->bot,
+                $this->notifier,
+                $this->users,
+                $this->packages,
+                $this->orders,
+                $this->provisioner,
+                $this->payments,
+                $this->settings,
+                $this->sessions,
+                $this->flags
+            );
+        }
+
+        return $this->adminController;
+    }
+
+    /**
+     * مسیریابی callback های مدیریتی (در AdminController پیاده‌سازی می‌شود).
+     */
+    private function adminRouter(Update $update, array $user, array $data, string $ns, bool $isAdmin): void
+    {
+        $this->adminController()->route($update, $user, $data, $ns);
+    }
+
+    private function safeReply(int $chatId, string $text): void
+    {
+        try {
+            $this->bot->sendMessage($chatId, $text);
+        } catch (\Throwable $e) {
+            Logger::error('Failed to send error message', ['error' => $e->getMessage()]);
+        }
+    }
+}

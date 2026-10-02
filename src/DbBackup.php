@@ -145,7 +145,13 @@ class DbBackup
             if ($onlyFolder !== null && $folder !== $onlyFolder) continue;
             $dbName = (string)($bot['db_name'] ?? '');
             if ($dbName === '') {
-                $out['skipped'][] = "$folder: no db_name stored";
+                // پیام قبلی «no db_name stored» یعنی «دیتابیس این ربات خراب است»؛
+                // ولی برای قالب‌های SQLite (پاسارگاد) خالی‌بودن کاملاً طبیعی است:
+                // فایل SQLite داخل پوشهٔ خود ربات است و این ابزار فقط MySQL را می‌داند.
+                $type = (string)($bot['type'] ?? '');
+                $out['skipped'][] = Manager::templateDb($type) === 'sqlite'
+                    ? "$folder: SQLite bot (backup is MySQL-only)"
+                    : "$folder: no db_name stored";
                 continue;
             }
             if (!$force && !self::isDue($folder, $set['times'], $state)) {
