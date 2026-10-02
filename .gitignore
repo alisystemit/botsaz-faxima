@@ -8,6 +8,7 @@
 /bots/*/
 /bots/*/config.php
 /data/db_backup.json
+/data/cron_state.json
 /data/backups/
 /bots/*/states/
 /templates/*/states/

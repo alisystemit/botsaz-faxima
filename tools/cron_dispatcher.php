@@ -96,6 +96,8 @@ function runAsync(string $cmd, bool $isWindows): void
 }
 
 $log->info('cron', 'Cron dispatcher started');
+// برای دکمهٔ «وضعیت کرون» داخل ربات — در پایان در data/cron_state.json می‌نویسیم
+$__cronStart = microtime(true);
 
 // ===== بررسی تمام ربات‌های فعال =====
 $bots = $store->allBots();
@@ -176,6 +178,24 @@ try {
     unset($backupRes, $_s, $_f, $_e);
 } catch (Throwable $e) {
     $log->warning('cron', 'backup slot check failed: ' . $e->getMessage());
+}
+
+// ===== ثبت وضعیت اجرا برای دکمهٔ «⏰ وضعیت کرون» داخل ربات =====
+// ربات این فایل را می‌خواند و اعلام می‌کند کرون «سالم» است یا خاموش.
+// عمداً بعد از همهٔ مراحل نوشته می‌شود؛ یعنی «last_run» فقط وقتی به‌روز می‌شود
+// که اجرا واقعاً به پایان رسیده باشد (در lock-skip هم اصلاً وارد اینجا نمی‌شویم).
+try {
+    $__stateFile = dirname(__DIR__) . '/data/cron_state.json';
+    $__state = [
+        'last_run'    => date('c'),
+        'duration_ms' => (int)round((microtime(true) - $__cronStart) * 1000),
+        'bots'        => count($activeBots),
+        'pid'         => (int)(function_exists('getmypid') ? getmypid() : 0),
+        'error'       => '',
+    ];
+    @file_put_contents($__stateFile, json_encode($__state, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE), LOCK_EX);
+} catch (Throwable $__e) {
+    $log->warning('cron', 'state write failed: ' . $__e->getMessage());
 }
 
 $log->info('cron', 'Cron dispatcher finished');
