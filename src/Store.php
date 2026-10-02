@@ -36,7 +36,11 @@ class Store
         $pass = $cfg['db_pass'] ?? '';
         $prefix = $cfg['db_prefix'] ?? 'botsaz_';
         $dbName = $prefix . 'manager';
-        $pdo = new PDO("mysql:host={$host};port={$port};charset=utf8mb4", $user, $pass, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+        $pdo = new PDO("mysql:host={$host};port={$port};charset=utf8mb4", $user, $pass, [
+            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+            // بدون سقف، اتصال به MySQLِ خاموش تا ۶۰ ثانیه کل درخواست را نگه می‌دارد
+            PDO::ATTR_TIMEOUT => 5,
+        ]);
         $pdo->exec("CREATE DATABASE IF NOT EXISTS `{$dbName}` CHARACTER SET utf8mb4 COLLATE utf8mb4_persian_ci");
         $pdo->exec("USE `{$dbName}`");
         $this->pdo = $pdo;

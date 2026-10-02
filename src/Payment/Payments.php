@@ -345,6 +345,30 @@ class Payments
         return (int)$st->fetchColumn();
     }
 
+    /**
+     * فاکتورِ بازِ هم‌مورد (همان قالب/همان مبلغ) برای «ساخت ربات».
+     *
+     * بدون این، هر کلیک روی «ساخت ربات جدید» یک ردیف تازه می‌ساخت و جدول
+     * payments را با فاکتورهای رهاشده پر می‌کرد. قالب خالی یعنی فقط اسلات لیمیت
+     * خریداری می‌شود و با هر قالبی می‌تواند هم‌مورد باشد (مبلغ یکسان است).
+     *
+     * @return array|null آخرین فاکتور باز، یا null اگر چیزی پیدا نشد
+     */
+    public static function findOpenBuildPayment(Store $store, int $uid, string $type, int $amount): ?array
+    {
+        if ($amount <= 0) return null;
+        self::ensureSchema($store);
+        $st = $store->getPdo()->prepare(
+            "SELECT * FROM payments WHERE user_id=? AND amount=? AND status IN (?,?,?) ORDER BY id DESC LIMIT 20"
+        );
+        $st->execute([$uid, $amount, self::ST_PENDING, self::ST_AWAIT_RECEIPT, self::ST_AWAIT_PAY]);
+        foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $p) {
+            $tpl = trim((string)($p['template'] ?? ''));
+            if ($tpl === '' || $tpl === $type) return $p;
+        }
+        return null;
+    }
+
     public static function setMethod(Store $store, int $id, string $method, string $status, string $extId = '', string $payUrl = ''): void
     {
         self::ensureSchema($store);

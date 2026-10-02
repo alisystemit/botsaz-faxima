@@ -204,12 +204,22 @@ class PaymentPanel
     public static function myPaymentsKb(Store $store, int $uid): string
     {
         $rows = [];
+        // شرط pay_url غیرخالی حذف شد: بعضی فاکتورها بدون لینک ساخته می‌شوند ولی
+        // ext_id (شناسهٔ پرداخت NOWPayments) دارند؛ بدون دکمه، متن راهنما دروغ
+        // می‌گفت و کاربر «کجا دکمهٔ بررسی است؟» می‌پرسید.
+        // سقف ۵ دکمه تا کیبورد از حد مجاز تلگرام درنیاید.
+        $shown = 0;
         foreach (self::openCryptoPayments(Payments::userPayments($store, $uid, 20)) as $p) {
+            if ($shown >= 5) break;
             $id = (int)$p['id'];
-            $txt = '🔄 بررسی وضعیت #' . $id;
-            if (trim((string)($p['pay_url'] ?? '')) !== '') {
-                $rows[] = [['text' => $txt, 'callback_data' => "pay:check:{$id}"]];
-            }
+            $rows[] = [['text' => '🔄 بررسی وضعیت #' . $id, 'callback_data' => "pay:check:{$id}"]];
+            $shown++;
+        }
+        foreach (self::openCardPayments(Payments::userPayments($store, $uid, 20)) as $p) {
+            if ($shown >= 5) break;
+            $id = (int)$p['id'];
+            $rows[] = [['text' => '🧾 پیگیری رسید #' . $id, 'callback_data' => "pay:check:{$id}"]];
+            $shown++;
         }
         $rows[] = [['text' => '💳 فروشگاه لیمیت', 'callback_data' => 'pay:shop']];
         $rows[] = [['text' => Nav::BACK, 'callback_data' => Nav::CB_BACK_MAIN]];
@@ -258,10 +268,18 @@ class PaymentPanel
         $rows[] = [['text' => '📝 متن لیمیت', 'callback_data' => 'payadmin:text:limit'], ['text' => '📝 متن قالب', 'callback_data' => 'payadmin:text:template']];
         $rows[] = [['text' => '📝 متن کارت', 'callback_data' => 'payadmin:text:card'], ['text' => '📝 متن کریپتو', 'callback_data' => 'payadmin:text:nowpay']];
         $rows[] = [['text' => '🧾 بررسی پرداخت‌ها', 'callback_data' => 'payadmin:list']];
-        $rows[] = [
-            ['text' => '💰 قیمت فاکسیما', 'callback_data' => 'payadmin:setprice:faxima'],
-            ['text' => '💰 قیمت میرزا', 'callback_data' => 'payadmin:setprice:mirza'],
-        ];
+        // دکمهٔ قیمتِ هر قالب — پویا از رجیستری قالب‌ها.
+        // قبلاً فقط «فاکسیما» و «میرزا» هاردکد شده بودند؛ قالب‌های تازه
+        // (آپ‌تایم / پاسارگاد) اصلاً دکمهٔ تعیین قیمت نداشتند و از پنل قیمت‌گذاری
+        // نمی‌شد فروششان کرد.
+        $priceChunk = [];
+        foreach (array_keys(Manager::validTypes()) as $ptype) {
+            $plabel = preg_replace('/\s*\(.*$/u', '', Manager::templateLabel($ptype));
+            if ($plabel === null || $plabel === '') $plabel = $ptype;
+            $priceChunk[] = ['text' => '💰 ' . $plabel, 'callback_data' => 'payadmin:setprice:' . $ptype];
+            if (count($priceChunk) === 2) { $rows[] = $priceChunk; $priceChunk = []; }
+        }
+        if ($priceChunk !== []) $rows[] = $priceChunk;
         $rows[] = [
             ['text' => '📈 قیمت اسلات', 'callback_data' => 'payadmin:limitprice'],
             ['text' => '💵 نرخ دلار', 'callback_data' => 'payadmin:usdrate'],
