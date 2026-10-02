@@ -17,19 +17,32 @@ class Nav
     public const CB_BACK_BACKUP = 'back:backup';
     public const CB_MY_BOTS = 'mybots:list';
 
+    /**
+     * نام‌های مستعار متنی: کاربران ایرانی معمولاً به‌جای دکمه تایپ می‌کنند.
+     * قبلاً فقط «❌ انصراف» دقیقاً match می‌شد؛ تایپ «انصراف»/«لغو»/«cancel»
+     * به «دستور نامعتبر» می‌خورد و کاربر وسط مرحله گیر می‌کرد.
+     * این متن‌ها عمداً کوتاه و کم‌برخورد هستند تا با ورودی عادی تداخل نکنند.
+     */
+    private const CANCEL_WORDS = ['انصراف', 'لغو', 'لغو کن', 'cancel', 'stop', '/stop', '/cancel'];
+    private const BACK_WORDS   = ['برگشت', 'بازگشت', 'بازگشت به عقب', 'back', '/back'];
+    private const MENU_WORDS   = ['منو', 'منوی اصلی', 'menu', '/menu', '/home', '/main'];
+
     public static function isCancel(string $text): bool
     {
-        return $text === self::CANCEL || $text === '/cancel';
+        if (in_array($text, self::CANCEL_WORDS, true)) return true;
+        return $text === self::CANCEL;
     }
 
     public static function isBack(string $text): bool
     {
+        if (in_array($text, self::BACK_WORDS, true)) return true;
         return $text === self::BACK;
     }
 
     public static function isMenu(string $text): bool
     {
-        return $text === self::MENU || $text === '/menu';
+        if (in_array($text, self::MENU_WORDS, true)) return true;
+        return $text === self::MENU;
     }
 
     public static function isNav(string $text): bool

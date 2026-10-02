@@ -105,7 +105,25 @@ function decryptToken(string $encrypted, string $key): string
     return '';
 }
 
-$store = new Store($cfg['manager_db'], $cfg);
+// ===== ساخت دیتابیس مدیریتی =====
+// اگر MySQL/SQLite در دسترس نباشد، اینجا استثنا می‌دهد. بدون این try، fatal
+// ⇒ shutdown handler با status 200 پاسخ می‌داد ⇒ تلگرام هرگز دوباره نمی‌فرستاد
+// و آپدیت‌ها بی‌صدا گم می‌شدند. با 500، تلگرام دوباره می‌فرستد (درست برای خطای
+// گذرای دیتابیس) و علت دقیق (فایل:خطا + پیام) در پاسخ و لاگ ثبت می‌شود.
+try {
+    $store = new Store($cfg['manager_db'], $cfg);
+} catch (Throwable $e) {
+    $bootErr = [
+        'ok'    => false,
+        'error' => 'store_init_failed',
+        'cause' => Manager::sanitizeDbError($e->getMessage()),
+        'at'    => basename($e->getFile()) . ':' . $e->getLine(),
+        'hint'  => 'اتصال به دیتابیس مدیریتی برقرار نشد؛ لاگ کامل در data/logs/',
+    ];
+    try { Logger::getInstance()->error('boot', $bootErr['cause'] . ' @ ' . $bootErr['at']); } catch (Throwable $ignored) {}
+    http_response_code(500);
+    webhookDone($bootErr);
+}
 
 // ===== پردازش غیرهمزمان =====
 @set_time_limit(0);
@@ -142,8 +160,13 @@ if ($updateId !== null && $store->isUpdateProcessed($updateId)) {
 // «علامت‌گذاری بعد از پردازش موفق» — اگر وسط کار خطا بود، تلگرام دوباره می‌فرستد
 
 // ===== عمق لینک عمیق /start <param> =====
+// دستور ممکن است «/start@MyBot» باشد؛ بدون نرمال‌سازی، پارامتر لینک عمیق هیچ‌وقت
+// خوانده نمی‌شد و کاربر به‌جای خوش‌آمدگویی، «دستور نامعتبر» می‌گرفت.
 $deepLinkParam = null;
-if (isset($update['message']['text']) && preg_match('/^\/start\s+(.+)$/', trim($update['message']['text']), $m)) {
+$rawText = $update['message']['text'] ?? null;
+// is_string: اگر تلگرام (یا یک کلاینت جعلی) مقدار غیرمتنی بفرستد، trim() در PHP 8
+// TypeError می‌دهد و کل وبهوک را می‌کشد — اینجا بی‌خطر رد می‌شود.
+if (is_string($rawText) && preg_match('/^\/start(?:@\w+)?\s+(.+)$/', trim($rawText), $m)) {
     $deepLinkParam = trim($m[1]);
 }
 
@@ -151,42 +174,92 @@ $msg  = $update['message'] ?? $update['channel_post'] ?? null;
 $cb   = $update['callback_query'] ?? null;
 
 if ($cb) {
+    // ===== گاردهای ساختار آپدیت =====
+    // «callback_query بدون from/id» در حالت آفلاین/نسخه‌های قدیمی تلگرام دیده می‌شود؛
+    // قبلاً $cb['from'] بدون چک خوانده می‌شد ⇒ «Trying to access array offset on null»
+    // و 500 ⇒ تلگرام همان آپدیت را بی‌نهایت دوباره می‌فرستاد.
+    $cbFrom = $cb['from'] ?? null;
+    if (!is_array($cbFrom) || !isset($cbFrom['id']) || !isset($cb['id'])) {
+        Logger::getInstance()->warning('webhook', 'callback_query ناقص (بدون id/from) نادیده گرفته شد');
+        if ($updateId !== null) $store->markUpdateProcessed($updateId);
+        webhookDone();
+    }
     if (!isset($cb['message'])) { if ($updateId !== null) $store->markUpdateProcessed($updateId); webhookDone(); }
-    $from = $cb['from'];
-    $uid = (int)$from['id'];
-    $user = $store->user($uid, $from['first_name'] ?? '', $from['username'] ?? '');
-    handleCallback($cfg, $store, $TOKEN, $SUPERS, $user, $cb);
+    $uid = (int)$cbFrom['id'];
+    $user = $store->user($uid, $cbFrom['first_name'] ?? '', $cbFrom['username'] ?? '');
+    $cbChatId = $cb['message']['chat']['id'] ?? $uid;
+    $cbData = (string)($cb['data'] ?? '');
+    // ===== گارد خطای هندلر =====
+    // استثناي خارج‌شده از switch ⇒ 500 ⇒ حلقهٔ retry تلگرام. حالا دقیقاً همان‌جا
+    // به کاربر گفته می‌شود کدام دکمه و کدام نقطه از کد شکسته (فایل:خط).
+    try {
+        handleCallback($cfg, $store, $TOKEN, $SUPERS, $user, $cb);
+    } catch (Throwable $e) {
+        reportHandlerError($TOKEN, $cbChatId, 'callback', $cbData, $e, mainMenu($user, $SUPERS, $store));
+    }
     if ($updateId !== null) $store->markUpdateProcessed($updateId);
     webhookDone();
 }
 
 if ($msg) {
     // ===== فقط چت خصوصی =====
+    if (!isset($msg['chat']) || !is_array($msg['chat'])) {
+        // آپدیت ناقص (کلاینت غیرمعمول/جعلی) نباید به index روی null بخورد
+        Logger::getInstance()->warning('webhook', 'message بدون chat نادیده گرفته شد');
+        if ($updateId !== null) $store->markUpdateProcessed($updateId);
+        webhookDone();
+    }
     $chatType = $msg['chat']['type'] ?? 'private';
     if ($chatType !== 'private') {
         if ($updateId !== null) $store->markUpdateProcessed($updateId);
         webhookDone();
     }
     $from = $msg['from'] ?? null;
-    if (!$from) { if ($updateId !== null) $store->markUpdateProcessed($updateId); webhookDone(); }
+    if (!is_array($from) || !isset($from['id'])) {
+        Logger::getInstance()->warning('webhook', 'message بدون from نادیده گرفته شد');
+        if ($updateId !== null) $store->markUpdateProcessed($updateId);
+        webhookDone();
+    }
     $uid = (int)$from['id'];
     $user = $store->user($uid, $from['first_name'] ?? '', $from['username'] ?? '');
-    $text = trim($msg['text'] ?? '');
-    $chatId = $msg['chat']['id'];
+    $text = is_string($msg['text'] ?? null) ? trim($msg['text']) : '';
+    $chatId = $msg['chat']['id'] ?? $uid;
+    $step = (string)($user['step'] ?? 'idle');
 
     // ===== ورودی غیرمتنی =====
-    // استثنا: رسید کارت‌به‌کارت می‌تواند عکس/فایل باشد — آن را به handleStep می‌سپاریم
-    $isReceiptStep = ($user['step'] ?? '') === 'await_card_receipt';
-    if ($text === '' && !isset($msg['text']) && !$isReceiptStep) {
+    // هیچ ارسالی از طرف کاربر نباید بی‌جواب بماند. قبلاً هر چیزی غیر از «متن»
+    // (عکس، ویدیو، ویس، استیکر، مکان، فایل، نظرسنجی...) بی‌صدا دور ریخته می‌شد؛
+    // کاربر فکر می‌کرد ربات هنگ کرده. حالا هر مرحله‌ای که ورودی غیرمتنی را
+    // نمی‌پذیرد، با پیام دقیقِ همان مرحله جواب می‌گیرد.
+    // مراحلی که واقعاً ورودی غیرمتنی بخشی از کارشان است استثنا هستند:
+    //   await_card_receipt  → عکس/فایل فیش
+    //   await_broadcast     → پیام همگانی می‌تواند عکس/ویدیو باشد (copyMessage)
+    //   await_child_broadcast → همان‌طور
+    $mediaFriendlySteps = ['await_card_receipt', 'await_broadcast', 'await_child_broadcast'];
+    if (!isset($msg['text']) && !in_array($step, $mediaFriendlySteps, true)) {
+        BotApi::send($TOKEN, $chatId, nonTextInputHint($step), $step === 'idle'
+            ? ['reply_markup' => mainMenu($user, $SUPERS, $store)]
+            : ['reply_markup' => Nav::stepKb()]);
         if ($updateId !== null) $store->markUpdateProcessed($updateId);
         webhookDone();
     }
 
-    handleMessage($cfg, $store, $TOKEN, $SUPERS, $user, $chatId, $text, $msg, $deepLinkParam);
+    // ===== گارد خطای هندلر (مثل بخش کال‌بک) =====
+    try {
+        handleMessage($cfg, $store, $TOKEN, $SUPERS, $user, $chatId, $text, $msg, $deepLinkParam);
+    } catch (Throwable $e) {
+        reportHandlerError($TOKEN, $chatId, 'message',
+            mb_substr($text !== '' ? $text : mediaLabel($msg), 0, 80), $e,
+            mainMenu($user, $SUPERS, $store));
+    }
     if ($updateId !== null) $store->markUpdateProcessed($updateId);
     webhookDone();
 }
 
+// انواع آپدیتی که عمداً نادیده گرفته می‌شوند (edited_message، my_chat_member،
+// message_reaction، …) هم باید علامت بخورند؛ وگرنه اگر تلگرام همان update_id را
+// دوباره بفرستد دوباره پردازش می‌شود و جدول processed_updates هم بی‌دلیل رشد می‌کند.
+if ($updateId !== null) $store->markUpdateProcessed($updateId);
 webhookDone();
 
 // ================= helpers =================
@@ -194,6 +267,109 @@ webhookDone();
 function isSuper(array $supers, int $uid): bool { return in_array((string)$uid, array_map('strval', $supers), true); }
 function isAdmin(array $u, array $supers): bool { return isSuper($supers, (int)$u['user_id']) || (int)$u['is_admin'] === 1; }
 function canUse(array $u, array $supers): bool { return isAdmin($u, $supers) || (int)$u['is_allowed'] === 1; }
+
+/**
+ * نرمال‌سازی دستور «/start@ربات» ⇒ «/start».
+ * تلگرام وقتی کاربر دستور را از منوی گروه/جست‌وجو انتخاب می‌کند یا نام ربات را
+ * تایپ می‌کند، دستور را با پسوند @username می‌فرستد. بدون این تبدیل،
+ * همهٔ چک‌های «/start» و «/help» شکست می‌خوردند و کاربر «دستور نامعتبر» می‌گرفت.
+ */
+function normalizeCommandText(string $text): string
+{
+    if ($text === '' || $text[0] !== '/') return $text;
+    if (preg_match('/^\/([A-Za-z0-9_]+)@[\w\d_]+/', $text, $m)) {
+        return '/' . $m[1] . substr($text, strlen($m[0]));
+    }
+    return $text;
+}
+
+/** عنوان فارسی خوانای هر مرحله — برای پیام‌های خطای دقیق */
+function stepLabel(string $step): string
+{
+    $map = [
+        'await_bot_token'     => 'دریافت توکن ربات',
+        'await_admin_id'      => 'دریافت آیدی ادمین',
+        'await_folder'        => 'نام ربات',
+        'await_broadcast'     => 'پیام همگانی',
+        'await_child_broadcast' => 'پیام همگانی ربات فرزند',
+        'await_user_add'      => 'افزودن کاربر مجاز',
+        'await_user_remove'   => 'حذف کاربر مجاز',
+        'await_backup_times'  => 'ساعت بکاپ',
+        'await_card_receipt'  => 'ارسال رسید کارت‌به‌کارت',
+        'await_pay_text'      => 'متن دلخواه پرداخت',
+        'await_pay_price'     => 'قیمت قالب',
+        'await_pay_limit_price' => 'قیمت اسلات',
+        'await_pay_usdrate'   => 'نرخ دلار',
+        'await_pay_card'      => 'شماره کارت',
+        'await_pay_card_owner'=> 'نام صاحب کارت',
+        'await_pay_nowpay_key'   => 'کلید API نوب‌پیمنت',
+        'await_pay_nowpay_secret'=> 'IPN Secret نوب‌پیمنت',
+        'await_pay_setlimit'  => 'لیمیت کاربر',
+    ];
+    return $map[$step] ?? $step;
+}
+
+/** پیام دقیق برای ورودی غیرمتنی در یک مرحله — هیچ ارسالی بی‌جواب نمی‌ماند */
+function nonTextInputHint(string $step): string
+{
+    if ($step === '' || $step === 'idle') {
+        return "🖼 فقط <b>متن</b> و دکمه پذیرفته می‌شود.\n"
+            . "برای شروع «🤖 ساخت ربات جدید» را بزنید یا از دکمه‌های زیر استفاده کنید.";
+    }
+    $accepts = $step === 'await_card_receipt'
+        ? "در این مرحله فقط <b>عکس فیش</b>، <b>فایل رسید</b> یا <b>متنِ شماره پیگیری</b> پذیرفته می‌شود."
+        : "در این مرحله فقط <b>متن</b> پذیرفته می‌شود؛ عکس/ویدیو/استیکر پردازش نمی‌شود.";
+    return "⛔️ ورودی نامعتبر برای مرحلهٔ «" . stepLabel($step) . "».\n{$accepts}\n"
+        . "متن مورد نیاز را بفرستید یا انصراف بدهید.";
+}
+
+/** نام فارسی نوع پیام غیرمتنی — برای گزارش دقیق خطای هندلر */
+function mediaLabel(array $msg): string
+{
+    foreach (['photo' => 'عکس', 'video' => 'ویدیو', 'animation' => 'GIF', 'audio' => 'فایل صوتی',
+              'voice' => 'ویس', 'video_note' => 'ویدیوی دایره‌ای', 'document' => 'فایل',
+              'sticker' => 'استیکر', 'location' => 'موقعیت مکانی', 'contact' => 'مخاطب',
+              'poll' => 'نظرسنجی', 'dice' => 'تاس', 'game' => 'بازی', 'venue' => 'مکان'] as $k => $fa) {
+        if (!empty($msg[$k])) return $fa;
+    }
+    return 'پیام غیرمتنی';
+}
+
+/**
+ * گزارش خطای داخلی هندلر: هم به کاربر همان‌جا دقیق گفته می‌شود کجا شکسته
+ * (بخش + ورودی + پیام استثنا + فایل:خطا)، هم کامل در لاگ می‌رود.
+ *
+ * نکتهٔ کلیدی: استثنا نباید به صورت 500 بیرون برود — تلگرام همان آپدیت را
+ * بی‌نهایت دوباره می‌فرستد و هر بار هم خطا تکرار می‌شود (حلقهٔ مرگ).
+ * پس خطا به کاربر اعلام و آپدیت علامت‌گذاری می‌شود.
+ */
+function reportHandlerError(string $TOKEN, $chatId, string $stage, string $input, Throwable $e, ?string $kb = null): void
+{
+    $file = basename((string)$e->getFile());
+    $line = (int)$e->getLine();
+    $msg  = Manager::sanitizeDbError($e->getMessage());
+    try {
+        Logger::getInstance()->error('handler', "[{$stage}] input={$input} | {$msg} @ {$file}:{$line}", [
+            'exception' => get_class($e),
+            'trace'     => $e->getTraceAsString(),
+        ]);
+    } catch (Throwable $ignored) { /* لاگر هم خراب باشد، پیام کاربر نباید گم شود */ }
+
+    $text = "⚠️ <b>خطای داخلی ربات — عملیات متوقف شد</b>\n\n"
+        . "بخش: <code>" . htmlspecialchars($stage, ENT_QUOTES, 'UTF-8') . "</code>\n"
+        . "ورودی شما: <code>" . htmlspecialchars(mb_substr($input, 0, 120), ENT_QUOTES, 'UTF-8') . "</code>\n"
+        . "علت: " . htmlspecialchars($msg, ENT_QUOTES, 'UTF-8') . "\n"
+        . "محل دقیق خطا: <code>{$file}:{$line}</code>\n\n"
+        . "وضعیت: آپدیت علامت‌گذاری شد، پس تکرار بی‌جهت نمی‌شود؛ دوباره تلاش کنید یا «🏠 منو» را بزنید.";
+    try {
+        $extra = ($kb !== null) ? ['reply_markup' => $kb] : [];
+        $r = BotApi::send($TOKEN, $chatId, $text, $extra);
+        if (empty($r['ok'])) {
+            // پیام خطا هم نرسید ⇒ حداقل در لاگ دقیق ثبت شود
+            Logger::getInstance()->error('handler', "error notice not delivered: " . ($r['description'] ?? '?'));
+        }
+    } catch (Throwable $ignored) { /* ارسال خطا هرگز نباید خودش خطا بدهد */ }
+}
 
 function mainMenu(array $u, array $supers, Store $store = null): string {
     if (isAdmin($u, $supers)) {
@@ -208,19 +384,21 @@ function mainMenu(array $u, array $supers, Store $store = null): string {
             [['text' => '⏰ کرون'], ['text' => '👥 کاربران مجاز']],
             [['text' => '💾 بکاپ دیتابیس'], ['text' => "📋 درخواست‌های جدید{$pendingText}"]],
             [['text' => "💳 پرداخت‌ها{$payText}"], ['text' => 'ℹ️ راهنما']],
-            [['text' => '📋 همه ربات‌ها'], ['text' => '💳 افزایش لیمیت']],
+            [['text' => '🔍 دیاگنوز'], ['text' => '📋 همه ربات‌ها']],
+            [['text' => '💳 افزایش لیمیت']],
         ]);
     }
     // وقتی ادمین هر دو درگاه «لیمیت» و «قالب» را خاموش کرده، دکمهٔ خرید اصلاً نمایش داده نمی‌شود
     if ($store && !PaymentGateways::isAnythingEnabled($store)) {
         return BotApi::kb([
             [['text' => '🤖 ساخت ربات جدید'], ['text' => '📦 ربات‌های من']],
-            [['text' => 'ℹ️ راهنما']],
+            [['text' => '🧾 پرداخت‌های من'], ['text' => 'ℹ️ راهنما']],
         ]);
     }
     return BotApi::kb([
         [['text' => '🤖 ساخت ربات جدید'], ['text' => '📦 ربات‌های من']],
-        [['text' => '💳 افزایش لیمیت'], ['text' => 'ℹ️ راهنما']],
+        [['text' => '💳 افزایش لیمیت'], ['text' => '🧾 پرداخت‌های من']],
+        [['text' => 'ℹ️ راهنما']],
     ]);
 }
 
@@ -288,9 +466,46 @@ function gateBuildPayment(array $cfg, Store $store, string $TOKEN, array $SUPERS
     $hasMethods = PaymentPanel::methodsAvailable($store, $cfg);
     // ردیف فاکتور فقط وقتی ساخته می‌شود که روش پرداختی هم باشد؛ قبلاً وقتی
     // همهٔ درگاه‌ها خاموش بود، هر تلاش کاربر یک ردیف pending یتیم می‌ساخت.
-    $pid = $hasMethods
-        ? Payments::createBuildPayment($store, (int)$user['user_id'], $type, $req, '')
-        : 0;
+    //
+    // ===== گارد اسپمِ فاکتور =====
+    // قبلاً هر بار که کاربر «ساخت ربات جدید» را می‌زد یک ردیف تازه ساخته می‌شد؛
+    // با چند کلیک متوالی، جدول payments پر از فاکتورهای رهاشده می‌شد و سهمیهٔ
+    // ۵ فاکتور بازِ کاربر هم پر می‌شد. حالا اول فاکتور بازِ هم‌مورد پیدا می‌شود
+    // و فقط در صورت نبودن، ردیف تازه ساخته (یا با پیام دقیق متوقف) می‌شود.
+    $uidP = (int)$user['user_id'];
+    $pid = 0;
+    if ($hasMethods) {
+        $existing = Payments::findOpenBuildPayment($store, $uidP, $type, $amount);
+        if ($existing !== null) {
+            $exStatus = (string)$existing['status'];
+            if ($exStatus === Payments::ST_AWAIT_PAY) {
+                // فاکتور کریپتویی صادر شده و هنوز پرداخت نشده ⇒ همان را ادامه بده
+                BotApi::send($TOKEN, $chatId,
+                    "🪙 شما هم‌اکنون یک فاکتور کریپتوییِ باز دارید؛ ابتدا همان را پرداخت کنید:\n"
+                    . Payments::describe($existing)
+                    . (trim((string)($existing['pay_url'] ?? '')) !== '' ? "\nلینک: " . htmlspecialchars((string)$existing['pay_url'], ENT_QUOTES, 'UTF-8') : ''),
+                    ['reply_markup' => PaymentPanel::invoiceKb((int)$existing['id'], (string)($existing['pay_url'] ?? ''))]);
+                return true;
+            }
+            if (in_array($exStatus, [Payments::ST_AWAIT_RECEIPT, Payments::ST_AWAIT_ADMIN], true)) {
+                // رسید فرستاده و منتظر ادمین است؛ دوباره فاکتور نساز
+                BotApi::send($TOKEN, $chatId,
+                    "🧾 شما یک پرداخت در انتظار رسید/بررسی دارید؛ اول همان را تمام کنید (یا لغو کنید):\n"
+                    . Payments::describe($existing),
+                    ['reply_markup' => PaymentPanel::myPaymentsKb($store, $uidP)]);
+                return true;
+            }
+            $pid = (int)$existing['id']; // pending ⇒ همان فاکتور، روش پرداخت را دوباره انتخاب کن
+        } elseif (Payments::openPaymentCount($store, $uidP) >= Payments::MAX_OPEN_PAYMENTS) {
+            BotApi::send($TOKEN, $chatId,
+                "⛔️ شما " . Payments::MAX_OPEN_PAYMENTS . " فاکتور باز دارید و فاکتور تازه ساخته نمی‌شود.\n"
+                . "از «🧾 پرداخت‌های من» هر کدام را پرداخت یا لغو کنید، بعد دوباره تلاش کنید.",
+                ['reply_markup' => PaymentPanel::myPaymentsKb($store, $uidP)]);
+            return true;
+        } else {
+            $pid = Payments::createBuildPayment($store, $uidP, $type, $req, '');
+        }
+    }
     $t = "💰 <b>برای ساخت این ربات پرداخت لازم است</b>\n\n" . implode(' + ', $parts)
         . "\nمبلغ قابل پرداخت: <b>" . number_format($amount) . " تومان</b>";
     if ($note !== '') $t .= "\n\n" . $note;
@@ -373,15 +588,36 @@ function botPanelText(array $cfg, array $bot): string
     $hasUsers = botHasUserTable($bot);
     $count = ($pdo && $hasUsers) ? childCount($pdo, $bot) : -1;
     $countTxt = $count >= 0 ? (string)$count : '—';
-    $st = ($bot['status'] ?? '') === 'active' ? '🟢 فعال' : '🔴 غیرفعال';
+    $st = (string)($bot['status'] ?? '') === 'active' ? '🟢 فعال' : '🔴 غیرفعال';
     $name = htmlspecialchars((string)($bot['bot_username'] ?? ''), ENT_QUOTES, 'UTF-8');
+    $folder = htmlspecialchars((string)($bot['folder'] ?? ''), ENT_QUOTES, 'UTF-8');
     $label = Manager::templateLabel((string)($bot['type'] ?? ''));
-    return "🤖 <b>" . htmlspecialchars((string)($bot['folder'] ?? ''), ENT_QUOTES, 'UTF-8') . "</b> ({$label})\n\n"
-        . "🔹 یوزرنیم: @{$name}\n"
-        . "🔹 وضعیت: {$st}\n"
-        . "🔹 ادمین: <code>{$bot['admin_id']}</code>\n"
-        . "🔹 دیتابیس: <code>" . botDbLabel($bot) . "</code>\n"
-        . "👥 کاربران: {$countTxt}";
+    $dbLabel = htmlspecialchars(botDbLabel($bot), ENT_QUOTES, 'UTF-8');
+
+    $t = "🤖 <b>{$folder}</b> ({$label})\n\n";
+    $t .= "🔹 یوزرنیم: " . ($name !== '' ? "@{$name}" : '<i>تنظیم نشده</i>') . "\n";
+    $t .= "🔹 وضعیت: {$st}\n";
+    $t .= "🔹 ادمین: <code>" . htmlspecialchars((string)($bot['admin_id'] ?? ''), ENT_QUOTES, 'UTF-8') . "</code>\n";
+    $t .= "🔹 صاحب ربات (در ربات‌ساز): <code>" . (int)($bot['owner_id'] ?? 0) . "</code>\n";
+    $t .= "🔹 دیتابیس: <code>{$dbLabel}</code>\n";
+    $t .= "👥 کاربران: {$countTxt}\n";
+
+    // تاریخ ساخت (ستون ممکن است در اسکیمای قدیمی نباشد ⇒ بدون هشدار چک می‌شود)
+    if (isset($bot['created_at']) && trim((string)$bot['created_at']) !== '') {
+        $ts = strtotime((string)$bot['created_at']);
+        $t .= "📅 تاریخ ساخت: " . ($ts ? date('Y-m-d H:i', $ts) : htmlspecialchars((string)$bot['created_at'], ENT_QUOTES, 'UTF-8')) . "\n";
+    }
+
+    // وبهوک: آدرس واقعی ثبت‌شده (اگر ستون خالی بود از استراتژی استاندارد محاسبه می‌شود)
+    $wh = trim((string)($bot['webhook_url'] ?? ''));
+    if ($wh === '') {
+        try { $wh = trim((string)Manager::webhookUrlForBot($cfg, $bot)); } catch (Throwable $e) { $wh = ''; }
+    }
+    $t .= "🔗 وبهوک: " . ($wh !== '' ? '<code>' . htmlspecialchars($wh, ENT_QUOTES, 'UTF-8') . '</code>' : '<i>ست نشده</i>') . "\n";
+    if (isset($bot['webhook_secret']) && trim((string)$bot['webhook_secret']) !== '') {
+        $t .= "🔒 رمز وبهوک (X-Telegram-Bot-Api-Secret-Token): ✅ فعال\n";
+    }
+    return $t;
 }
 
 /**
@@ -485,7 +721,10 @@ function handleBack(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
         }
     } catch (Throwable $e) {
         try { $store->clearStep($uid); } catch (Throwable $ignored) {}
-        BotApi::send($TOKEN, $chatId, "🏠 منوی اصلی", ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
+        // قبلاً اینجا خطا بی‌صدا بلعیده می‌شد و کاربر فقط منوی اصلی می‌دید؛
+        // حالا علت دقیق + محل (فایل:خطا) + مرحله‌ای که شکسته گفته می‌شود.
+        reportHandlerError($TOKEN, $chatId, 'back: ' . stepLabel($step), $step, $e,
+            mainMenu($user, $SUPERS, $store));
     }
 }
 
@@ -513,7 +752,13 @@ function childPdo(array $cfg, array $bot): ?PDO {
         }
         $port = $cfg['db_port'] ?? 3306;
         $dsn = "mysql:host={$cfg['db_host']};port={$port};dbname={$dbName};charset=utf8mb4";
-        return new PDO($dsn, $cfg['db_user'], $cfg['db_pass'], [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+        // ATTR_TIMEOUT: بدون آن، اگر میزبان MySQL از دسترس خارج باشد هر فراخوانی
+        // childPdo (پنل ربات، آمار، همگانی) تا ۶۰ ثانیه معطل connect می‌ماند؛
+        // چند ربات با هم یعنی وبهوک عملاً «هنگ» می‌کند. سقف ۵ ثانیه کافی است.
+        return new PDO($dsn, $cfg['db_user'], $cfg['db_pass'], [
+            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+            PDO::ATTR_TIMEOUT => 5,
+        ]);
     } catch (Throwable $e) { return null; }
 }
 
@@ -557,6 +802,8 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
 {
     $uid = (int)$user['user_id'];
     $admin = isAdmin($user, $SUPERS);
+    // «/start@ربات من» باید مثل «/start» رفتار کند — وگرنه همهٔ دستورات شکست می‌خوردند
+    $text = normalizeCommandText($text);
 
     // کاربر «مجاز» یا ادمین از قبل دسترسی دارد.
     // کاربر غیرمجاز هم باید بتواند «🤖 ساخت ربات جدید» بزند تا درخواستش ثبت شود —
@@ -587,15 +834,17 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
         // ===== ست دستورات ربات (فقط هنگام /start — نه هر آپدیت) =====
         BotApi::setMyCommands($TOKEN, [
             ['command' => 'start', 'description' => '🏠 منوی اصلی'],
+            ['command' => 'menu', 'description' => '🏠 منوی اصلی'],
             ['command' => 'mybots', 'description' => '📦 ربات‌های من'],
             ['command' => 'stats', 'description' => '📊 آمار ربات‌ساز'],
-            ['command' => 'cron', 'description' => '⏰ راه‌اندازی کرون'],
+            ['command' => 'cron', 'description' => '⏰ وضعیت کرون (ادمین)'],
             ['command' => 'diagnose', 'description' => '🔍 بررسی سیستم (ادمین)'],
+            ['command' => 'cancel', 'description' => '❌ انصراف از مرحلهٔ فعلی'],
             ['command' => 'help', 'description' => 'ℹ️ راهنما'],
         ]);
         $role = $admin ? "مدیر 👑" : "کاربر مجاز ✅";
         $deepNote = $deepLink !== null
-            ? "🔗 لینک شما: <code>" . htmlspecialchars($deepLink) . "</code>\n\n"
+            ? "🔗 لینک شما: <code>" . htmlspecialchars($deepLink, ENT_QUOTES, 'UTF-8') . "</code>\n\n"
             : '';
         BotApi::send($TOKEN, $chatId,
             $deepNote . "👋 سلام! به <b>ربات‌ساز</b> خوش آمدی.\nنقش شما: {$role}\n\nبا دکمه «🤖 ساخت ربات جدید» در چند ثانیه ربات فاکسیما یا میرزا بساز.\nفقط توکن ربات + آیدی ادمین + یک نام لازم است.",
@@ -639,7 +888,8 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
                 return;
             }
             if ($store->hasPendingRequest($uid)) {
-                BotApi::send($TOKEN, $chatId, "⏳ درخواست شما قبلاً ثبت شده و در انتظار تأیید ادمین است.\nلطفاً صبر کنید.");
+                BotApi::send($TOKEN, $chatId, "⏳ درخواست شما قبلاً ثبت شده و در انتظار تأیید ادمین است.
+لطفاً صبر کنید.");
                 return;
             }
             // ادمین یا کاربر تأییدشده: مستقیم انتخاب نوع ربات
@@ -648,15 +898,21 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
                 return;
             }
             $store->addPendingRequest($uid, 'bot');
-            BotApi::send($TOKEN, $chatId, "📝 درخواست شما ثبت شد.\nلطفاً منتظر تأیید ادمین بمانید.");
+            BotApi::send($TOKEN, $chatId, "📝 درخواست شما ثبت شد.
+لطفاً منتظر تأیید ادمین بمانید.");
             return;
 
         case '💳 افزایش لیمیت':
             try { Payments::ensureSchema($store); } catch (Throwable $e) {}
             if (!PaymentGateways::isAnythingEnabled($store)) {
+                // منوی اصلی دکمهٔ «🧾 پرداخت‌های من» هم دارد تا کاربر بتواند
+                // پرداخت‌های قبلی‌اش را ببیند (قبلاً stepKb می‌داد که «برگشت»
+                // آن وضعیت اینجا کاربر را به منوی اصلی می‌پراند و گیج‌کننده بود).
                 BotApi::send($TOKEN, $chatId,
-                    "ℹ️ <b>فعلاً فروش لیمیت و قالب غیرفعال است.</b>\nبرای اطلاعات بیشتر با ادمین در میان بگذارید.",
-                    ['reply_markup' => Nav::stepKb()]);
+                    "ℹ️ <b>فعلاً فروش لیمیت و قالب غیرفعال است.</b>\n"
+                    . "پرداخت‌های قبلی خود را از «🧾 پرداخت‌های من» ببینید.\n"
+                    . "برای اطلاعات بیشتر با ادمین در میان بگذارید.",
+                    ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
                 return;
             }
             showLimitShop($store, $TOKEN, $chatId, $user, $SUPERS);
@@ -666,6 +922,16 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
             sendMyBotsList($store, $TOKEN, $chatId, $uid);
             return;
 
+        // دکمهٔ کیبورد «🧾 پرداخت‌های من» — قبلاً فقط کال‌بک داشت و فشاردادنش
+        // روی کیبورد با «دستور نامعتبر» جواب می‌گرفت.
+        case '🧾 پرداخت‌های من': {
+            try { Payments::ensureSchema($store); } catch (Throwable $e) {}
+            BotApi::send($TOKEN, $chatId,
+                PaymentPanel::myPaymentsText($store, $uid),
+                ['reply_markup' => PaymentPanel::myPaymentsKb($store, $uid)]);
+            return;
+        }
+
         case 'ℹ️ راهنما': {
             $help = "📖 <b>راهنما</b>\n\n1️⃣ از @BotFather با /newbot یک ربات بساز و توکن را کپی کن.\n2️⃣ در ربات‌ساز «🤖 ساخت ربات جدید» → انتخاب فاکسیما/میرزا.\n3️⃣ توکن، آیدی عددی ادمین (@userinfobot) و یک نام انگلیسی بده.\n4️⃣ ربات‌ساز خودش: پوشه + دیتابیس + کانفیگ + وبهوک.\n\n⚠️ توکن را به کسی نده.";
             try {
@@ -674,14 +940,13 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
                         . "از «💳 افزایش لیمیت» اسلات یا مجوز قالب بخر و با «🧾 پرداخت‌های من» پیگیری کن.";
                 }
             } catch (Throwable $e) {}
-            BotApi::send($TOKEN, $chatId, $help);
+            BotApi::send($TOKEN, $chatId, $help, ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
             return;
         }
 
         case '⏰ کرون':
             if (!$admin) { BotApi::send($TOKEN, $chatId, "⛔️ فقط ادمین."); return; }
-            BotApi::send($TOKEN, $chatId, "⏰ برای راه‌اندازی کرون، خط زیر را به crontab اضافه کنید:\n\n*/5 * * * * php /path/to/botsaz-faxima/tools/cron_dispatcher.php\n\nیا از «📋 درخواست‌ها» وضعیت کرون را ببینید.",
-                ['reply_markup' => BotApi::kb([[['text' => '🏠 منو'], ['text' => 'ℹ️ راهنما']]])]);
+            showCronPanel($cfg, $TOKEN, $chatId);
             return;
 
         case '💾 بکاپ دیتابیس':
@@ -697,60 +962,11 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
             return;
         }
         switch ($text) {
+
             // ===== 🔍 دیاگنوز سیستم (فقط ادمین) =====
             case '/diagnose':
             case '🔍 دیاگنوز': {
-                if (!$admin) { BotApi::send($TOKEN, $chatId, "⛔️ فقط ادمین."); return; }
-                $_diag = [];
-                $_diag[] = "🖥️ <b>سیستم</b>\n"
-                    . "PHP: " . PHP_VERSION . "\n"
-                    . "Server: " . ($_SERVER['SERVER_SOFTWARE'] ?? 'unknown') . "\n"
-                    . "OS: " . (PHP_OS ?: 'unknown');
-                // بررسی پوشه‌ها
-                $_dirs = [
-                    'ROOT_DIR' => __DIR__,
-                    'bots/' => __DIR__ . '/bots',
-                    'data/' => __DIR__ . '/data',
-                    'data/logs/' => __DIR__ . '/data/logs',
-                ];
-                $_dir_msg = "📁 <b>پوشه‌ها</b>\n";
-                foreach ($_dirs as $_name => $_path) {
-                    if (!is_dir($_path)) {
-                        $_dir_msg .= "❌ {$_name}: وجود ندارد\n";
-                    } elseif (!is_writable($_path)) {
-                        $_p = substr(sprintf('%o', @fileperms($_path)), -4);
-                        $_dir_msg .= "❌ {$_name}: write protected ({$_p})\n";
-                    } else {
-                        $_p = substr(sprintf('%o', @fileperms($_path)), -4);
-                        $_dir_msg .= "✅ {$_name}: OK ({$_p})\n";
-                    }
-                }
-                // بررسی لاگ
-                $_log_file = __DIR__ . '/data/logs/' . date('Y-m-d') . '.log';
-                $_log_status = is_writable($_log_file) ? "✅" : "❌";
-                $_dir_msg .= "📝 لاگ امروز: {$_log_status} {$_log_file}\n";
-                // بررسی دیتابیس
-                try {
-                    $_pdo = new PDO("mysql:host={$cfg['db_host']};port=" . ($cfg['db_port'] ?? 3306) . ";charset=utf8mb4", $cfg['db_user'], $cfg['db_pass'], [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_TIMEOUT => 3]);
-                    $_db_test = $_pdo->query("SELECT 1")->fetchColumn();
-                    $_dir_msg .= "🗄️ MySQL: ✅ Connected\n";
-                } catch (Exception $e) {
-                    $_dir_msg .= "🗄️ MySQL: ❌ " . htmlspecialchars($e->getMessage()) . "\n";
-                }
-                // دیسک
-                $_disk = function_exists('disk_free_space') ? round(disk_free_space(__DIR__) / 1024 / 1024, 1) : '?';
-                $_dir_msg .= "💾 فضای دیسک آزاد: {$_disk} MB\n";
-                // وبهوک
-                $_wh = "❓ unknown";
-                if (!empty($cfg['main_token']) && $cfg['main_token'] !== 'PUT_MAIN_BOT_TOKEN_HERE') {
-                    $_wh_info = @json_decode(@file_get_contents("https://api.telegram.org/bot{$cfg['main_token']}/getWebhookInfo"), true);
-                    if (!empty($_wh_info['ok'])) {
-                        $_wh = $_wh_info['result']['url'] ?? 'no url';
-                        $_wh .= " (pending: " . ($_wh_info['result']['pending_update_count'] ?? 0) . ")";
-                    }
-                }
-                $_dir_msg .= "🔗 وبهوک: {$_wh}\n";
-                BotApi::send($TOKEN, $chatId, implode("\n", $_diag) . "\n\n" . $_dir_msg);
+                showDiagnostics($store, $cfg, $TOKEN, $chatId);
                 return;
             }
             
@@ -795,7 +1011,7 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
         }
     }
 
-    BotApi::send($TOKEN, $chatId, "دستور نامعتبر است.", ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
+    BotApi::send($TOKEN, $chatId, "⛔️ دستور نامعتبر است.", ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
 }
 
 // ================= steps =================
@@ -844,17 +1060,10 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
                     ['reply_markup' => PaymentPanel::limitShopKb($store, $user, $SUPERS)]);
                 return;
             }
-            $hasAttachment = !empty($msg['photo']) || !empty($msg['document']);
-            if (!$hasAttachment && !PaymentCard::isValidReceipt($text, false)) {
-                BotApi::send($TOKEN, $chatId,
-                    "⛔️ رسید نامعتبر است؛ عکس فیش یا شماره پیگیری (حداقل ۴ کاراکتر) بفرستید.\n"
-                    . "برای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL,
-                    ['reply_markup' => Nav::stepKb()]);
-                return;
-            }
-            // file_id خودِ فایل رسید؛ تا ادمین بتواند واقعاً عکس فیش را ببیند.
-            // قبلاً فقط یک پرچم has_attachment ذخیره می‌شد و خودِ تصویر هرگز به ادمین نمی‌رسید،
-            // یعنی ادمین می‌دید «رسید ثبت شد» ولی چیزی برای بررسی نداشت.
+            // ===== ابتدا file_id پیوست، بعد قضاوت دربارهٔ رسید =====
+            // ترتیب مهم است: قبلاً اول «رسید معتبر است؟» پرسیده می‌شد و بعد file_id
+            // خوانده می‌شد؛ اگر پیوست file_id نمی‌داشت، رسید قبول می‌شد ولی چیزی
+            // برای نمایش ادمین ذخیره نمی‌شد (ادمین «رسید ثبت شد» می‌دید بی‌آنکه فیشی ببیند).
             $receiptFileId = '';
             $receiptKind = '';
             if (!empty($msg['photo'])) {
@@ -868,9 +1077,20 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
                 $receiptFileId = (string)($msg['document']['file_id'] ?? '');
                 $receiptKind = $receiptFileId !== '' ? 'document' : '';
             }
-            if ($hasAttachment && $receiptFileId === '') {
-                // فایل بدون file_id یعنی چیزی برای نمایش ادمین نداریم
-                $hasAttachment = false;
+            // فایلِ بدون file_id یعنی چیزی برای نمایش ادمین نداریم ⇒ مثل متن خام رفتار کن
+            $hasAttachment = ($receiptFileId !== '');
+            if (!$hasAttachment && !PaymentCard::isValidReceipt($text, false)) {
+                $got = mediaLabel($msg);
+                $gotTxt = ($got !== 'پیام غیرمتنی') ? "\nدریافت‌شده: <b>" . htmlspecialchars($got, ENT_QUOTES, 'UTF-8') . "</b>" : '';
+                BotApi::send($TOKEN, $chatId,
+                    "⛔️ رسید نامعتبر است.{$gotTxt}\n"
+                    . "چیزی که پذیرفته می‌شود:\n"
+                    . "• 📷 عکس فیش (photo)\n"
+                    . "• 📎 فایل رسید (PDF یا تصویر)\n"
+                    . "• 🔢 شماره پیگیری به‌صورت متن (حداقل ۴ کاراکتر)\n\n"
+                    . "برای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL,
+                    ['reply_markup' => Nav::stepKb()]);
+                return;
             }
             if (!Payments::setReceipt($store, $pid, json_encode([
                 'text' => mb_substr(trim((string)$text), 0, 900),
@@ -1213,11 +1433,26 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
 
         case 'await_broadcast': {
             if (!$admin) { $store->clearStep($uid); return; }
+            $ids = $store->allUserIds();
+            if (empty($ids)) {
+                $store->clearStep($uid);
+                BotApi::send($TOKEN, $chatId, "⛔️ هیچ کاربری برای ارسال ثبت نشده است (تعداد: 0).",
+                    ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
+                return;
+            }
+            if (!isset($msg['message_id']) || !isset($msg['chat']['id'])) {
+                // بدون این گارد، copyMessage با index خالی فراخوانی می‌شد و کل ارسال بی‌صدا می‌مرد
+                $store->clearStep($uid);
+                BotApi::send($TOKEN, $chatId, "⛔️ پیام مبدأ برای ارسال یافت نشد (message_id نامعتبر)؛ دوباره بفرست.",
+                    ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
+                return;
+            }
             @set_time_limit(0);
             @ignore_user_abort(true);
+            // بدون پاسخ زودهنگام، تلگرام بعد از ~۶۰ ثانیه timeout می‌کند و همان آپدیت را
+            // دوباره می‌فرستد ⇒ همگانی چندبار ارسال می‌شد.
             if (function_exists('fastcgi_finish_request')) fastcgi_finish_request();
 
-            $ids = $store->allUserIds();
             $ok = 0;
             $total = count($ids);
             foreach (array_chunk($ids, 10) as $chunk) {
@@ -1264,14 +1499,40 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
                 return;
             }
             $pdo = childPdo($cfg, $bot);
-            if (!$pdo) { $store->clearStep($uid); BotApi::send($TOKEN, $chatId, "⛔️ اتصال دیتابیس ناموفق."); return; }
+            if (!$pdo) {
+                $store->clearStep($uid);
+                BotApi::send($TOKEN, $chatId,
+                    "⛔️ اتصال به دیتابیس ربات «{$bot['folder']}» ناموفق بود.\n"
+                    . "علت: DSN/فایل ساخته نشده یا خواندنی نیست؛ از «🔍 دیاگنوز» وضعیت پوشه را ببین.",
+                    ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
+                return;
+            }
             $ids = childUsers($pdo, $bot);
-            if (empty($ids)) { $store->clearStep($uid); BotApi::send($TOKEN, $chatId, "⛔️ کاربری یافت نشد."); return; }
+            if (empty($ids)) {
+                $store->clearStep($uid);
+                BotApi::send($TOKEN, $chatId, "⛔️ هیچ کاربری در جدول کاربران این ربات یافت نشد (تعداد: 0).",
+                    ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
+                return;
+            }
+            $tok = trim((string)childToken($bot));
+            if ($tok === '') {
+                // بدون این گارد، کل حلقه بی‌اثر اجرا می‌شد و فقط گزارش ۰/N می‌داد
+                $store->clearStep($uid);
+                BotApi::send($TOKEN, $chatId,
+                    "⛔️ توکن ربات «{$bot['folder']}» ذخیره نشده است؛ امکان ارسال وجود ندارد.\n"
+                    . "ربات را دوباره با «🔗 ست‌کردن مجدد وبهوک» راه‌اندازی کن.",
+                    ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
+                return;
+            }
             $ok = 0;
             $total = count($ids);
-            $tok = childToken($bot);
             @set_time_limit(0);
             @ignore_user_abort(true);
+            // ===== زودهنگام پاسخ HTTP =====
+            // بدون این، تلگرام بعد از ~۶۰ ثانیه وبهوک را timeout می‌کند و همان
+            // آپدیت را دوباره می‌فرستد ⇒ همگانی دوبار ارسال می‌شد (یا حلقهٔ تکرار).
+            // پاسخ ۲۰۰ زود می‌رود و markUpdateProcessed بعد از پایان حلقه اجرا می‌شود.
+            if (function_exists('fastcgi_finish_request')) fastcgi_finish_request();
             foreach (array_chunk($ids, 10) as $chunk) {
                 foreach ($chunk as $id) {
                     $r = BotApi::call($tok, 'copyMessage', ['chat_id' => $id, 'from_chat_id' => $msg['chat']['id'], 'message_id' => $msg['message_id']]);
@@ -1285,8 +1546,15 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
         }
     }
 
+    // ناشناخته/کهنه: مرحله باید ریست شود تا کاربر برای همیشه گیر نکند، ولی علت
+    // باید دقیق گفته شود (کدام مرحله؟) نه فقط «نامشخص».
+    Logger::getInstance()->warning('step', "unknown step '{$step}' for uid {$uid} — reset to idle");
     $store->clearStep($uid);
-    BotApi::send($TOKEN, $chatId, "مرحله نامشخص.", ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
+    BotApi::send($TOKEN, $chatId,
+        "⚠️ مرحلهٔ نامعتبر یا منقضی: <code>" . htmlspecialchars($step, ENT_QUOTES, 'UTF-8') . "</code> ("
+        . htmlspecialchars(stepLabel($step), ENT_QUOTES, 'UTF-8') . ")\n"
+        . "مرحله ریست شد؛ از منو دوباره شروع کنید.",
+        ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
 }
 
 // ================= build bot =================
@@ -1512,17 +1780,39 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
     // کاربری که درخواستش توسط ادمین تأیید شده باید بتواند ادامه دهد (newbot:…)
     // و انصراف/برگشت/منو همیشه باید کار کنند تا کاربر در مرحله گیر نکند.
     if (!canUse($user, $SUPERS) && !$store->hasApprovedRequest($uid)) {
-        // پرداخت/لغو همیشه باز است: کاربرِ سقف‌پر باید بتواند لیمیت بخرد
-        $openForUser = $data === 'cancel' || $data === Nav::CB_BACK_MAIN || $data === Nav::CB_BACK_TYPE
-            || str_starts_with($data, 'pay:');
+        // باز بودنِ همیشگی: انصراف/برگشت/منو + همهٔ مسیرهای پرداخت + انتخاب نوع
+        // (که خودش مجوز می‌سازد). قبلاً «pay:» هم داخل همین لیست بود ولی بعداً
+        // به‌اشتباه مثل «انصراف» رفتار می‌شد؛ یعنی کاربر دکمهٔ «فروشگاه/پرداخت‌های من»
+        // را می‌زد و پیام «انصراف داده شد» می‌گرفت.
+        $openForUser = $data === 'cancel'
+            || $data === Nav::CB_BACK_MAIN
+            || $data === Nav::CB_BACK_TYPE
+            || $data === Nav::CB_MY_BOTS
+            || str_starts_with($data, 'pay:')
+            || str_starts_with($data, 'newbot:');
         if ($openForUser) {
-            $store->clearStep($uid);
-            if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, "❌ انصراف داده شد.");
-            BotApi::send($TOKEN, $chatId, "🏠 منوی اصلی", ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
+            if ($data === 'cancel' || $data === Nav::CB_BACK_MAIN) {
+                $store->clearStep($uid);
+                if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, "❌ انصراف داده شد.");
+                BotApi::send($TOKEN, $chatId, "🏠 منوی اصلی", ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
+                return;
+            }
+            // بقیهٔ مسیرها باید با منطق خودشان پردازش شوند (پرداخت/فروشگاه/ساخت)
+            if ($data === Nav::CB_BACK_TYPE) {
+                $store->clearStep($uid);
+                BotApi::send($TOKEN, $chatId, "نوع ربات را انتخاب کن 👇", ['reply_markup' => Nav::typeMenu()]);
+                return;
+            }
+            if ($data === Nav::CB_MY_BOTS) {
+                sendMyBotsList($store, $TOKEN, $chatId, $uid, $msgId);
+                return;
+            }
+            // پرداخت یا انتخاب نوع ⇒ ادامهٔ پردازش عادی پایین‌تر (بدون ردشدن از این گیت)
+        } else {
+            BotApi::send($TOKEN, $chatId, "⛔️ دسترسی ندارید.",
+                ['reply_markup' => BotApi::kb([[['text' => '🤖 ساخت ربات جدید'], ['text' => 'ℹ️ راهنما']]])]);
             return;
         }
-        BotApi::send($TOKEN, $chatId, "⛔️ دسترسی ندارید.");
-        return;
     }
 
     if ($data === 'cancel') {
@@ -1571,6 +1861,18 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
         return;
     }
 
+    // ===== ادمین: وضعیت کرون و دیاگنوز (دکمه‌های درون‌خطی تازه) =====
+    if ($data === 'cron:status') {
+        if (!$admin) { BotApi::send($TOKEN, $chatId, "⛔️ فقط ادمین."); return; }
+        showCronPanel($cfg, $TOKEN, $chatId, $msgId);
+        return;
+    }
+    if ($data === 'diag:run') {
+        if (!$admin) { BotApi::send($TOKEN, $chatId, "⛔️ فقط ادمین."); return; }
+        showDiagnostics($store, $cfg, $TOKEN, $chatId, $msgId);
+        return;
+    }
+
     if (str_starts_with($data, 'newbot:')) {
         $type = substr($data, 7);
         // availableTypes نه validTypes: دکمه‌های منوی قبلی ممکن است «مرده» باشند
@@ -1598,10 +1900,12 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
         // مجوز نداشت پول می‌داد بی‌آنکه بتواند بسازد. اول مجوز، بعد پول.
         if (!$admin && !$store->hasApprovedRequest($uid)) {
             if ($store->hasPendingRequest($uid)) {
-                BotApi::send($TOKEN, $chatId, "⏳ درخواست شما در انتظار تأیید ادمین است.\nتا تأیید، امکان خرید اسلات یا مجوز قالب وجود ندارد.");
+                BotApi::send($TOKEN, $chatId, "⏳ درخواست شما در انتظار تأیید ادمین است.
+تا تأیید، امکان خرید اسلات یا مجوز قالب وجود ندارد.");
             } else {
                 $store->addPendingRequest($uid, 'bot');
-                BotApi::send($TOKEN, $chatId, "📝 درخواست شما ثبت شد.\nپس از تأیید ادمین می‌توانید ساخت (و در صورت نیاز خرید) را انجام دهید.");
+                BotApi::send($TOKEN, $chatId, "📝 درخواست شما ثبت شد.
+پس از تأیید ادمین می‌توانید ساخت (و در صورت نیاز خرید) را انجام دهید.");
             }
             return;
         }
@@ -1610,7 +1914,7 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
             return;
         }
         $store->setStep($uid, 'await_bot_token', ['type' => $type]);
-        BotApi::send($TOKEN, $chatId, "توکن ربات <b>{$names[$type]}</b> را بفرست.\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL,
+        BotApi::send($TOKEN, $chatId, "توکن ربات <b>" . (string)($names[$type] ?? $type) . "</b> را بفرست.\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL,
             ['reply_markup' => Nav::stepKb()]);
         return;
     }
@@ -1625,7 +1929,8 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
 
     // ادمین: رد درخواست
     if (str_starts_with($data, 'act:decline:')) {
-        if (!$admin) return;
+        // قبلاً بی‌صدا return می‌شد ⇒ کاربر فقط چرخاندن انگشت روی دکمه را می‌دید
+        if (!$admin) { BotApi::send($TOKEN, $chatId, "⛔️ فقط ادمین می‌تواند درخواست را رد کند."); return; }
         $requestId = (int)substr($data, 12);
         $req = $store->getPendingRequestById($requestId);
         if (!$req) { BotApi::send($TOKEN, $chatId, "⛔️ درخواست یافت نشد."); return; }
@@ -1637,7 +1942,8 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
 
     // ادمین: تأیید درخواست (متقاضی با «ساخت ربات جدید» ادامه می‌دهد)
     if (str_starts_with($data, 'act:approve:')) {
-        if (!$admin) return;
+        // قبلاً بی‌صدا return می‌شد ⇒ تأیید برای غیرادمین هیچ بازخوردی نداشت
+        if (!$admin) { BotApi::send($TOKEN, $chatId, "⛔️ فقط ادمین می‌تواند درخواست را تأیید کند."); return; }
         $requestId = (int)substr($data, 12);
         $req = $store->getPendingRequestById($requestId);
         if (!$req) { BotApi::send($TOKEN, $chatId, "⛔️ درخواست یافت نشد."); return; }
@@ -1652,7 +1958,16 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
         $action = $parts[1] ?? '';
         $botId = (int)($parts[2] ?? 0);
         $bot = $store->botById($botId);
-        if (!$bot || ((int)$bot['owner_id'] !== $uid && !$admin)) return;
+        if (!$bot) {
+            // شناسهٔ ربات دیگر نیست (حذف شده / کال‌بک کهنه) — نباید بی‌صدا گم شود
+            Logger::getInstance()->warning('action', "bot #{$botId} not found (action '{$action}', uid {$uid})");
+            BotApi::send($TOKEN, $chatId, "⛔️ رباتی با شناسهٔ <code>{$botId}</code> پیدا نشد (احتمالاً حذف شده است).");
+            return;
+        }
+        if ((int)$bot['owner_id'] !== $uid && !$admin) {
+            BotApi::send($TOKEN, $chatId, "⛔️ این ربات مال شما نیست؛ فقط صاحب ربات یا ادمین می‌تواند آن را مدیریت کند.");
+            return;
+        }
         botAction($cfg, $store, $TOKEN, $SUPERS, $user, $chatId, $msgId, $bot, $action);
         return;
     }
@@ -1737,6 +2052,22 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
         sendPendingRequests($store, $TOKEN, $chatId);
         return;
     }
+
+    // ===== دکمهٔ ناشناخته / منقضی =====
+    // کیبورد کهنه (بعد از تغییر منو یا حذف قالب) یا «noop» منوی خالی قالب‌ها.
+    // بدون این گارد، کاربر فقط چرخاندن انگشت روی دکمه را می‌دید و هیچ جوابی نمی‌گرفت
+    // («ربات هنگ کرد»)؛ حالا هم علت دقیق گفته می‌شود هم منوی تازه داده می‌شود.
+    if ($data === 'noop') {
+        BotApi::send($TOKEN, $chatId,
+            "⚠️ <b>هیچ قالبی روی سرور نصب نیست.</b>\n"
+            . "قالب‌ها در <code>templates/</code> قرار می‌گیرند؛ با ادمین تماس بگیرید.",
+            ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
+        return;
+    }
+    Logger::getInstance()->warning('callback', "unknown callback data (uid {$uid}): {$data}");
+    BotApi::send($TOKEN, $chatId,
+        "⚠️ این دکمه دیگر معتبر نیست (احتمالاً کیبورد قدیمی است) — منوی تازه 👇",
+        ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
 }
 
 // ================= پرداخت: مسیر کاربر =================
@@ -1771,9 +2102,18 @@ function handlePayCallback(array $cfg, Store $store, string $TOKEN, array $SUPER
     try { Payments::ensureSchema($store); } catch (Throwable $e) {}
     $parts = explode(':', $data);
     $sub = $parts[1] ?? '';
-    $fail = function (string $why) use ($TOKEN, $chatId, $msgId) {
-        if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, "⛔️ {$why}", ['reply_markup' => Nav::stepKb()]);
-        else BotApi::send($TOKEN, $chatId, "⛔️ {$why}", ['reply_markup' => Nav::stepKb()]);
+    // خطای فروشگاه: دکمهٔ «برگشت» باید به فروشگاه برگردد، نه اینکه کاربر
+    // وسط پرداخت با دکمهٔ برگشت از کل جریان بیرون پرت شود (باگ قبلی: stepKb
+    // یعنی «برگشت → منوی اصلی»، در حالی که کاربر هنوز نیمه‌کاره است).
+    $shopKb = BotApi::ikb([
+        [['text' => '🔄 فروشگاه', 'callback_data' => 'pay:shop']],
+        [['text' => '🧾 پرداخت‌های من', 'callback_data' => 'pay:mine']],
+        [['text' => Nav::BACK, 'callback_data' => Nav::CB_BACK_MAIN]],
+    ]);
+    $fail = function (string $why) use ($TOKEN, $chatId, $msgId, $shopKb) {
+        $t = "⛔️ {$why}\n\nاگر پرداخت نیمه‌کاره دارید از «🧾 پرداخت‌های من» ادامه/لغوش کنید.";
+        if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, $t, ['reply_markup' => $shopKb]);
+        else BotApi::send($TOKEN, $chatId, $t, ['reply_markup' => $shopKb]);
     };
 
     // فروشگاه لیمیت
@@ -2293,6 +2633,221 @@ function handlePayAdminCallback(array $cfg, Store $store, string $TOKEN, array $
 
     BotApi::send($TOKEN, $chatId, "⛔️ دستور نامعتبر است.", ['reply_markup' => PaymentPanel::adminKb($store)]);
 }
+/**
+ * گزارش عیب‌یابی سیستم (فقط ادمین).
+ * خروجی دقیق و قابل‌اکشن است: پوشه‌ها + پرمیشن، پسوندهای PHP، دیتابیس،
+ * دیسک، وبهوک (با timeout کوتاه تا خودِ دیاگنوز هنگ نکند) و وضعیت کرون/پرداخت.
+ */
+function showDiagnostics(Store $store, array $cfg, string $TOKEN, $chatId, int $msgId = 0): void
+{
+    $lines = [];
+    $lines[] = "🖥️ <b>سیستم</b>\n"
+        . "PHP: " . PHP_VERSION . "\n"
+        . "SAPI: " . PHP_SAPI . "\n"
+        . "Server: " . ($_SERVER['SERVER_SOFTWARE'] ?? 'unknown') . "\n"
+        . "OS: " . (PHP_OS ?: 'unknown');
+
+    // ---- پسوندهای لازم ----
+    $exts = ['curl' => 'curl', 'pdo_sqlite' => 'pdo_sqlite', 'pdo_mysql' => 'pdo_mysql',
+             'openssl' => 'openssl', 'mbstring' => 'mbstring', 'json' => 'json'];
+    $eLine = "🧩 <b>پسوندها</b>\n";
+    foreach ($exts as $ext => $label) {
+        $eLine .= (extension_loaded($ext) ? "✅" : "❌") . " {$label}\n";
+    }
+    if (!extension_loaded('pdo_sqlite') && !extension_loaded('pdo_mysql')) {
+        $eLine .= "⚠️ هیچ درایور PDO وجود ندارد ⇒ دیتابیس مدیریتی کار نمی‌کند.\n";
+    }
+    $lines[] = $eLine;
+
+    // ---- پوشه‌ها + پرمیشن ----
+    $dirs = [
+        'ROOT_DIR' => __DIR__,
+        'bots/' => __DIR__ . '/bots',
+        'data/' => __DIR__ . '/data',
+        'data/logs/' => __DIR__ . '/data/logs',
+    ];
+    $dLine = "📁 <b>پوشه‌ها</b>\n";
+    foreach ($dirs as $name => $path) {
+        if (!is_dir($path)) {
+            $dLine .= "❌ {$name}: وجود ندارد (<code>" . htmlspecialchars($path, ENT_QUOTES, 'UTF-8') . "</code>)\n";
+        } elseif (!is_writable($path)) {
+            $p = substr(sprintf('%o', @fileperms($path)), -4);
+            $dLine .= "❌ {$name}: فقط‌خواندنی ({$p}) — ساخت ربات/لاگ شکست می‌خورد\n";
+        } else {
+            $p = substr(sprintf('%o', @fileperms($path)), -4);
+            $dLine .= "✅ {$name}: OK ({$p})\n";
+        }
+    }
+    $lines[] = $dLine;
+
+    // ---- لاگ امروز (فایل ممکن است هنوز ساخته نشده باشد؛ معیار، پوشه است) ----
+    $logFile = __DIR__ . '/data/logs/' . date('Y-m-d') . '.log';
+    $logDir  = dirname($logFile);
+    $logOk = is_file($logFile) ? is_writable($logFile) : (is_dir($logDir) && is_writable($logDir));
+    $logSize = is_file($logFile) ? round(filesize($logFile) / 1024, 1) . ' KB' : '—';
+    $lines[] = "📝 <b>لاگ امروز</b>: " . ($logOk ? '✅' : '❌')
+        . " {$logFile} ({$logSize})"
+        . ($logOk ? '' : "\n⚠️ لاگ قابل نوشتن نیست ⇒ خطاهای ربات دیده نمی‌شود.");
+
+    // ---- دیتابیس مدیریتی ----
+    try {
+        $pdo = new PDO(
+            "mysql:host={$cfg['db_host']};port=" . ($cfg['db_port'] ?? 3306) . ";charset=utf8mb4",
+            $cfg['db_user'], $cfg['db_pass'],
+            [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_TIMEOUT => 3]
+        );
+        $pdo->query("SELECT 1")->fetchColumn();
+        $lines[] = "🗄️ MySQL (" . htmlspecialchars((string)$cfg['db_host'], ENT_QUOTES, 'UTF-8')
+            . ":" . (int)($cfg['db_port'] ?? 3306) . "): ✅ Connected";
+    } catch (Throwable $e) {
+        $lines[] = "🗄️ MySQL: ❌ " . htmlspecialchars(Manager::sanitizeDbError($e->getMessage()), ENT_QUOTES, 'UTF-8');
+    }
+    $mdb = (string)($cfg['manager_db'] ?? '');
+    $lines[] = "🗃 دیتابیس مدیریتی: " . ($mdb !== '' && is_file($mdb)
+        ? '✅ ' . round(filesize($mdb) / 1024, 1) . ' KB — <code>' . htmlspecialchars($mdb, ENT_QUOTES, 'UTF-8') . '</code>'
+        : '⚠️ فایل یافت نشد: <code>' . htmlspecialchars($mdb, ENT_QUOTES, 'UTF-8') . '</code>');
+
+    // ---- دیسک ----
+    $disk = @disk_free_space(__DIR__);
+    $lines[] = "💾 فضای دیسک آزاد: " . ($disk !== false ? round($disk / 1048576, 1) . ' MB' : 'نامشخص');
+
+    // ---- وبهوک (timeout کوتاه؛ خودِ دیاگنوز نباید معطل شود) ----
+    $wh = "❓ نامشخص";
+    if (!empty($cfg['main_token']) && $cfg['main_token'] !== 'PUT_MAIN_BOT_TOKEN_HERE') {
+        $info = quickTelegramJson((string)$cfg['main_token'], 'getWebhookInfo', 8);
+        if (!empty($info['ok'])) {
+            $url = (string)($info['result']['url'] ?? '');
+            $pend = (int)($info['result']['pending_update_count'] ?? 0);
+            $err  = (string)($info['result']['last_error_message'] ?? '');
+            $wh = ($url !== '' ? $url : '❌ ست نشده')
+                . " (در انتظار: {$pend})"
+                . ($err !== '' ? "\n⚠️ آخرین خطای تلگرام: {$err}" : '');
+        } else {
+            $wh = '❌ ' . htmlspecialchars((string)($info['error'] ?? 'در دسترس نیست'), ENT_QUOTES, 'UTF-8');
+        }
+    } else {
+        $wh = '❌ توکن اصلی خالی/placeholder است';
+    }
+    $lines[] = "🔗 <b>وبهوک</b>: {$wh}";
+
+    // ---- کرون ----
+    $cs = __DIR__ . '/data/cron_state.json';
+    if (is_file($cs)) {
+        $st = json_decode((string)@file_get_contents($cs), true) ?: [];
+        $last = strtotime((string)($st['last_run'] ?? '') ?: '');
+        $age = $last ? (int)round((time() - $last) / 60) : -1;
+        $lines[] = "⏰ کرون: " . ($age >= 0
+            ? (($age <= 15 ? '✅' : '⚠️') . " آخرین اجرا {$age} دقیقه پیش")
+            : '⚠️ وضعیت نامشخص');
+    } else {
+        $lines[] = "⏰ کرون: ⚠️ هنوز اجرا نشده (<code>data/cron_state.json</code> نیست)";
+    }
+
+    // ---- پرداخت ----
+    try {
+        Payments::ensureSchema($store);
+        $lines[] = "💳 پرداخت در انتظار بررسی: <b>" . Payments::pendingAdminCount($store) . "</b>"
+            . " • سقف‌های کاربران: <b>" . count($store->allowedIds()) . "</b> مجاز";
+    } catch (Throwable $e) {
+        $lines[] = "💳 پرداخت: ❌ " . htmlspecialchars(Manager::sanitizeDbError($e->getMessage()), ENT_QUOTES, 'UTF-8');
+    }
+
+    $text = implode("\n", $lines);
+    if (mb_strlen($text) > 4000) $text = mb_substr($text, 0, 4000) . "\n…";
+    $kb = BotApi::ikb([
+        [['text' => '🔄 بررسی دوباره', 'callback_data' => 'diag:run']],
+        [['text' => Nav::BACK, 'callback_data' => Nav::CB_BACK_MAIN]],
+    ]);
+    if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, $text, ['reply_markup' => $kb]);
+    else BotApi::send($TOKEN, $chatId, $text, ['reply_markup' => $kb]);
+}
+
+/**
+ * درخواست GET کوتاه‌مدت به API تلگرام — فقط برای دیاگنوز.
+ * BotApi::call تا ۳ بار retry با backoff دارد (ممکن است ~۹۰ ثانیه طول بکشد)؛
+ * دکمهٔ دیاگنوز نباید وبهوک را معطل کند، پس اینجا یک curl ساده با timeout کوتاه.
+ */
+function quickTelegramJson(string $token, string $method, int $timeout = 8): array
+{
+    if (!function_exists('curl_init')) return ['ok' => false, 'error' => 'curl در دسترس نیست'];
+    $ch = curl_init("https://api.telegram.org/bot{$token}/{$method}");
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT        => $timeout,
+        CURLOPT_CONNECTTIMEOUT => min(5, $timeout),
+    ]);
+    $out = curl_exec($ch);
+    $err = curl_error($ch);
+    curl_close($ch);
+    if ($out === false) return ['ok' => false, 'error' => 'شبکه: ' . $err];
+    $j = json_decode((string)$out, true);
+    return is_array($j) ? $j : ['ok' => false, 'error' => 'پاسخ نامعتبر از تلگرام'];
+}
+
+/** پنل وضعیت کرون مرکزی — با دادهٔ واقعی، نه متن ثابت.
+ * tools/cron_dispatcher.php بعد از هر اجرا data/cron_state.json را به‌روزرسانی می‌کند؛
+ * اینجا خوانده می‌شود و «سالم / خاموش» با دلیل اعلام می‌گردد.
+ * قبلاً این دکمه فقط یک متن ثابت (و با مسیر جعلی /path/to/...) نشان می‌داد
+ * و ادعای دروغی «از درخواست‌ها وضعیت کرون را ببین» داشت.
+ */
+function showCronPanel(array $cfg, string $TOKEN, $chatId, int $msgId = 0): void
+{
+    $script    = __DIR__ . '/tools/cron_dispatcher.php';
+    $stateFile = __DIR__ . '/data/cron_state.json';
+    $lines     = ["⏰ <b>کرون مرکزی (ربات‌های فرزند + بکاپ + پاکسازی)</b>\n"];
+
+    if (!is_file($script)) {
+        $lines[] = "❌ اسکریپت کرون پیدا نشد: <code>" . htmlspecialchars($script, ENT_QUOTES, 'UTF-8') . "</code>";
+    } elseif (!is_readable($script)) {
+        $lines[] = "❌ اسکریپت کرون قابل خواندن نیست (پرمیشن): <code>" . htmlspecialchars($script, ENT_QUOTES, 'UTF-8') . "</code>";
+    } else {
+        $lines[] = "✅ اسکریپت: <code>" . htmlspecialchars($script, ENT_QUOTES, 'UTF-8') . "</code>";
+    }
+
+    $state = [];
+    if (is_file($stateFile)) {
+        $raw = @file_get_contents($stateFile);
+        $state = is_string($raw) ? (json_decode($raw, true) ?: []) : [];
+    }
+    if (empty($state['last_run'])) {
+        $lines[] = "🔴 هنوز هیچ اجرایی ثبت نشده است؛ کرون سیستم را راه‌اندازی کنید.";
+        $lines[] = "ℹ️ اگر کرون را تازه نصب کرده‌اید، اولین اجرا تا ۵ دقیقهٔ دیگر رخ می‌دهد.";
+    } else {
+        $last = strtotime((string)$state['last_run']);
+        $age  = ($last !== false) ? max(0, time() - $last) : -1;
+        $ageTxt = $age < 0 ? 'زمان نامشخص'
+            : ($age < 90 ? $age . ' ثانیه' : (int)round($age / 60) . ' دقیقه');
+        // کرون پیشنهادی هر ۵ دقیقه است ⇒ بیش از ۱۵ دقیقه وقفه یعنی احتمالاً خاموش
+        $fresh = ($age >= 0 && $age <= 900);
+        $lines[] = ($fresh ? '🟢' : '🔴') . " آخرین اجرا: <b>{$ageTxt} پیش</b> — <code>"
+            . htmlspecialchars((string)$state['last_run'], ENT_QUOTES, 'UTF-8') . "</code>";
+        if (isset($state['duration_ms'])) $lines[] = "⏳ مدت آخرین اجرا: " . (int)$state['duration_ms'] . " ms";
+        if (isset($state['bots']))        $lines[] = "🤖 ربات‌های پردازش‌شده: " . (int)$state['bots'];
+        if (!empty($state['error'])) {
+            $lines[] = "⚠️ آخرین خطا: " . htmlspecialchars((string)$state['error'], ENT_QUOTES, 'UTF-8');
+        }
+        if (!$fresh) {
+            $lines[] = "⚠️ بیش از ۱۵ دقیقه است کرون اجرا نشده؛ crontab را بررسی کنید یا لاگ را ببینید.";
+        }
+    }
+
+    $phpBin = trim((string)($cfg['php_bin'] ?? 'php'));
+    if ($phpBin === '') $phpBin = 'php';
+    $lines[] = "\n🧾 <b>نصب crontab</b> (هر ۵ دقیقه):\n"
+        . "<code>*/5 * * * * " . htmlspecialchars($phpBin, ENT_QUOTES, 'UTF-8')
+        . " " . htmlspecialchars($script, ENT_QUOTES, 'UTF-8') . " >> /dev/null 2>&1</code>";
+    $lines[] = "\n📁 وضعیت در: <code>data/cron_state.json</code> — لاگ کامل در <code>data/logs/</code>";
+
+    $kb = BotApi::ikb([
+        [['text' => '🔄 بررسی دوباره', 'callback_data' => 'cron:status']],
+        [['text' => '🔍 دیاگنوز سیستم', 'callback_data' => 'diag:run']],
+        [['text' => Nav::BACK, 'callback_data' => Nav::CB_BACK_MAIN]],
+    ]);
+    $text = implode("\n", $lines);
+    if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, $text, ['reply_markup' => $kb]);
+    else BotApi::send($TOKEN, $chatId, $text, ['reply_markup' => $kb]);
+}
+
 /** پنل بکاپ دیتابیس — وضعیت + دکمه‌های کنترل ساعت (فقط ادمین) */
 function showBackupPanel(array $cfg, Store $store, string $TOKEN, $chatId, int $msgId = 0): void
 {
@@ -2459,5 +3014,14 @@ function botAction(array $cfg, Store $store, string $TOKEN, array $SUPERS, array
             BotApi::edit($TOKEN, $chatId, $msgId, "🗑 ربات حذف شد." . $dbNote . ($backedUp ? "\n💾 بکاپ: <code>{$backupDir}</code>" : ""));
             return;
         }
+
+        default:
+            // دکمهٔ کهنه/کال‌بک قطع‌شده نباید بی‌صدا گم شود (کاربر فکر می‌کند ربات هنگ کرده)
+            Logger::getInstance()->warning('action', "unknown bot action '{$action}' (bot #{$bot['id']})");
+            BotApi::send($TOKEN, $chatId,
+                "⚠️ عملیات ناشناخته: <code>" . htmlspecialchars($action, ENT_QUOTES, 'UTF-8') . "</code>\n"
+                . "احتمالاً کیبورد قدیمی است؛ منوی این ربات دوباره باز شد.",
+                ['reply_markup' => Nav::botPanelKb($bot)]);
+            return;
     }
 }
