@@ -149,6 +149,7 @@ class Logger
 }
 
 // ===== ثبت خودکار استثناها =====
+// ===== ثبت خودکار استثناها =====
 function registerExceptionHandler(): void
 {
     // لاگِ مستقیم، بی‌واسطهٔ Logger: اگر data/ بسته باشد خودِ Logger هم شکست
@@ -159,7 +160,14 @@ function registerExceptionHandler(): void
         @error_log("[bot.php] {$tag}: {$msg}{$where}");
     };
 
-    set_exception_handler(function ($e) use ($raw) {
+    // در CLI هیچ پاسخ HTTPی در کار نیست، پس رفتارِ «وبهوک» اینجا اشتباه بود:
+    // اگر handler برگردد، PHP با exit code 0 خارج می‌شود و یک اسکریپتِ کرش‌کرده
+    // «موفق» گزارش می‌شود. یعنی selftest/dryrun/healthcheck می‌توانستند سبز
+    // بمانند در حالی که وسط کار مرده بودند، و CI هرگز باخت را نمی‌فهمید.
+    // اینجا پس خطا را روی stderr می‌نویسیم و صریحاً exit(1) می‌دهیم.
+    $isCli = PHP_SAPI === 'cli' || PHP_SAPI === 'phpdbg';
+
+    set_exception_handler(function ($e) use ($raw, $isCli) {
         $raw('uncaught ' . get_class($e), $e->getMessage(), $e->getFile(), $e->getLine());
         try {
             $log = Logger::getInstance();
@@ -171,27 +179,40 @@ function registerExceptionHandler(): void
         } catch (Throwable $ignored) {
             // لاگر نباید خودش باعثِ شکستِ دوم شود — پیام بالا همین‌طور به error_log رفته است
         }
+        if ($isCli) {
+            // stderr لازم است چون error_log روی این نصب به فایل می‌رود و ترمینال
+            // چیزی نشان نمی‌دهد؛ یعنی خطای مرگ بی‌صدا گم می‌شد.
+            fwrite(STDERR, "\n💥 " . get_class($e) . ': ' . $e->getMessage()
+                . "\n   " . $e->getFile() . ':' . $e->getLine() . "\n");
+            exit(1);
+        }
         // اگر خروجی هنوز فرستاده نشده، status واقعی را بگذار؛
         // وگرنه وبهوک همیشه 200 می‌دهد و تلگرام آپدیتِ شکست‌خورده را دوباره نمی‌فرستد.
         if (!headers_sent()) http_response_code(500);
     });
-    set_error_handler(function ($severity, $message, $file, $line) {
+    set_error_handler(function ($severity, $message, $file, $line) use ($isCli) {
         if (!(error_reporting() & $severity)) return false;
         try {
             Logger::getInstance()->warning('php_error', $message, ['file' => $file, 'line' => $line]);
         } catch (Throwable $ignored) {
         }
+        // در CLI هشدار و نوتیس باید روی ترمینال دیده شوند؛ CI فقط stderr را می‌بیند
+        if ($isCli) return false;
         // خروجیِ null مثلِ قبلِ کد: خطای «پردازش‌شده» محسوب می‌شود و PHP
         // هشدار را داخلِ بدنهٔ JSON تزریق نمی‌کند (بدنهٔ وبهوک باید JSON بماند).
-        return;
+        return null;
     });
-    register_shutdown_function(function () use ($raw) {
+    register_shutdown_function(function () use ($raw, $isCli) {
         $error = error_get_last();
         if ($error && in_array($error['type'], [E_ERROR, E_CORE_ERROR, E_COMPILE_ERROR])) {
             $raw('fatal', $error['message'], $error['file'], $error['line']);
             try {
                 Logger::getInstance()->error('fatal', $error['message'], ['file' => $error['file'], 'line' => $error['line']]);
             } catch (Throwable $ignored) {
+            }
+            if ($isCli) {
+                fwrite(STDERR, "\n💥 FATAL: " . $error['message'] . "\n   " . $error['file'] . ':' . $error['line'] . "\n");
+                return;
             }
             if (!headers_sent()) http_response_code(500);
         }

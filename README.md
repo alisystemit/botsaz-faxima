@@ -106,6 +106,7 @@ tools/
   selftest.php             → تست عملکردی
   selftest_payments.php    → تست انتهایی سیستم پرداخت (روی sqlite موقت)
   selftest_templates.php   → تست رجیستری قالب‌ها، رمزها، پچ کانفیگ و مهاجرت SQLite
+  selftest_cli.php         → تست اینکه خطای کرش‌کننده در CLI واقعاً «ناموفق» گزارش می‌شود
   static_check.php         → تست ایستا: هر Class::method( باید واقعاً وجود داشته باشد
   healthcheck.php          → بررسی پوشه ↔ رکورد ↔ دیتابیس ↔ وبهوک (exit code برای CI)
   dryrun.php               → ساخت خشک همهٔ قالب‌ها بدون تلگرام (`--all`، exit code برای CI)
@@ -647,6 +648,7 @@ php tools/healthcheck.php       # exit 0 یعنی سالم
 php tools/selftest.php          # بدون تلگرام/MySQL
 php tools/selftest_payments.php # تست انتهایی پرداخت (بدون تلگرام/MySQL)
 php tools/selftest_templates.php# رجیستری قالب‌ها، رمزها، پچ کانفیگ، مهاجرت SQLite
+php tools/selftest_cli.php      # خطای کرش‌کننده در CLI نباید «موفق» گزارش شود
 php tools/static_check.php      # تست ایستای فراخوانی کلاس‌ها
 php tools/dryrun.php --all      # ساخت خشک هر ۴ قالب (بدون تلگرام) و پاک کردنشان
 ```

@@ -36,6 +36,39 @@ if (!empty($unknown)) {
     exit(1);
 }
 
+// -------------------------------------------------------------------
+// تضمین پاکسازی پوشهٔ تست
+//
+// هر dryrun یک پوشهٔ کامل داخل bots/ می‌سازد (چون باید مسیر واقعی را شبیه‌سازی
+// کند). اگر هر چیزی وسط کار اسکریپت را بکشد، آن پوشه باقی می‌ماند و healthcheck
+// همیشه «Orphan folder» می‌دهد. قبلاً فقط مسیرهای return تمیز می‌شدند، پس یک
+// TypeError یا هر خطای پیش‌بینی‌نشدهٔ دیگر چند پوشهٔ یتیم در bots/ جا می‌گذاشت.
+//
+// راه‌حل دو لایه است: register_shutdown_function برای مرگ با هر شکلی (از جمله
+// exit() و خطای فATAL که finally اجرا نمی‌شود)، و یک تابع که فقط وقتی پوشه
+// هنوز «باز» است پاکش می‌کند تا در مسیر عادی دوبار کار نکند.
+//
+// این ثبت باید حتماً *قبل* از exit() پایین باشد: register_shutdown_function یک
+// دستور است نه declaration، پس اگر بعد از exit بنشیند هرگز اجرا نمی‌شود — که
+// دقیقاً همان باگی بود که این نگهبان برایش ساخته شد.
+// -------------------------------------------------------------------
+function dryrunGuard(?string $dir = null): ?string
+{
+    static $pending = null;
+    if ($dir !== null) {
+        $pending = $dir;
+        return $dir;
+    }
+    return $pending;
+}
+
+register_shutdown_function(static function (): void {
+    $dir = dryrunGuard();
+    if ($dir === null || !is_dir($dir)) return;
+    @Manager::removeDir($dir);
+    fwrite(STDERR, "\n⚠️  dryrun وسط کار متوقف شد؛ پوشهٔ تست پاک شد: {$dir}\n");
+});
+
 $failedAny = false;
 foreach ($types as $type) {
     $exit = dryRunOne($cfg, $store, $type, $slugArg);
@@ -118,6 +151,8 @@ function dryRunOne(array $cfg, Store $store, string $type, ?string $slugArg): in
     $startedAt = time();
 
     echo "   [5a] کپی قالب... ";
+    // از همین لحظه پوشه «باز» است و اگر اسکریپت بمیرد، shutdown آن را پاک می‌کند
+    dryrunGuard($botDir);
     try {
         Manager::copyDir($tplDir, $botDir, $excludePaths);
         echo "OK\n";
@@ -314,6 +349,7 @@ function dryRunOne(array $cfg, Store $store, string $type, ?string $slugArg): in
     // ===== پاکسازی =====
     echo "[6] پاکسازی...\n";
     Manager::removeDir($botDir);
+    dryrunGuard(null);   // پوشه بسته شد؛ دیگر لازم نیست shutdown هم پاکش کند
     echo "   پوشهٔ تست پاک شد ✓\n";
 
     echo "\n=========================================\n";
