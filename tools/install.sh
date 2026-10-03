@@ -1070,6 +1070,26 @@ report_health() {
                     h_note "fix: once the certificate exists, run bash tools/install.sh again"
                 fi
             fi
+
+            # vhost فعالی که یک نصبِ قدیمیِ botsaz را سرو می‌کند: آپدیت روی
+            # $ROOT_DIR اعمال می‌شود ولی آپاچی همچنان /var/www/botsaz-faxima
+            # را جواب می‌دهد - نسخهٔ قدیمی زنده می‌ماند، بدون هیچ اروری.
+            local _tgt _doc _stale
+            _stale=""
+            for _tgt in /etc/apache2/sites-enabled/*; do
+                [ -f "$_tgt" ] || continue
+                case "$_tgt" in */botsaz.conf) continue ;; esac
+                _doc="$(sed -n 's/^[[:space:]]*DocumentRoot[[:space:]]\{1,\}"\?\([^";]*\)"\?.*/\1/p' "$_tgt" | head -n1)"
+                case "$_doc" in
+                    *botsaz*) _stale="$_stale $(basename "$_tgt")" ;;
+                esac
+            done
+            if [ -n "$_stale" ]; then
+                h_fail "stale botsaz vhost(s) active:$_stale - updates land in $ROOT_DIR but Apache answers an old copy"
+                h_note "disable them: sudo a2dissite <name> && sudo systemctl reload apache2"
+            else
+                h_ok "no stale botsaz vhost elsewhere"
+            fi
         elif has_cmd nginx && [ -f /etc/nginx/sites-available/botsaz.conf ]; then
             # nginx-only server: same questions as the Apache branch above, but
             # answered from the nginx syntax (server_name/root/listen/ssl_certificate).

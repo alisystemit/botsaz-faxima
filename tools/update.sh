@@ -433,6 +433,10 @@ if [ "$NO_RESTART" -eq 0 ] && [ "$RESTARTED" -gt 0 ] && [ -f "$ROOT_DIR/config.p
                 || warn "Webhook re-confirm failed - run: php tools/set_webhook.php"
         else
             warn "bot.php answers HTTP $_code right after restart - check the vhost"
+            # 0000 یعنی اصلاً وصل نشد: یا base_url اشتباه/placeholder است،
+            # یا vhost فعالِ دیگری از یک نصبِ قدیمی سرو می‌دهد (وب‌سرور
+            # پیام‌ها را به /var/www/botsaz-faxima قدیمی می‌فرستد).
+            [ "$_code" = "0000" ] && warn "HTTP 0000: یا base_url در config.php placeholder است، یا یک vhost قدیمی (DocumentRoot غیر از $ROOT_DIR) آپاچی را می‌چرخاند - با `apache2ctl -S` چک کن"
         fi
     fi
     unset _base _code
