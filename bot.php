@@ -39,6 +39,7 @@ require_once __DIR__ . '/src/Logger.php';
 require_once __DIR__ . '/src/DbBackup.php';
 require_once __DIR__ . '/src/Nav.php';
 require_once __DIR__ . '/src/SourceUpdate.php';
+require_once __DIR__ . '/src/SelfUpdate.php';
 require_once __DIR__ . '/src/Payment/Payments.php';
 require_once __DIR__ . '/src/Payment/Gateways.php';
 require_once __DIR__ . '/src/Payment/Limits.php';
@@ -393,6 +394,7 @@ function mainMenu(array $u, array $supers, Store $store = null): string {
             [['text' => "💳 پرداخت‌ها{$payText}"], ['text' => 'ℹ️ راهنما']],
             [['text' => '🔍 دیاگنوز'], ['text' => '📋 همه ربات‌ها']],
             [['text' => '🔄 دریافت سورس بروز' . $srcText]],
+            [['text' => '⬆️ آپدیت ربات‌ساز']],
             [['text' => '📝 متن‌ها'], ['text' => '💳 افزایش لیمیت']],
         ]);
     }
@@ -1260,6 +1262,7 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
         case '/diagnose': $text = $admin ? '🔍 دیاگنوز' : 'ℹ️ راهنما'; break;
         case '/source': $text = '🔄 دریافت سورس بروز'; break;
         case '/texts':    $text = $admin ? '📝 متن‌ها' : 'ℹ️ راهنما'; break;
+        case '/update':   $text = '⬆️ آپدیت ربات‌ساز'; break;
     }
 
     // دکمه «📋 درخواست‌های جدید» شمارنده پویا دارد: «📋 درخواست‌های جدید (N)»
@@ -1278,6 +1281,12 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
     if (str_starts_with($text, '🔄 دریافت سورس بروز')) {
         if (!$admin) { BotApi::send($TOKEN, $chatId, "⛔️ فقط ادمین."); return; }
         showSourcePanel($cfg, $store, $TOKEN, $chatId);
+        return;
+    }
+
+    if ($text === '⬆️ آپدیت ربات‌ساز') {
+        if (!$admin) { BotApi::send($TOKEN, $chatId, "⛔️ فقط ادمین."); return; }
+        showSelfUpdatePanel($cfg, $store, $TOKEN, $chatId);
         return;
     }
 
@@ -2469,6 +2478,54 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
         return;
     }
 
+    // ===== ⬆️ آپدیت خودِ ربات‌ساز (فقط ادمین) =====
+    if (str_starts_with($data, 'su:')) {
+        if (!$admin) { BotApi::send($TOKEN, $chatId, "⛔️ فقط ادمین."); return; }
+        $action = substr($data, 3);
+
+        if ($action === 'refresh') {
+            showSelfUpdatePanel($cfg, $store, $TOKEN, $chatId, $msgId);
+            return;
+        }
+        if ($action === 'log') {
+            $tail = SelfUpdate::logTail(25);
+            $t = $tail !== '' ? htmlspecialchars($tail, ENT_QUOTES, 'UTF-8') : '(هنوز لاگی نیست)';
+            BotApi::edit($TOKEN, $chatId, $msgId, "📜 <b>آخرین لاگ آپدیت</b>\n\n<pre>" . mb_substr($t, -3500) . "</pre>",
+                ['reply_markup' => BotApi::ikb([[['text' => '↩️ بازگشت', 'callback_data' => 'su:refresh']]])]);
+            return;
+        }
+        if ($action === 'check') {
+            SelfUpdate::refreshRemote();
+            showSelfUpdatePanel($cfg, $store, $TOKEN, $chatId, $msgId, '🔄 وضعیت از گیت‌هاب تازه شد.');
+            return;
+        }
+        if ($action === 'ask') {
+            $st = SelfUpdate::status();
+            $txt = "⚠️ <b>اجرای آپدیت ربات‌ساز</b>\n\n"
+                . "شاخه: <code>{$st['branch']}</code> | کامیت: <code>{$st['commit']}</code>\n"
+                . ($st['dirty'] ? "⚠️ <b>درخت کثیف است</b>: فایل tracked روی سرور دستی عوض شده — آپدیتر خودش می‌ایستد.\n" : "درخت کاری تمیز ✓\n")
+                . "\nچه اتفاقی می‌افتد:\n"
+                . "• بکاپ <code>config.php</code> و <code>bots/*/config.php</code>\n"
+                . "• <code>git pull --ff-only</code>\n"
+                . "• برگرداندن <code>config.php</code> و <code>.htaccess</code> در صورت نیاز\n"
+                . "• اجرای مایگریشن‌ها\n"
+                . "• <b>دیتابیس و دیتاها دست‌نخورده</b>\n"
+                . "• <b>بدون ری‌استارت سرویس</b> (کارِ کرون هفتگی است)\n\nشروع؟";
+            BotApi::edit($TOKEN, $chatId, $msgId, $txt, ['reply_markup' => BotApi::ikb([
+                [['text' => '✅ بله، آپدیت کن', 'callback_data' => 'su:go']],
+                [['text' => '❌ انصراف', 'callback_data' => 'su:refresh']],
+            ])]);
+            return;
+        }
+        if ($action === 'go') {
+            BotApi::edit($TOKEN, $chatId, $msgId, "⏳ در حال راه‌اندازی آپدیت…");
+            BotApi::send($TOKEN, $chatId, SelfUpdate::startWeb() . "\n\nبرای دیدن نتیجه: «📜 آخرین لاگ آپدیت» از پنل همین دکمه.",
+                ['reply_markup' => BotApi::ikb([[['text' => '🔄 پنل آپدیت', 'callback_data' => 'su:refresh']]])]);
+            return;
+        }
+        return;
+    }
+
     // ===== 🔄 دریافت سورس بروز (فقط ادمین) =====
     // ترتیب: همهٔ مسیرها اول «تأیید» می‌خواهند (src:ask / src:allask) و بعد
     // اجرا (src:go / src:goall). اجرا بدون تأیید عمداً هیچ راهی ندارد.
@@ -2527,7 +2584,7 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
             return;
         }
         if ($sub === 'go') {
-            runSourceUpdate($cfg, $store, $TOKEN, $user, $chatId, $bot);
+            runSourceUpdate($cfg, $TOKEN, $user, $chatId, $bot);
             return;
         }
         // کال‌بک کهنه/ناشناخته ⇒ برگشت به فهرست، نه سکوت
@@ -3464,6 +3521,41 @@ function countOutdatedBots(Store $store): string
  * پنل «دریافت سورس بروز» — وضعیت سورس همهٔ ربات‌ها + دکمهٔ بروزرسانی هرکدام.
  * مشترک بین دکمهٔ منوی اصلی و کال‌بک‌ها.
  */
+/** پنل «⬆️ آپدیت ربات‌ساز»: وضعیت نصب فعلی + لاگ کوتاه */
+function showSelfUpdatePanel(array $cfg, Store $store, string $TOKEN, $chatId, int $msgId = 0, string $note = ''): void
+{
+    $probs = SelfUpdate::problems();
+    $st = SelfUpdate::status();
+    $dirty = $st['dirty'] ? "⚠️ <b>درخت کثیف</b> (فایل‌های tracked دستی عوض شده — آپدیت متوقف می‌شود)" : '✓ درخت تمیز';
+    $behind = $st['behind'] >= 0 ? ($st['behind'] > 0 ? "🟡 {$st['behind']} کامیت عقب" : '🟢 هم‌تراز با origin') : '؟';
+    $txt = "⬆️ <b>آپدیت ربات‌ساز</b>\n\n"
+        . "شاخه: <code>{$st['branch']}</code> | آخرین کامیت: <code>{$st['commit']}</code>\n"
+        . "وضعیت: {$behind} | {$dirty}\n"
+        . ($st['last_fetch'] !== '' ? "آخرین fetch: {$st['last_fetch']}\n" : '')
+        . "\n🛡 <code>config.php</code>، <code>bots/*/config.php</code>، دیتابیس و محتوای <code>data/</code> هرگز آپدیت نمی‌شوند.\n"
+        . "⚠️ این حالت <b>بدون ری‌استارت سرویس</b> است؛ اعمال نهاییِ کد جدید با ری‌استارت وب‌سرور (یا کرون هفتگی) می‌شود.\n";
+    if ($note !== '') $txt .= "\n" . htmlspecialchars($note, ENT_QUOTES, 'UTF-8') . "\n";
+    if ($probs !== []) {
+        $txt .= "\n⛔️ مشکلات اجرا:\n• " . htmlspecialchars(implode("\n• ", $probs), ENT_QUOTES, 'UTF-8');
+    }
+    $tail = $st['log_tail'];
+    if ($tail !== '') {
+        $t = htmlspecialchars(mb_substr($tail, -1200), ENT_QUOTES, 'UTF-8');
+        $txt .= "\n\n📜 <b>آخرین خروجی:</b>\n<pre>" . $t . "</pre>";
+    }
+    $rows = [];
+    if ($probs === []) $rows[] = [['text' => '⬇️ اجرای بروزرسانی', 'callback_data' => 'su:ask']];
+    $rows[] = [['text' => '🔄 بررسی نسخهٔ تازه (git fetch)', 'callback_data' => 'su:check']];
+    $rows[] = [['text' => '📜 آخرین لاگ کامل', 'callback_data' => 'su:log']];
+    $rows[] = [['text' => '🏠 منو', 'callback_data' => 'menu']];
+    $kb = BotApi::ikb($rows);
+    if ($msgId > 0) {
+        BotApi::edit($TOKEN, $chatId, $msgId, $txt, ['reply_markup' => $kb]);
+        return;
+    }
+    BotApi::send($TOKEN, $chatId, $txt, ['reply_markup' => $kb]);
+}
+
 function showSourcePanel(array $cfg, Store $store, string $TOKEN, $chatId, int $msgId = 0): void
 {
     $all = $store->allBots();
@@ -3649,7 +3741,7 @@ function sourceResultText(array $bot, array $res): string
  * بکاپ داخل خود SourceUpdate::apply گرفته می‌شود و شکستش یعنی هیچ تغییری
  * انجام نشده؛ اینجا فقط فایلش را برای ادمین می‌فرستیم.
  */
-function runSourceUpdate(array $cfg, Store $store, string $TOKEN, array $user, $chatId, array $bot): void
+function runSourceUpdate(array $cfg, string $TOKEN, array $user, $chatId, array $bot): void
 {
     $uid = (int)$user['user_id'];
     $folder = (string)($bot['folder'] ?? '');
@@ -3675,9 +3767,9 @@ function runSourceUpdate(array $cfg, Store $store, string $TOKEN, array $user, $
     if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, $text, $backKb);
     else BotApi::send($TOKEN, $chatId, $text, $backKb);
 
-    // بعد از موفقیت: جدول‌های قالب دوباره نصب می‌شوند (مایگریشن/table.php)
+    // بعد از موفقیت: اگر نسخهٔ تازهٔ قالب جدول/مایگریشن تازه داشته باشد نصب می‌شود
     if (!empty($res['ok']) && (int)($res['applied'] ?? 0) > 0) {
-        foreach (applyTemplateSchema($cfg, $store, $bot) as $note) {
+        foreach (applyTemplateSchema($cfg, $bot, (array)($res['files'] ?? [])) as $note) {
             BotApi::send($TOKEN, $chatId, "ℹ️ " . htmlspecialchars($note, ENT_QUOTES, 'UTF-8'));
         }
     }
@@ -3686,10 +3778,17 @@ function runSourceUpdate(array $cfg, Store $store, string $TOKEN, array $user, $
 
 /**
  * نصب/به‌روزرسانی جدول‌های قالبِ یک رباتِ موجود — بعد از کپی سورس تازه ممکن
- * است جدول یا مایگریشن تازه‌ای در قالب باشد. همان کاری که نصب انجام می‌دهد.
+ * است جدول یا مایگریشن تازه‌ای در قالب باشد.
+ *
+ * قالب‌های SQLite همیشه مایگریشن می‌شوند (مایگریشن‌ها فقط اضافه‌کردنی‌اند)، ولی
+ * برای قالب‌های MySQL فقط وقتی `table.php` خودش در همین بروزرسانی عوض شده باشد
+ * دوباره اجرا می‌شود؛ `table.php` بعضی متن‌های پیش‌فرض را دوباره می‌نویسد و
+ * اجرای بی‌دلیلش می‌تواند ویرایش مدیر ربات را برگرداند.
+ *
+ * @param string[] $applied فایل‌هایی که در همین بروزرسانی کپی شدند
  * @return string[] یادداشت‌های قابل نمایش
  */
-function applyTemplateSchema(array $cfg, Store $store, array $bot): array
+function applyTemplateSchema(array $cfg, array $bot, array $applied = []): array
 {
     $notes = [];
     $type = (string)($bot['type'] ?? '');
@@ -3704,11 +3803,15 @@ function applyTemplateSchema(array $cfg, Store $store, array $bot): array
             $inst = Manager::installTemplateSchema($type, $botDir);
             if (!empty($inst['note'])) $notes[] = (string)$inst['note'];
         } elseif ($schema === 'http' && $tableFile !== '') {
+            if (!in_array($tableFile, $applied, true)) {
+                $notes[] = $tableFile . ' در این بروزرسانی عوض نشد ⇒ نصب دوبارهٔ جدول‌ها لازم نبود.';
+                return $notes;
+            }
             $tok = childToken($bot);
             $baseUrl = rtrim((string)($cfg['base_url'] ?? ''), '/') . '/bots/' . $folder;
             $okTable = Manager::triggerTable($baseUrl . '/' . $tableFile, Manager::tableSecret($type, $tok));
             $notes[] = $okTable
-                ? 'جدول‌های قالب دوباره بررسی/ساخته شد.'
+                ? 'جدول‌های قالب دوباره ساخته/بررسی شد (فایل ' . $tableFile . ' عوض شده بود).'
                 : '⚠️ اجرای ' . $tableFile . ' ناموفق بود؛ اگر جدول تازه‌ای اضافه شده، دستی بازش کنید.';
         }
     } catch (Throwable $e) {
@@ -3765,7 +3868,7 @@ function runSourceUpdateAll(array $cfg, Store $store, string $TOKEN, array $SUPE
         }
         $folderSafe = htmlspecialchars((string)($bot['folder'] ?? ''), ENT_QUOTES, 'UTF-8');
         if (!empty($res['ok']) && (int)($res['applied'] ?? 0) > 0) {
-            foreach (applyTemplateSchema($cfg, $store, $bot) as $note) {
+            foreach (applyTemplateSchema($cfg, $bot, (array)($res['files'] ?? [])) as $note) {
                 $lines[] = "ℹ️ {$folderSafe}: " . htmlspecialchars((string)$note, ENT_QUOTES, 'UTF-8');
             }
         }

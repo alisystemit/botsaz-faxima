@@ -310,16 +310,23 @@ if ($realType === null) {
     $st = SourceUpdate::statusLine(['type' => $realType, 'folder' => $slug]);
     check('statusLine سبز است', $st['ok'] && $st['icon'] === '🟢', $st['icon'] . ' ' . $st['text']);
 
-    // شمارندهٔ منو
+    // ---- شمارندهٔ منو ----
+    // مسیر ارزان: مانیفستِ هم‌نسخه با قالب ⇒ بدون اسکن هزاران فایل «به‌روز»
     $c1 = SourceUpdate::counter([['type' => $realType, 'folder' => $slug]], true);
-    check('شمارنده صفر است وقتی همه به‌روزند', $c1 === 0, (string)$c1);
+    check('شمارنده صفر است وقتی مانیفست هم‌نسخهٔ قالب است', $c1 === 0, (string)$c1);
+
+    // شبیه‌سازی «گیت‌پول نسخهٔ تازه آورد»: مانیفست ربات امضای قدیمی دارد و فایلی هم عوض شده
+    $man = SourceUpdate::readManifest($slug);
+    $man['signature'] = 'oldoldoldoldold1';
+    file_put_contents(SourceUpdate::manifestFile($slug), json_encode($man, JSON_UNESCAPED_UNICODE));
     file_put_contents($realDir . '/' . $victim, $oldBody . "\n// stale2\n");
     SourceUpdate::forget($realType, $slug);
     $c2 = SourceUpdate::counter([['type' => $realType, 'folder' => $slug]], true);
-    check('شمارنده بعد از خراب‌شدن ۱ می‌شود', $c2 === 1, (string)$c2);
+    check('شمارنده بعد از آمدن نسخهٔ تازه ۱ می‌شود', $c2 === 1, (string)$c2);
     $c3 = SourceUpdate::counter([['type' => $realType, 'folder' => $slug]]); // بدون force ⇒ کش
     check('شمارنده از کش خوانده می‌شود', $c3 === 1, (string)$c3);
     SourceUpdate::clearCounter();
+    check('بعد از پاک‌کردن کش، دوباره حساب می‌شود', SourceUpdate::counter([['type' => $realType, 'folder' => $slug]]) === 1);
 
     // پاکسازی وضعیت قبلی
     $state = SourceUpdate::readState();

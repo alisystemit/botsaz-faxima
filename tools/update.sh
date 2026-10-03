@@ -25,16 +25,22 @@
 #   --dry-run     فقط نشان می‌دهد چه چیزی می‌آید، تغییری نمی‌دهد
 #   --no-restart  سرویس‌ها را ری‌استارت نمی‌کند (و وبهوک re-confirm نمی‌شود)
 #   --force       پیش‌بینی اینترنت/فضا را رد می‌کند (محافظت درخت کثیف همیشه فعال است)
+#   --web         مثل --no-restart + بدون ریلود vhost/systemd/ری‌استارت سرویس؛
+#                 برای اجرای داخل ربات (دکمهٔ ⬆️ آپدیت) تا خودِ درخواست نكشد
 
 # ===== آپشن‌ها =====
 DRY_RUN=0
 NO_RESTART=0
 FORCE=0
+WEB=0
 for arg in "$@"; do
     case "$arg" in
         --dry-run) DRY_RUN=1 ;;
         --no-restart) NO_RESTART=1 ;;
         --force) FORCE=1 ;;
+        # اجرا از داخل خودِ ربات (دکمهٔ ⬆️ آپدیت): ری‌استارت سرویس، ریلود
+        # vhost و هر چیزی که درخواست HTTP فعلی را بکشد حتماً رد می‌شود.
+        --web) WEB=1; NO_RESTART=1 ;;
     esac
 done
 
@@ -60,6 +66,14 @@ else
     ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fi
 cd "$ROOT_DIR" || exit 1
+
+# ===== مالک متفاوت ریپو (اجرای وب به‌جای همان کاربر گیت) =====
+# وقتی www-data/nginx اسکریپت را اجرا می‌کند، git همهٔ کارها را با
+# «detected dubious ownership» رد می‌کند و آپدیت از وسط می‌شکند.
+# صریح کردن safe.directory با env، بدون دست‌زدن به ~/.gitconfig، همین‌جا حلش می‌کند.
+export GIT_CONFIG_COUNT=1
+export GIT_CONFIG_KEY_0="safe.directory"
+export GIT_CONFIG_VALUE_0="$ROOT_DIR"
 
 # ===== ۰. پیش‌بینی =====
 step "Step 0: Pre-flight checks..."
@@ -259,7 +273,9 @@ esac
 # ===== ۶. ریلود vhost =====
 step "Step 6: Reloading web server..."
 
-if [ -f /etc/apache2/sites-available/botsaz.conf ]; then
+if [ "$WEB" -eq 1 ]; then
+    ok "Web mode (--web): vhost reload skipped - آپدیت از داخل ربات نمی‌تواند وب‌سرور را ریلود کند"
+elif [ -f /etc/apache2/sites-available/botsaz.conf ]; then
     if [ "$NO_RESTART" -eq 0 ] && systemctl is-active --quiet apache2 2>/dev/null; then
         systemctl reload apache2 2>/dev/null && ok "Apache vhost reloaded" || warn "Could not reload Apache"
     else
@@ -296,7 +312,9 @@ fi
 
 # ===== ۷. فیکس systemd sandbox =====
 step "Step 7: Fixing systemd sandbox..."
-if command -v systemctl >/dev/null 2>&1; then
+if [ "$WEB" -eq 1 ]; then
+    ok "Web mode: systemd sandbox check skipped (نیاز به ری‌استارت یونیت دارد)"
+elif command -v systemctl >/dev/null 2>&1; then
     # یونیت‌های واقعی (نه لیست هاردکد که نسخه php-fpm را جا می‌اندازد)
     _units=""
     for u in apache2 httpd nginx; do
@@ -376,17 +394,22 @@ if [ "$NO_RESTART" -eq 1 ]; then
 else
     for svc in apache2 httpd nginx; do
         if systemctl is-active --quiet "$svc" 2>/dev/null; then
-            systemctl restart "$svc" 2>/dev/null \
-                || service "$svc" restart 2>/dev/null \
-                && ok "$svc restarted" || warn "Could not restart $svc"
-            RESTARTED=$((RESTARTED + 1))
+            if systemctl restart "$svc" 2>/dev/null || service "$svc" restart 2>/dev/null; then
+                ok "$svc restarted"
+                RESTARTED=$((RESTARTED + 1))
+            else
+                warn "Could not restart $svc"
+            fi
         fi
     done
     for svc in $(systemctl list-units --type=service --all --no-legend 2>/dev/null | awk '{print $1}' | grep -E '^php[0-9.]*-fpm\.service$' || true); do
         if systemctl is-active --quiet "$svc" 2>/dev/null; then
-            systemctl restart "$svc" 2>/dev/null \
-                && ok "$svc restarted" || warn "Could not restart $svc"
-            RESTARTED=$((RESTARTED + 1))
+            if systemctl restart "$svc" 2>/dev/null; then
+                ok "$svc restarted"
+                RESTARTED=$((RESTARTED + 1))
+            else
+                warn "Could not restart $svc"
+            fi
         fi
     done
     if [ "$RESTARTED" -eq 0 ]; then
@@ -487,6 +510,13 @@ echo "  Config files preserved: YES"
 echo "  Last backups kept in: /tmp/botsaz-config-backup-* (newest 3)"
 echo "========================================="
 echo ""
+if [ "$WEB" -eq 1 ]; then
+    echo "  NOTE (--web mode): services were NOT restarted, so the running PHP"
+    echo "  process still uses the OLD code. Restart manually (or let the weekly"
+    echo "  cron run update.sh) to load the new code:"
+    echo "    systemctl restart apache2  (or nginx + php-fpm)"
+    echo ""
+fi
 echo "  NOTE: child bots run COPIES of the templates from build time -"
 echo "  their code was NOT updated by this script. Rebuild a child bot"
 echo "  (or patch its folder by hand) if the update fixed template code."

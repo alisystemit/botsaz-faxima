@@ -720,7 +720,7 @@ class SourceUpdate
      * config.php و دیتابیس در هیچ‌کدام از این مراحل لمس نمی‌شوند.
      *
      * @return array{ok:bool, error:string, applied:int, failed:int, reverted:int,
-     *               backup:array, notes:string[], skipped:int, obsolete:int,
+     *               files:string[], backup:array, notes:string[], skipped:int, obsolete:int,
      *               config_new:bool, elapsed_ms:int}
      */
     public static function apply(array $plan, ?int $byUid = null): array
@@ -728,7 +728,7 @@ class SourceUpdate
         $log = Logger::getInstance();
         $out = [
             'ok' => false, 'error' => '', 'applied' => 0, 'failed' => 0, 'reverted' => 0,
-            'backup' => [], 'notes' => [], 'skipped' => 0, 'obsolete' => 0,
+            'files' => [], 'backup' => [], 'notes' => [], 'skipped' => 0, 'obsolete' => 0,
             'config_new' => false, 'elapsed_ms' => 0,
         ];
         $started = microtime(true);
@@ -844,6 +844,7 @@ class SourceUpdate
                 $recorded[$rel] = $m;
             }
             self::saveManifest($type, $folder, $recorded);
+            $out['files'] = array_keys($done);
             $state = self::readState();
             $state[$folder] = [
                 'at'        => date('Y-m-d H:i'),
