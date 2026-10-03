@@ -79,6 +79,7 @@ print_help() {
   خروجی:
     0 = اجرا شد (ممکن است هشدار داشته باشد – پیام‌ها را ببین)
     1 = خطا (fetch، استقرار، قفل همزمان، نبود گیت و …)
+    2 = گزینهٔ ناشناخته
 HELP
 }
 
@@ -96,7 +97,8 @@ while [ $# -gt 0 ]; do
     --web)        WEB=1; NO_RESTART=1 ;;
     --rollback)   ROLLBACK=1 ;;
     --help|-h)    print_help; exit 0 ;;
-    *)            warn "Unknown option ignored: $1  (run with --help)" ;;
+    # گزینهٔ ناشناخته خطاست نه هشدار: تایپ‌اشتباه (مثلاً --dryrun) نباید آپدیت واقعی را اجرا کند!
+    *)            die "Unknown option: $1  (run with --help)" 2 ;;
   esac
   shift
 done
@@ -127,26 +129,34 @@ find_php() {
   done
   return 1
 }
-PHP_BIN="$(find_php 2>/dev/null || true)"
-if [ -z "$PHP_BIN" ]; then
-  # php_bin داخل config ممکن است مسیرِ کامل باشد (مثلاً ویندوز/لاراگون)
-  # فقط خطوطِ فعال (بدون // یا #) خوانده می‌شوند تا مثالِ داخلِ کامنت انتخاب نشود
-  for _cfg in "$ROOT_DIR/config.php" "/var/www/botsaz-faxima/config.php"; do
+
+# php_bin داخلِ یک config (فایل یا پوشه داده می‌شود).
+# فقط خطوطِ فعال خوانده می‌شوند تا مثالِ داخل کامنت انتخاب نشود؛ مسیرِ کامل ویندوز/لاراگون هم پشتیبانی می‌شود.
+php_from_config() {
+  local _cfg _p
+  for _cfg in "$@"; do
+    [ -n "$_cfg" ] || continue
+    [ -d "$_cfg" ] && _cfg="$_cfg/config.php"
     [ -f "$_cfg" ] || continue
     _p="$(grep -E "^[[:space:]]*['\"]php_bin['\"][[:space:]]*=>" "$_cfg" 2>/dev/null | head -1 \
           | sed -n "s/.*=>[[:space:]]*['\"]\([^'\"]*\)['\"].*/\1/p")"
     [ -n "$_p" ] || continue
     if command -v "$_p" >/dev/null 2>&1 || [ -x "$_p" ]; then
-      PHP_BIN="$(command -v "$_p" 2>/dev/null || printf '%s' "$_p")"
-      break
+      printf '%s\n' "$(command -v "$_p" 2>/dev/null || printf '%s' "$_p")"
+      return 0
     fi
   done
-fi
+  return 1
+}
+
 have_php() { [ -n "${PHP_BIN:-}" ] && [ -x "$PHP_BIN" ]; }
-if ! have_php; then
-  PHP_BIN=""
-  warn "PHP CLI not found – config merge / installer / healthcheck will be skipped"
+
+PHP_BIN="$(find_php 2>/dev/null || true)"
+if [ -z "$PHP_BIN" ]; then
+  PHP_BIN="$(php_from_config "$ROOT_DIR/config.php" "$ROOT_DIR/config.example.php" \
+             "/var/www/botsaz-faxima/config.php" "${BOTSAZ_LIVE_DIR:-}" 2>/dev/null || true)"
 fi
+# اگر باز هم پیدا نشد، بعد از تشخیص LIVE_DIR دوباره تلاش می‌شود (config زنده مهم‌ترین منبع است)
 
 # ===== تشخیص LIVE_DIR (مسیر زنده وب‌سرور) =====
 detect_web_user() {
@@ -201,6 +211,16 @@ if [ -n "$_live" ]; then
   LIVE_DIR="$_live"
 else
   LIVE_DIR="$SRC_DIR"
+fi
+
+# تلاش دوباره برای PHP: مهم‌ترین منبع، config زنده است (php_bin ممکن است فقط همان‌جا باشد)
+if ! have_php; then
+  PHP_BIN="$(php_from_config "$LIVE_DIR/config.php" "$SRC_DIR/config.php" "$SRC_DIR/config.example.php" 2>/dev/null || true)"
+fi
+if ! have_php; then
+  PHP_BIN=""
+  warn "PHP CLI not found – config merge / installer / healthcheck will be skipped"
+  info "Fix: install php-cli, or set 'php_bin' in $LIVE_DIR/config.php to the full path"
 fi
 
 # هشدار: وی‌هوستِ کهنه/دیگری که مسیری متفاوت و قدیمی سرو می‌کند
@@ -790,7 +810,11 @@ elif [ -f "$LIVE_DIR/config.php" ] && have_php; then
         ok "Webhook set successfully: $WH_URL"
       else
         warn "Failed to set webhook via API. Response: ${RESP:0:120}"
-        info "Run manually: $PHP_BIN $LIVE_DIR/tools/set_webhook.php"
+        if [ -f "$LIVE_DIR/tools/set_webhook.php" ]; then
+          info "Run manually: $PHP_BIN $LIVE_DIR/tools/set_webhook.php"
+        else
+          info "tools/set_webhook.php not deployed – set the webhook manually via the Bot API"
+        fi
       fi
     else
       warn "Neither tools/set_webhook.php nor curl available – webhook not verified"
@@ -963,7 +987,7 @@ find /tmp -maxdepth 1 -name "botsaz-config-backup-*" -mtime +7 -exec rm -rf {} +
 # ===== ۱۰ب. ثبت وضعیت برای --rollback =====
 if [ "$DRY_RUN" -eq 0 ]; then
   cat > "$STATE_FILE" 2>/dev/null <<STATE
-PREV=$CUR_COMMIT
+PREV=${LAST_DEPLOYED:-$CUR_COMMIT}
 NEW=$NEW_COMMIT
 BRANCH=$CUR_BRANCH
 BACKUP=$BACKUP_DIR
