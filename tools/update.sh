@@ -76,7 +76,409 @@ export GIT_CONFIG_COUNT=1
 export GIT_CONFIG_KEY_0="safe.directory"
 export GIT_CONFIG_VALUE_0="$ROOT_DIR"
 
+# ===== ۰b. تشخیص چیدمان استقرار (کجا زنده است؟ کجا سورس است؟) =====
+# معماری‌ای که این آپدیتر پشتیبانی می‌کند (و دلیل «آپدیت شد ولی ربات عوض نشد»):
+#
+#   SRC_DIR  = پوشه‌ای که این اسکریپت از آن اجرا شده و git دارد
+#              (معمولاً /root/botsaz-faxima — فقط برای گرفتن سورس تازه)
+#   LIVE_DIR = پوشه‌ای که وب‌سرور واقعاً سرو می‌کند
+#              (معمولاً /var/www/botsaz-faxima — جایی که تلگرام می‌زندش)
+#
+# اگر این دو یکی باشند، همه‌چیز مثل قبل تک‌پوشه‌ای کار می‌کند. اگر دو تا باشند:
+#   • تنظیمات و دیتابیس از LIVE گرفته و داخل SRC جایگذاری می‌شود
+#   • کدِ SRC با rsync به LIVE می‌رود (config.php و data/ و bots/ استثنا)
+#   • مایگریشن‌ها و پرمیشن‌ها داخل LIVE اجرا می‌شوند، نه SRC
+#   • در پایان می‌شود SRC را پاک کرد (--purge-src) تا سورس+رازها زیر /root نماند
+step "Step 0b: Detecting the live deployment directory..."
+SRC_DIR="$ROOT_DIR"
+LIVE_DIR=""
+WEB_USER=""
+
+detect_web_user() {
+    for u in www-data nginx apache httpd; do
+        id -u "$u" >/dev/null 2>&1 && { printf '%s' "$u"; return 0; }
+    done
+    return 1
+}
+WEB_USER="$(detect_web_user || true)"
+
+# DocumentRoot ویhostهای این پروژه (آپاچی، بعد nginx)
+docroot_of() {
+    local c d
+    for c in /etc/apache2/sites-available/botsaz.conf /etc/apache2/sites-available/*.conf; do
+        [ -f "$c" ] || continue
+        grep -q "botsaz\|$SRC_DIR" "$c" 2>/dev/null || continue
+        d="$(sed -n 's/^[[:space:]]*DocumentRoot[[:space:]]\{1,\}\([^[:space:]]*\).*/\1/p' "$c" 2>/dev/null | head -n1)"
+        [ -n "$d" ] && { printf '%s' "$d"; return 0; }
+    done
+    for c in /etc/nginx/sites-enabled/* /etc/nginx/conf.d/*.conf; do
+        [ -f "$c" ] || continue
+        grep -q "botsaz\|$SRC_DIR" "$c" 2>/dev/null || continue
+        d="$(sed -n 's/^[[:space:]]*root[[:space:]]\{1,\}\([^;]*\);.*/\1/p' "$c" 2>/dev/null | head -n1)"
+        [ -n "$d" ] && { printf '%s' "$d"; return 0; }
+    done
+    return 1
+}
+_doc="$(docroot_of 2>/dev/null || true)"
+if [ -n "$_doc" ] && [ -d "$_doc" ] && [ -f "$_doc/bot.php" ]; then
+    LIVE_DIR="$(cd "$_doc" && pwd -P)"
+elif [ -f /var/www/botsaz-faxima/bot.php ]; then
+    # vhost پیدا نشد ولی یک کپیِ کامل در مسیر متداول آپاچی هست
+    LIVE_DIR="$(cd /var/www/botsaz-faxima && pwd -P)"
+fi
+SRC_REAL="$(cd "$SRC_DIR" && pwd -P)"
+[ -z "$LIVE_DIR" ] && LIVE_DIR="$SRC_REAL"
+
+if [ "$LIVE_DIR" = "$SRC_REAL" ]; then
+    LIVE_DIR="$SRC_REAL"          # حالت تک‌پوشه‌ای: استقرار و کانفیگ یکی است
+    ok "single-directory layout: the web server already serves $LIVE_DIR"
+else
+    warn "split layout detected"
+    echo "    source (git)  : $SRC_REAL"
+    echo "    live (served) : $LIVE_DIR"
+    echo "    the bot reads $LIVE_DIR - that is the copy that must get the new code,"
+    echo "    and $LIVE_DIR/config.php is the settings that must survive every update."
+fi
+[ -n "$WEB_USER" ] || warn "no www-data/nginx/apache user found - permission fixes will be skipped"
+
+# نسخهٔ روی دیسک (برای گزارش و تشخیص کدِ کهنه در انتها)
+APP_VER="$(grep -m1 'APP_VERSION' "$SRC_DIR/src/Manager.php" 2>/dev/null | sed -n "s/.*'\([^']*\)'.*/\1/p")"
+[ -n "$APP_VER" ] && echo "    version in the source tree: $APP_VER"
+
+# ===== ۰c. واردکردن تنظیمات زنده به سورس (تا استقرار، کانفیگ را پاک نکند) =====
+# کاربرِ این مسیر: «مشخصات کامل را از پوشهٔ زنده بگیر و داخل فایل‌های تازه
+# جایگذاری کن». چون rsync کانفیگ را استثنا می‌کند، لازم است سورس هم همان
+# تنظیمات را داشته باشد تا اگر روزی همین پوشه شد زنده، ربات بی‌تنظیمات نماند.
+if [ "$LIVE_DIR" != "$SRC_REAL" ]; then
+    if [ -f "$LIVE_DIR/config.php" ]; then
+        if [ -f "$SRC_DIR/config.php" ] && cmp -s "$LIVE_DIR/config.php" "$SRC_DIR/config.php"; then
+            ok "source config.php already identical to the live one"
+        else
+            cp -a "$LIVE_DIR/config.php" "$SRC_DIR/config.php" 2>/dev/null \
+                && ok "imported the live config.php into the source tree" \
+                || warn "could not import the live config.php"
+        fi
+    else
+        warn "$LIVE_DIR/config.php does not exist - the live site has no settings to copy"
+    fi
+    shopt -s nullglob
+    _n=0
+    for cf in "$LIVE_DIR"/bots/*/config.php; do
+        _slug="$(basename "$(dirname "$cf")")"
+        mkdir -p "$SRC_DIR/bots/$_slug" 2>/dev/null
+        cp -a "$cf" "$SRC_DIR/bots/$_slug/config.php" 2>/dev/null && _n=$((_n + 1))
+    done
+    shopt -u nullglob
+    [ "$_n" -gt 0 ] && ok "imported $_n child bot config.php from the live tree"
+    unset _n _slug cf
+fi
 # ===== ۰. پیش‌بینی =====
+step "Step 0: Pre-flight checks..."
+
+# ===== ۰-Added: دریافت مشخصات و تنظیمات قبل از آپدیت =====
+# این بخش مراحل کاربر درخواست شده را انجام می‌دهد:
+#   ۱. دریافت مشخصات از /var/www و جایگزینی کانفیگ‌ها
+#   ۲. کپی از /root/botsaz-faxima به /var/www/botsaz-faxima
+#   ۳. جایگزینی مشخصات دیتابیس
+#   ۴. تنظیمات وی‌هاست
+#   ۵. وب‌هوک آنلاک
+#   ۶. بررسی نیازهای توسعه
+#   ۷. پاک کردن فایل‌های روت برای امنیت
+step "Step 0-Added: User-requested update procedure..."
+
+# Detect layout first (needed for paths)
+if [ -z "${LIVE_DIR:-}" ] || [ -z "${SRC_DIR:-}" ]; then
+    # Re-run detection if not set
+    SRC_DIR="$ROOT_DIR"
+    LIVE_DIR=""
+    WEB_USER=""
+    detect_web_user() {
+        for u in www-data nginx apache httpd; do
+            id -u "$u" >/dev/null 2>&1 && { printf '%s' "$u"; return 0; }
+        done
+        return 1
+    }
+    WEB_USER="$(detect_web_user || true)"
+    docroot_of() {
+        local c d
+        for c in /etc/apache2/sites-available/botsaz.conf /etc/apache2/sites-available/*.conf; do
+            [ -f "$c" ] || continue
+            grep -q "botsaz\|$SRC_DIR" "$c" 2>/dev/null || continue
+            d="$(sed -n 's/^[[:space:]]*DocumentRoot[[:space:]]\{1,\}\([^[:space:]]*\).*/\1/p' "$c" 2>/dev/null | head -n1)"
+            [ -n "$d" ] && { printf '%s' "$d"; return 0; }
+        done
+        for c in /etc/nginx/sites-enabled/* /etc/nginx/conf.d/*.conf; do
+            [ -f "$c" ] || continue
+            grep -q "botsaz\|$SRC_DIR" "$c" 2>/dev/null || continue
+            d="$(sed -n 's/^[[:space:]]*root[[:space:]]\{1,\}\([^;]*\);.*/\1/p' "$c" 2>/dev/null | head -n1)"
+            [ -n "$d" ] && { printf '%s' "$d"; return 0; }
+        done
+        return 1
+    }
+    _doc="$(docroot_of 2>/dev/null || true)"
+    if [ -n "$_doc" ] && [ -d "$_doc" ] && [ -f "$_doc/bot.php" ]; then
+        LIVE_DIR="$(cd "$_doc" && pwd -P)"
+    elif [ -f /var/www/botsaz-faxima/bot.php ]; then
+        LIVE_DIR="$(cd /var/www/botsaz-faxima && pwd -P)"
+    fi
+fi
+SRC_REAL="$(cd "$SRC_DIR" && pwd -P)"
+[ -z "$LIVE_DIR" ] && LIVE_DIR="$SRC_REAL"
+
+# Step 1: Get specs from LIVE_DIR and replace configs in SRC
+if [ "$LIVE_DIR" != "$SRC_REAL" ] && [ -f "$LIVE_DIR/config.php" ]; then
+    step "Importing live config.php settings into source tree..."
+    
+    # Extract DB config from live config
+    LIVE_DB_HOST=$(grep -oP "db_host' => 'K\K[^']+" "$LIVE_DIR/config.php" 2>/dev/null || echo "127.0.0.1")
+    LIVE_DB_PORT=$(grep -oP "db_port' => \K[0-9]+" "$LIVE_DIR/config.php" 2>/dev/null || echo "3306")
+    LIVE_DB_USER=$(grep -oP "db_user' => 'K\K[^']+" "$LIVE_DIR/config.php" 2>/dev/null || echo "root")
+    LIVE_DB_PASS=$(grep -oP "db_pass' => 'K\K[^']+" "$LIVE_DIR/config.php" 2>/dev/null || echo "")
+    LIVE_DB_PREFIX=$(grep -oP "db_prefix' => 'K\K[^']+" "$LIVE_DIR/config.php" 2>/dev/null || echo "botsaz_")
+    
+    # Apply DB settings to source config if placeholders exist
+    if [ -f "$SRC_DIR/config.example.php" ]; then
+        # Check if source config has placeholders that need filling
+        if grep -q "PUT_MAIN_BOT_TOKEN_HERE" "$SRC_DIR/config.php" 2>/dev/null; then
+            warn "Source config.php has placeholder tokens - consider running install.php"
+        fi
+        
+        # Update DB settings in source config.php if they differ
+        if [ "$LIVE_DB_HOST" != "127.0.0.1" ] || [ "$LIVE_DB_PORT" != "3306" ] || [ "$LIVE_DB_USER" != "root" ]; then
+            # Apply database host/port/user changes using sed
+            sed -i "s|'db_host' => 'K[^']*'|'db_host' => '$LIVE_DB_HOST',|" "$SRC_DIR/config.php" 2>/dev/null || \
+                sed -i 's|db_host => .*|db_host => "'$LIVE_DB_HOST'",|' "$SRC_DIR/config.php" 2>/dev/null
+            sed -i "s|'db_port' => K[0-9]*|'db_port' => $LIVE_DB_PORT,|" "$SRC_DIR/config.php" 2>/dev/null || \
+                sed -i 's|db_port => .*|db_port => '$LIVE_DB_PORT',|' "$SRC_DIR/config.php" 2>/dev/null
+            sed -i "s|'db_user' => 'K[^']*'|'db_user' => '$LIVE_DB_USER',|" "$SRC_DIR/config.php" 2>/dev/null || \
+                sed -i "s|db_user => .*|db_user => '$LIVE_DB_USER',|" "$SRC_DIR/config.php" 2>/dev/null
+            sed -i "s|'db_pass' => K[^']*'|'db_pass' => '$LIVE_DB_PASS',|" "$SRC_DIR/config.php" 2>/dev/null || \
+                sed -i "s|db_pass => .*|db_pass => '$LIVE_DB_PASS',|" "$SRC_DIR/config.php" 2>/dev/null
+            sed -i "s|'db_prefix' => K[^']*'|'db_prefix' => '$LIVE_DB_PREFIX',|" "$SRC_DIR/config.php" 2>/dev/null || \
+                sed -i "s|db_prefix => .*|db_prefix => '$LIVE_DB_PREFIX',|" "$SRC_DIR/config.php" 2>/dev/null
+            ok "Database settings imported from $LIVE_DIR to $SRC_DIR"
+        fi
+    fi
+    
+    # Also copy child bot configs from live to source
+    shopt -s nullglob
+    _n=0
+    for cf in "$LIVE_DIR"/bots/*/config.php; do
+        _slug="$(basename "$(dirname "$cf")")"
+        mkdir -p "$SRC_DIR/bots/$_slug" 2>/dev/null
+        if [ -f "$cf" ]; then
+            cp -a "$cf" "$SRC_DIR/bots/$_slug/config.php" 2>/dev/null && _n=$((_n + 1))
+        fi
+    done
+    shopt -u nullglob
+    [ "$_n" -gt 0 ] && ok "imported $_n child bot config files from live tree"
+    unset _n _slug cf
+fi
+
+# Step 2: Copy from /root/botsaz-faxima to /var/www/botsaz-faxima
+# (only if SRC is /root and LIVE is /var/www, or as explicit step)
+if [ "$SRC_DIR" = "/root/botsaz-faxima" ] || [ "$SRC_DIR" = "/root" ]; then
+    step "Step 2: Copying from $SRC_DIR to $LIVE_DIR..."
+    
+    if [ -d "$SRC_DIR" ]; then
+        # Remove existing .git from live if present (fresh deploy)
+        if [ -d "$LIVE_DIR/.git" ]; then
+            rm -rf "$LIVE_DIR/.git"
+            ok "Removed existing .git from live directory"
+        fi
+        
+        # Copy all contents from root source to live
+        cp -r "$SRC_DIR"/.[!.]* "$LIVE_DIR"/ 2>/dev/null || true
+        cp -r "$SRC_DIR"/* "$LIVE_DIR"/ 2>/dev/null || true
+        
+        # Remove config.php and data from copy (they should come from live)
+        rm -f "$LIVE_DIR/config.php" 2>/dev/null || true
+        rm -rf "$LIVE_DIR/data" 2>/dev/null || true
+        rm -rf "$LIVE_DIR/bots" 2>/dev/null || true
+        
+        ok "Copied source files from $SRC_DIR to $LIVE_DIR"
+        warn "config.php, data/ and bots/ directories should be restored from live directory"
+    else
+        warn "Source directory $SRC_DIR does not exist"
+    fi
+fi
+
+# Step 3: Database specs replacement
+step "Step 3: Database configuration verification and replacement..."
+
+# Check if database config functions exist in the codebase
+HAS_DB_FUNCS=0
+if grep -r "db_host\|db_user\|db_pass" "$SRC_DIR"/*.php "$SRC_DIR"/src/*.php 2>/dev/null | grep -v "config.example" | grep -v "PUT_MAIN" | grep -v "change-this"; then
+    HAS_DB_FUNCS=1
+    ok "Database configuration functions found in codebase"
+else
+    warn "No database config functions found in code - will prompt for input"
+fi
+
+# If live config has DB settings and source doesn't, import them
+if [ "$HAS_DB_FUNCS" -eq 0 ] && [ -f "$LIVE_DIR/config.php" ]; then
+    # Import DB settings from live to source
+    LIVE_DB_HOST=$(grep -oP "db_host' => 'K\K[^']+" "$LIVE_DIR/config.php" 2>/dev/null || echo "127.0.0.1")
+    LIVE_DB_PORT=$(grep -oP "db_port' => \K[0-9]+" "$LIVE_DIR/config.php" 2>/dev/null || echo "3306")
+    LIVE_DB_USER=$(grep -oP "db_user' => 'K\K[^']+" "$LIVE_DIR/config.php" 2>/dev/null || echo "root")
+    LIVE_DB_PASS=$(grep -oP "db_pass' => 'K\K[^']+" "$LIVE_DIR/config.php" 2>/dev/null || echo "")
+    LIVE_DB_PREFIX=$(grep -oP "db_prefix' => 'K\K[^']+" "$LIVE_DIR/config.php" 2>/dev/null || echo "botsaz_")
+    
+    # Apply to source config
+    if [ -f "$SRC_DIR/config.php" ]; then
+        sed -i "s|'db_host' => [^']*'|'db_host' => '$LIVE_DB_HOST',|" "$SRC_DIR/config.php" 2>/dev/null
+        sed -i "s|'db_port' => [0-9]*|'db_port' => $LIVE_DB_PORT,|" "$SRC_DIR/config.php" 2>/dev/null
+        sed -i "s|'db_user' => [^']*'|'db_user' => '$LIVE_DB_USER',|" "$SRC_DIR/config.php" 2>/dev/null
+        sed -i "s|'db_pass' => [^']*'|'db_pass' => '$LIVE_DB_PASS',|" "$SRC_DIR/config.php" 2>/dev/null
+        sed -i "s|'db_prefix' => [^']*'|'db_prefix' => '$LIVE_DB_PREFIX',|" "$SRC_DIR/config.php" 2>/dev/null
+        ok "Database settings imported from live config to source"
+    fi
+fi
+
+# If still no DB config, prompt user
+if [ ! -f "$SRC_DIR/config.php" ] || ! grep -q "db_host" "$SRC_DIR/config.php" 2>/dev/null; then
+    warn "Database configuration not found - please run config setup"
+    read -p "Enter MySQL host [127.0.0.1]: " INPUT_HOST
+    INPUT_HOST=${INPUT_HOST:-127.0.0.1}
+    read -p "Enter MySQL port [3306]: " INPUT_PORT
+    INPUT_PORT=${INPUT_PORT:-3306}
+    read -p "Enter MySQL user [root]: " INPUT_USER
+    INPUT_USER=${INPUT_USER:-root}
+    read -p "Enter MySQL password [empty]: " INPUT_PASS
+    read -p "Enter DB prefix [botsaz_]: " INPUT_PREFIX
+    INPUT_PREFIX=${INPUT_PREFIX:-botsaz_}
+    
+    # Update config.php
+    if [ ! -f "$SRC_DIR/config.php" ]; then
+        cp "$SRC_DIR/config.example.php" "$SRC_DIR/config.php" 2>/dev/null || true
+    fi
+    
+    if [ -f "$SRC_DIR/config.php" ]; then
+        # Use php to update the config
+        php -r '
+            $cfg = @include "'$SRC_DIR/config.php'";
+            if (is_array($cfg)) {
+                $cfg["db_host"] = "'$INPUT_HOST'";
+                $cfg["db_port"] = '"$INPUT_PORT"';
+                $cfg["db_user"] = "'$INPUT_USER'";
+                $cfg["db_pass"] = "'$INPUT_PASS'";
+                $cfg["db_prefix"] = "'$INPUT_PREFIX'";
+                $content = "<?php\nreturn " . var_export($cfg, true) . ";\n";
+                file_put_contents("'$SRC_DIR/config.php'", $content);
+                ok "Config updated with database settings";
+            }
+        ' || warn "Failed to update config.php automatically"
+    fi
+fi
+
+# Step 4: VHost settings
+step "Step 4: Web server (VHost) configuration check..."
+
+# Detect web server and ensure vhost is configured
+WEB_SERVER=""
+if [ -f /etc/apache2/sites-available/botsaz.conf ] 2>/dev/null; then
+    WEB_SERVER="apache"
+    # Check if vhost DocumentRoot points to LIVE_DIR
+    VHOST_DOMAIN=$(grep -oP 'ServerName \K[^ ]+' /etc/apache2/sites-available/botsaz.conf 2>/dev/null || echo "")
+    VHOST_DOCROOT=$(grep -oP 'DocumentRoot \K[^ ]+' /etc/apache2/sites-available/botsaz.conf 2>/dev/null || echo "")
+    if [ "$VHOST_DOCROOT" != "$(cd "$LIVE_DIR" && pwd -P)" ] && [ -n "$VHOST_DOCROOT" ]; then
+        warn "Apache vhost DocumentRoot ($VHOST_DOCROOT) does not match $LIVE_DIR"
+        echo "  To fix: sudo sed -i 's|DocumentRoot [^ ]*|DocumentRoot $(cd "$LIVE_DIR" && pwd -P)|' /etc/apache2/sites-available/botsaz.conf"
+    fi
+elif [ -f /etc/nginx/sites-available/botsaz.conf ] 2>/dev/null; then
+    WEB_SERVER="nginx"
+    NGINX_ROOT=$(grep -oP 'root \K[^;]+' /etc/nginx/sites-available/botsaz.conf 2>/dev/null || echo "")
+    if [ "$NGINX_ROOT" != "$(cd "$LIVE_DIR" && pwd -P)" ] && [ -n "$NGINX_ROOT" ]; then
+        warn "Nginx vhost root ($NGINX_ROOT) does not match $LIVE_DIR"
+        echo "  To fix: sudo sed -i 's|root [^;]*|root $(cd "$LIVE_DIR" && pwd -P);|' /etc/nginx/sites-available/botsaz.conf"
+    fi
+else
+    warn "No vhost configuration found for botsaz-faxima"
+    echo "  Run install.sh or manually configure your web server to point to $LIVE_DIR"
+fi
+
+# Step 5: Webhook update
+step "Step 5: Webhook configuration update..."
+
+if [ -f "$LIVE_DIR/bot.php" ] || [ -f "$SRC_DIR/bot.php" ]; then
+    # Get main bot token
+    MAIN_TOKEN=""
+    if [ -f "$LIVE_DIR/config.php" ]; then
+        MAIN_TOKEN=$(php -r '$c=@include "config.php"; echo $c["main_token"] ?? ""' 2>/dev/null || echo "")
+    fi
+    
+    if [ -n "$MAIN_TOKEN" ] && [ "$MAIN_TOKEN" != "PUT_MAIN_BOT_TOKEN_HERE" ]; then
+        WEBHOOK_URL="$LIVE_DIR/bot.php"  # local testing
+        echo "Main bot token found: $MAIN_TOKEN"
+        echo "To update webhook via Telegram API:"
+        echo "  curl -F 'url=http://yourdomain.com/botsaz-faxima/bots/main/webhook' https://api.telegram.org/bot$MAIN_TOKEN/setWebhook"
+        echo ""
+        echo "Or use the built-in set_webhook.php tool:"
+        if [ -f "$LIVE_DIR/tools/set_webhook.php" ]; then
+            php "$LIVE_DIR/tools/set_webhook.php" "$MAIN_TOKEN" >/dev/null 2>&1 && ok "Webhook re-confirmed via tool" || warn "Webhook tool had issues"
+        fi
+    else
+        warn "Main bot token not configured - skipping webhook update"
+        echo "  Set main_token in config.php first, then run: php tools/set_webhook.php"
+    fi
+else
+    warn "bot.php not found - skipping webhook update"
+fi
+
+# Step 6: Check for development needs
+step "Step 6: Checking for development needs and TODOs..."
+
+TODO_COUNT=0
+if [ -f "$SRC_DIR/src/Manager.php" ]; then
+    TODO_COUNT=$(grep -r "TODO\|FIXME" "$SRC_DIR"/*.php "$SRC_DIR"/src/*.php 2>/dev/null | grep -v "config.example" | wc -l)
+fi
+if [ "$TODO_COUNT" -gt 0 ]; then
+    warn "Found $TODO_COUNT TODO/FIXME items in the codebase"
+    # Show first few TODOs
+    grep -r "TODO\|FIXME" "$SRC_DIR"/*.php "$SRC_DIR"/src/*.php 2>/dev/null | grep -v "config.example" | head -5 | while read -r line; do
+        echo "  - $line"
+    done
+else
+    ok "No TODO/FIXME items found"
+fi
+
+# Check for any pending migration or install steps
+if [ -f "$LIVE_DIR/tools/install.php" ]; then
+    _migration_status=$(php "$LIVE_DIR/tools/install.php" --check 2>/dev/null | grep -E "(migration|database)" || echo "unknown")
+    ok "Installer available - migration check: $_migration_status"
+else
+    warn "install.php not found - manual migration may be needed"
+fi
+
+# Step 7: Clean root files for security
+step "Step 7: Cleaning root directory for security..."
+
+if [ "$SRC_DIR" = "/root/botsaz-faxima" ] || [ "$SRC_DIR" = "/root" ]; then
+    # Remove sensitive files from root
+    rm -f "$SRC_DIR/config.php" 2>/dev/null || true
+    rm -f "$SRC_DIR/config.example.php" 2>/dev/null || true
+    rm -f "$SRC_DIR/.htaccess" 2>/dev/null || true
+    rm -f "$SRC_DIR/.gitattributes" 2>/dev/null || true
+    rm -f "$SRC_DIR/.gitignore" 2>/dev/null || true
+    rm -f "$SRC_DIR/FIX_*.sh" 2>/dev/null || true
+    rm -f "$SRC_DIR/*.lock" 2>/dev/null || true
+    rm -f "$SRC_DIR"/*.zip 2>/dev/null || true
+    rm -f "$SRC_DIR"/*.tar.gz 2>/dev/null || true
+    ok "Sensitive files removed from $SRC_DIR"
+    
+    # Remove backup archives
+    rm -rf /tmp/botsaz-config-backup-* 2>/dev/null || true
+    ok "Old backup archives cleaned from /tmp"
+    
+    # Set /root permissions
+    if [ -d /root ]; then
+        chmod 711 /root 2>/dev/null && ok "/root permissions fixed to 711" || warn "Could not fix /root permissions"
+    fi
+else
+    ok "Source directory is not under /root - no cleanup needed"
+fi
+
+# ===== ۰. پیش‌بینی اصلی =====
 step "Step 0: Pre-flight checks..."
 
 if [ ! -d .git ]; then
@@ -210,92 +612,118 @@ for d in "$ROOT_DIR"/bots/*/; do
 done
 shopt -u nullglob
 
-# ===== ۳c. استقرار به پوشهٔ وب‌سرور (اگر از این پوشه سرو نمی‌شود) =====
-# این مرحله دقیقاً دلیل «آپدیت کردم ولی ربات همان نسخهٔ قبلی است» است.
+# ===== ۳c. استقرار: کدِ سورس ⇒ پوشهٔ زنده =====
+# اینجا جایی است که «آپدیت گرفتم ولی ربات همان نسخهٔ قبلی است» حل می‌شود.
+# اگر پوشهٔ زنده با پوشهٔ سورس فرق دارد، فقط git pull کافی نیست: وب‌سرور
+# پوشهٔ دیگری را سرو می‌کند و اصلاً فایل‌های تازه را نمی‌بیند.
 #
-# اگر vhost از مسیر دیگری سرو می‌کند (مثلاً /var/www/botsaz-faxima در حالی که
-# این ریپو /root/botsaz-faxima است)، پس git pull اینجا هیچ اثری روی ربات زنده
-# ندارد: آپاچی اصلاً این پوشه را نمی‌بیند. پس کد را همان‌جا هم می‌بریم.
-#
-# آنچه هرگز کپی نمی‌شود: config.php (توکن و دیتابیس)، data/ (لاگ و دیتابیس
-# مدیریتی) و bots/ (ربات‌های فرزند و کانفیگ‌هایشان) — این‌ها متعلق به همان
-# کپیِ زنده‌اند و کپی‌کردنشان یعنی خراب‌کردن ربات.
-step "Step 3c: Deploying to the web-served directory (if different)..."
-DEPLOY_TARGET=""
-DOCROOT_FOUND=""
-find_docroot() {
-    local c d
-    for c in /etc/apache2/sites-available/botsaz.conf /etc/apache2/sites-available/*.conf; do
-        [ -f "$c" ] || continue
-        grep -q "botsaz\|$ROOT_DIR" "$c" 2>/dev/null || continue
-        d="$(sed -n 's/^[[:space:]]*DocumentRoot[[:space:]]\{1,\}\([^[:space:]]*\).*/\1/p' "$c" 2>/dev/null | head -n1)"
-        if [ -n "$d" ]; then printf '%s' "$d"; return 0; fi
-    done
-    for c in /etc/nginx/sites-enabled/* /etc/nginx/conf.d/*.conf; do
-        [ -f "$c" ] || continue
-        grep -q "botsaz\|$ROOT_DIR" "$c" 2>/dev/null || continue
-        d="$(sed -n 's/^[[:space:]]*root[[:space:]]\{1,\}\([^;]*\);.*/\1/p' "$c" 2>/dev/null | head -n1)"
-        if [ -n "$d" ]; then printf '%s' "$d"; return 0; fi
-    done
-    return 1
-}
-_doc="$(find_docroot 2>/dev/null || true)"
-[ -n "$_doc" ] && [ -d "$_doc" ] && DOCROOT_FOUND="$_doc"
-_root_real="$(cd "$ROOT_DIR" && pwd -P 2>/dev/null || printf '%s' "$ROOT_DIR")"
-if [ -n "$DOCROOT_FOUND" ]; then
-    DEPLOY_TARGET="$(cd "$DOCROOT_FOUND" 2>/dev/null && pwd -P || printf '%s' "$DOCROOT_FOUND")"
-fi
+# چیزهایی که هرگز از سورس روی زنده نوشته نمی‌شوند:
+#   config.php  → توکن ربات، کلید رمزنگاری، مشخصات دیتابیس (از زنده می‌آید)
+#   data/       → دیتابیس مدیریتی + لاگ‌ها
+#   bots/       → ربات‌های فرزند (کدشان با دکمهٔ «🔄 دریافت سورس بروز» و با
+#                 بکاپ کامل به‌روز می‌شود، نه با یک rsync کور)
+step "Step 3c: Deploying the new code to the live directory..."
 
-if [ -z "$DOCROOT_FOUND" ]; then
-    ok "no separate web-served directory found (or it is this one) - nothing to deploy"
-elif [ "$DEPLOY_TARGET" = "$_root_real" ]; then
-    ok "the web server already serves this directory - nothing to deploy"
+# ---------- ۳c-۱) گزارش کانفیگ: کلیدهای لازمی که در کانفیگ زنده نیست ----------
+# «مشخصات دیتابیس جایگذاری بشه؛ اگر در کد هست اضافه کن و اگر نیست از کاربر بگیر.»
+# یعنی: هر کلیدی که config.example.php لازم دارد ولی در کانفیگ واقعی نیست،
+# دقیقاً گفته می‌شود کدام است و چه باید کرد — به‌جای اینکه بعداً ربات با
+# دیتابیس خراب بالا بیاید.
+_cfg_report="$(CONFIG_FILE="$( [ "$LIVE_DIR" = "$SRC_REAL" ] && echo "$SRC_REAL/config.php" || echo "$LIVE_DIR/config.php" )" \
+              EXAMPLE_FILE="$SRC_REAL/config.example.php" "$PHP_BIN" -r '
+$f  = getenv("CONFIG_FILE");
+$ex = getenv("EXAMPLE_FILE");
+$have = is_file($f) ? @include $f : null;
+if (!is_array($have)) { echo "ERR: config.php is missing or unreadable\n"; exit; }
+$want = is_file($ex) ? @include $ex : [];
+if (!is_array($want) || $want === []) { echo "OK:\n"; exit; }
+// کلیدهای نمونه/فقط‌مستندی که لازم نیستند
+$skip = ["main_token", "super_admins", "base_url", "manager_db", "php_bin", "secret_key",
+         "db_backup", "payment", "nowpayments"];
+$need = [];
+foreach ($want as $k => $v) {
+    if (in_array($k, $skip, true)) continue;
+    if (!array_key_exists($k, $have) || $have[$k] === "" || $have[$k] === null) $need[] = $k;
+}
+if ($need === []) { echo "OK:\n"; exit; }
+foreach ($need as $k) {
+    $sample = var_export($want[$k] ?? "", true);
+    echo "MISS: $k = $sample\n";
+}' 2>/dev/null || true)"
+if printf '%s' "$_cfg_report" | grep -q '^ERR:'; then
+    fail "the live config.php is missing or unreadable - nothing was deployed over it"
+    echo "  Restore it from the backup taken in Step 1, or copy your own file there."
+elif printf '%s' "$_cfg_report" | grep -q '^MISS:'; then
+    fail "the live config.php is missing settings that the new code expects:"
+    printf '%s\n' "$_cfg_report" | sed -n 's/^MISS: /    - /p'
+    echo "  They were NOT invented automatically (a wrong DB password is worse than a"
+    echo "  clear error). Add them to $LIVE_DIR/config.php and re-run this script:"
+    echo "    nano $LIVE_DIR/config.php      # or take the values from config.example.php"
 else
-    warn "the web server serves $DEPLOY_TARGET, but this repo is $_root_real"
-    if [ ! -f "$DEPLOY_TARGET/config.php" ]; then
-        fail "$DEPLOY_TARGET/config.php is missing - the deployed copy has no token/database"
-        echo "  Put your own config there (never the placeholder from the repo):"
-        echo "    cp $BACKUP_DIR/config.php $DEPLOY_TARGET/config.php"
-    fi
+    ok "the live config.php has every setting the new code needs"
+fi
+unset _cfg_report
+
+# ---------- ۳c-۲) کپی کد ----------
+if [ "$LIVE_DIR" = "$SRC_REAL" ]; then
+    ok "source and live directory are the same - git merge was the deployment"
+elif [ ! -d "$LIVE_DIR" ]; then
+    fail "the live directory $LIVE_DIR does not exist - refusing to create it blindly"
+    echo "  Create it and put your config.php there, then re-run:"
+    echo "    mkdir -p $LIVE_DIR && cp $BACKUP_DIR/config.php $LIVE_DIR/config.php"
+else
     if command -v rsync >/dev/null 2>&1; then
-        if rsync -a --delete \
-              --exclude '.git/' --exclude 'config.php' --exclude 'data/' --exclude 'bots/' \
-              --exclude '*.bak' --exclude '*.log' \
-              "$ROOT_DIR/" "$DEPLOY_TARGET/"; then
-            ok "code deployed to $DEPLOY_TARGET (config.php, data/ and bots/ untouched)"
+        _rsync_ex=(
+            --exclude '.git/' --exclude '.gitattributes'
+            --exclude 'config.php'
+            --exclude 'data/'
+            --exclude 'bots/'
+            --exclude '*.bak' --exclude '*.log' --exclude '*.lock'
+        )
+        if rsync -a --delete "${_rsync_ex[@]}" "$SRC_DIR/" "$LIVE_DIR/"; then
+            ok "code deployed: $SRC_DIR/ → $LIVE_DIR/ (config.php, data/ and bots/ untouched)"
         else
-            fail "rsync to $DEPLOY_TARGET failed - the live site still runs the old code"
+            fail "rsync to $LIVE_DIR failed - the live site still runs the old code"
             echo "  By hand:  sudo rsync -a --delete --exclude '.git/' --exclude 'config.php' \\"
-            echo "        --exclude 'data/' --exclude 'bots/' '$ROOT_DIR/' '$DEPLOY_TARGET/'"
+            echo "        --exclude 'data/' --exclude 'bots/' '$SRC_DIR/' '$LIVE_DIR/'"
         fi
+        unset _rsync_ex
     else
         warn "rsync is not installed - deploying with cp (files removed upstream are kept)"
         for _i in bot.php index.php nowpayments_ipn.php .htaccess; do
-            [ -f "$ROOT_DIR/$_i" ] && cp -a "$ROOT_DIR/$_i" "$DEPLOY_TARGET/" 2>/dev/null
+            [ -f "$SRC_DIR/$_i" ] && cp -a "$SRC_DIR/$_i" "$LIVE_DIR/" 2>/dev/null
         done
         for _d in src tools templates; do
-            [ -d "$ROOT_DIR/$_d" ] && cp -a "$ROOT_DIR/$_d/." "$DEPLOY_TARGET/$_d/" 2>/dev/null
+            [ -d "$SRC_DIR/$_d" ] && cp -a "$SRC_DIR/$_d/." "$LIVE_DIR/$_d/" 2>/dev/null
         done
-        ok "code copied to $DEPLOY_TARGET (config.php, data/ and bots/ untouched)"
+        ok "code copied to $LIVE_DIR (config.php, data/ and bots/ untouched)"
         echo "  Tip: sudo apt-get install -y rsync"
     fi
-    # اثبات اینکه استقرار واقعاً نسخهٔ تازه را برده است
-    _v_src="$(grep -m1 'APP_VERSION' "$ROOT_DIR/src/Manager.php" 2>/dev/null | sed -n "s/.*'\([^']*\)'.*/\1/p")"
-    _v_dst="$(grep -m1 'APP_VERSION' "$DEPLOY_TARGET/src/Manager.php" 2>/dev/null | sed -n "s/.*'\([^']*\)'.*/\1/p")"
+
+    # ---------- ۳c-۳) اثبات: نسخهٔ روی دیسخِ زنده باید تازه باشد ----------
+    _v_src="$(grep -m1 'APP_VERSION' "$SRC_DIR/src/Manager.php" 2>/dev/null | sed -n "s/.*'\([^']*\)'.*/\1/p")"
+    _v_dst="$(grep -m1 'APP_VERSION' "$LIVE_DIR/src/Manager.php" 2>/dev/null | sed -n "s/.*'\([^']*\)'.*/\1/p")"
     if [ -n "$_v_dst" ] && [ "$_v_dst" = "$_v_src" ]; then
         ok "the deployed copy reports the same version ($_v_dst)"
     else
-        warn "the deployed copy reports '${_v_dst:-unknown}' but this repo is '${_v_src:-unknown}'"
+        fail "the deployed copy reports '${_v_dst:-unknown}' but the source is '${_v_src:-unknown}'"
+        echo "  The live site will NOT get the new code until this is fixed."
     fi
-    if [ -f "$BACKUP_DIR/config.php" ] && [ -f "$DEPLOY_TARGET/config.php" ]; then
-        if cmp -s "$BACKUP_DIR/config.php" "$DEPLOY_TARGET/config.php" 2>/dev/null; then
-            ok "the deployed config.php is the one that was already live ✓"
+    # کانفیگِ زنده نباید جایگزین شده باشد
+    if [ -f "$BACKUP_DIR/config.php" ] && [ -f "$LIVE_DIR/config.php" ]; then
+        if cmp -s "$BACKUP_DIR/config.php" "$LIVE_DIR/config.php" 2>/dev/null; then
+            ok "the live config.php is byte-for-byte the one that was already live ✓"
+        else
+            warn "$LIVE_DIR/config.php differs from the backup taken at the start of this run"
+            echo "  diff it if you did not edit it on purpose:"
+            echo "    diff <(php -r 'var_export(include \"$BACKUP_DIR/config.php\");') \\"
+            echo "         <(php -r 'var_export(include \"$LIVE_DIR/config.php\");')"
         fi
+    else
+        warn "$LIVE_DIR/config.php could not be compared with the backup"
     fi
+    unset _v_src _v_dst _i _d
 fi
-unset _doc _root_real _v_src _v_dst _i _d DEPLOY_TARGET DOCROOT_FOUND
-unset -f find_docroot
-
 # ===== ۴. بازسازی .htaccess گمشده (لیست از خود مخزن) =====
 step "Step 4: Checking .htaccess files..."
 HTACCESS_RESTORED=0
@@ -317,11 +745,35 @@ else
 fi
 
 # ===== ۴b. اجرای install.php (مایگریشن‌ها + پوشه‌ها؛ config را بازنویسی نمی‌کند) =====
+# در چیدمانِ دوتایی، مایگریشن باید داخل پوشهٔ زنده اجرا شود: دیتابیسِ
+# مدیریتی و لاگ‌ها آنجاست. اجرای آن در پوشهٔ سورس یعنی «مایگریشنِ یک
+# دیتابیسِ خالیِ دیگر» — یعنی همان [FAIL] های «migrations not recorded».
 step "Step 4b: Running installer bootstrap (migrations)..."
-if [ -f "$ROOT_DIR/tools/install.php" ]; then
-    php "$ROOT_DIR/tools/install.php" 2>/dev/null || warn "install.php had issues - check manually"
+if [ -f "$LIVE_DIR/tools/install.php" ]; then
+    php "$LIVE_DIR/tools/install.php" 2>/dev/null || warn "install.php had issues - check manually"
+    [ "$LIVE_DIR" = "$SRC_REAL" ] || ok "migrations ran inside the live directory ($LIVE_DIR)"
 else
-    warn "install.php not found"
+    warn "install.php not found in $LIVE_DIR"
+fi
+
+# ===== ۴b-۲. پرمیشن پوشه‌های نوشتنی داخل پوشهٔ زنده =====
+# www-data باید بتواند data/ و bots/ زنده را بنویسد، وگرنه نه لاگی می‌رود،
+# نه دیتابیس مدیریتی کار می‌کند و نه ربات تازه‌ای ساخته می‌شود.
+if [ -n "$WEB_USER" ] && [ "$(id -u)" -eq 0 ]; then
+    for _d in data bots; do
+        [ -d "$LIVE_DIR/$_d" ] || mkdir -p "$LIVE_DIR/$_d" 2>/dev/null
+        if [ -d "$LIVE_DIR/$_d" ]; then
+            if ! sudo -u "$WEB_USER" test -w "$LIVE_DIR/$_d" 2>/dev/null; then
+                chown "$WEB_USER:$WEB_USER" "$LIVE_DIR/$_d" 2>/dev/null \
+                    && ok "chowned $LIVE_DIR/$_d to $WEB_USER (bot can write logs + build bots)" \
+                    || warn "could not chown $LIVE_DIR/$_d to $WEB_USER - run it by hand:"
+                [ -w "$LIVE_DIR/$_d" ] || echo "        sudo chown -R $WEB_USER:$WEB_USER '$LIVE_DIR/$_d'"
+            else
+                ok "$LIVE_DIR/$_d is writable by $WEB_USER"
+            fi
+        fi
+    done
+    unset _d
 fi
 
 # ===== ۴c. گیت نسخه PHP (کد جدید ممکن است 8.2+ بخواهد) =====
