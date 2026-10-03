@@ -425,6 +425,25 @@ class Manager
         return is_array($spec) ? $spec + ['key' => $type] : null;
     }
 
+    /**
+     * مسیرهایی که موقع کپی قالب ⇒ ربات نباید بروند.
+     *
+     * تنها منبع حقیقت؛ هم نصب (buildBot) و هم بروزرسانی سورسِ ربات‌های
+     * موجود (SourceUpdate) از همین می‌خوانند. دو فهرست جدا یعنی «چیزی که
+     * موقع ساخت کپی نشد ولی موقع آپدیت شد» — دقیقاً همان چیزی که بعداً
+     * کسی نمی‌فهمد چرا فایلی در ربات هست و در قالب نیست.
+     */
+    public static function copyExcludes(string $type): array
+    {
+        $spec = self::templateSpec($type);
+        // متادیتای گیت هیچ قالبی نباید بیاورد (هم ریپو را سنگین می‌کند هم
+        // .gitignore خود قالب می‌تواند جلوی کپی فایل‌های لازم را بگیرد)
+        return array_merge(
+            (array)($spec['exclude'] ?? []),
+            ['.git/', '.gitignore', '.gitattributes', '.github/']
+        );
+    }
+
     /** دیتابیس این قالب mysql است یا sqlite */
     public static function templateDb(string $type): string
     {

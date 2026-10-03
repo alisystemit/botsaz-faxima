@@ -38,6 +38,7 @@ require_once __DIR__ . '/src/Manager.php';
 require_once __DIR__ . '/src/Logger.php';
 require_once __DIR__ . '/src/DbBackup.php';
 require_once __DIR__ . '/src/Nav.php';
+require_once __DIR__ . '/src/SourceUpdate.php';
 require_once __DIR__ . '/src/Payment/Payments.php';
 require_once __DIR__ . '/src/Payment/Gateways.php';
 require_once __DIR__ . '/src/Payment/Limits.php';
@@ -379,6 +380,10 @@ function mainMenu(array $u, array $supers, Store $store = null): string {
         $pendingText = $pendingCount > 0 ? " ({$pendingCount})" : "";
         $payPending = 0;
         if ($store) { try { $payPending = Payments::pendingAdminCount($store); } catch (Throwable $e) { $payPending = 0; } }
+        // شمارندهٔ ربات‌هایی که سورسشان از قالب عقب است. محاسبه‌اش کش دارد
+        // ولی روی منوی هر پیام اجرا می‌شود، پس خطایش نباید منو را از کار بیندازد.
+        $srcText = '';
+        if ($store) { try { $srcText = countOutdatedBots($store); } catch (Throwable $e) { $srcText = ''; } }
         $payText = $payPending > 0 ? " (🧾{$payPending})" : "";
         return BotApi::kb([
             [['text' => '🤖 ساخت ربات جدید'], ['text' => '📦 ربات‌های من']],
@@ -387,6 +392,7 @@ function mainMenu(array $u, array $supers, Store $store = null): string {
             [['text' => '💾 بکاپ دیتابیس'], ['text' => "📋 درخواست‌های جدید{$pendingText}"]],
             [['text' => "💳 پرداخت‌ها{$payText}"], ['text' => 'ℹ️ راهنما']],
             [['text' => '🔍 دیاگنوز'], ['text' => '📋 همه ربات‌ها']],
+            [['text' => '🔄 دریافت سورس بروز' . $srcText]],
             [['text' => '📝 متن‌ها'], ['text' => '💳 افزایش لیمیت']],
         ]);
     }
@@ -1100,7 +1106,7 @@ function handleBack(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
                     BotApi::send($TOKEN, $chatId, "🏠 منوی اصلی", ['reply_markup' => mainMenu($store->user($uid), $SUPERS, $store)]);
                     return;
                 }
-                BotApi::send($TOKEN, $chatId, botPanelText($cfg, $bot), ['reply_markup' => Nav::botPanelKb($bot)]);
+                BotApi::send($TOKEN, $chatId, botPanelText($cfg, $bot), ['reply_markup' => Nav::botPanelKb($bot, isAdmin($user, $SUPERS))]);
                 return;
             }
             case 'menu':
@@ -1252,6 +1258,7 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
         case '/stats':  $text = $admin ? '📊 آمار' : 'ℹ️ راهنما'; break;
         case '/cron':   $text = $admin ? '⏰ کرون' : 'ℹ️ راهنما'; break;
         case '/diagnose': $text = $admin ? '🔍 دیاگنوز' : 'ℹ️ راهنما'; break;
+        case '/source': $text = '🔄 دریافت سورس بروز'; break;
         case '/texts':    $text = $admin ? '📝 متن‌ها' : 'ℹ️ راهنما'; break;
     }
 
@@ -1264,6 +1271,13 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
     // دکمه «💳 پرداخت‌ها» شمارنده پویا دارد: «💳 پرداخت‌ها (🧾N)» — فقط ادمین
     if ($admin && str_starts_with($text, '💳 پرداخت‌ها')) {
         showPaymentsAdmin($store, $TOKEN, $chatId);
+        return;
+    }
+
+    // دکمهٔ «🔄 دریافت سورس بروز» شمارندهٔ پویا دارد («… (2)») ⇒ با starts_with
+    if (str_starts_with($text, '🔄 دریافت سورس بروز')) {
+        if (!$admin) { BotApi::send($TOKEN, $chatId, "⛔️ فقط ادمین."); return; }
+        showSourcePanel($cfg, $store, $TOKEN, $chatId);
         return;
     }
 
@@ -2061,13 +2075,12 @@ function buildBot(array $cfg, Store $store, string $TOKEN, int $owner, string $t
 
     try {
         // ===== ۱) کپی سورس قالب =====
-        // exclude از رجیستری می‌آید؛ نکتهٔ مهم اینکه پوشهٔ کاربری/داده هم نباید کپی شود
-        // (یک SQLite خالی که بعداً فایل واقعی را بازنویسی می‌کند، یا یک .sqlite ناقص).
-        // هیچ قالبی نباید متادیتای گیت را با خود بیاورد.
-        $exclude = array_merge(
-            (array)($spec['exclude'] ?? []),
-            ['.git/', '.gitignore', '.gitattributes']
-        );
+        // exclude از رجیستری می‌آید (Manager::copyExcludes — همان فهرستی که
+        // SourceUpdate هم برای بروزرسانی سورسِ ربات‌های موجود می‌خواند؛ دو
+        // فهرست جدا یعنی «چیزی که موقع ساخت کپی نشد ولی موقع آپدیت شد»).
+        // نکتهٔ مهم اینکه پوشهٔ کاربری/داده هم نباید کپی شود (یک SQLite خالی که
+        // بعداً فایل واقعی را بازنویسی می‌کند، یا یک .sqlite ناقص).
+        $exclude = Manager::copyExcludes($type);
         Manager::copyDir($tplDir, $botDir, $exclude);
 
         // ===== ۲) دیتابیس =====
@@ -2132,6 +2145,13 @@ function buildBot(array $cfg, Store $store, string $TOKEN, int $owner, string $t
         // اگر exclude را اینجا هم می‌دادیم، مثلاً data/logs/ پاسارگاد که قالب خودش
         // لاگ می‌نویسد، بعد از کپی حذف می‌شد؛ tools/dryrun.php دقیقاً همین را گرفت.
         Manager::cleanupExtraFiles($botDir, (array)($spec['cleanup'] ?? []));
+
+        // ===== ۵ب) ثبت مانیفست سورس =====
+        // «چه چیزی از قالب کپی شد» ثبت می‌شود تا دکمهٔ «🔄 دریافت سورس بروز»
+        // بفهمد کدام فایل‌ها را خودش آورده (و کدام را ادمین دستی اضافه کرده)،
+        // و فایل‌های حذف‌شده در نسخهٔ تازه را درست گزارش کند.
+        try { SourceUpdate::saveManifest($type, $slug); }
+        catch (Throwable $e) { Logger::getInstance()->warning('source', "manifest for {$slug}: " . $e->getMessage()); }
 
         // ===== ۶) وبهوک =====
         $secret = Manager::webhookSecret($type, $plainToken, $staticSecret);
@@ -2370,7 +2390,7 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
         $id = (int)substr($data, 6);
         $bot = $store->botById($id);
         if (!$bot || ((int)$bot['owner_id'] !== $uid && !$admin)) { BotApi::send($TOKEN, $chatId, "⛔️ دسترسی نداری."); return; }
-        showBotPanel($cfg, $store, $TOKEN, $chatId, $msgId, $bot, $data);
+        showBotPanel($cfg, $store, $TOKEN, $chatId, $msgId, $bot, $data, $admin);
         return;
     }
 
@@ -2446,6 +2466,74 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
             BotApi::send($TOKEN, $chatId, $head . implode("\n", $chunk));
             if (count($chunks) > 1) usleep(80000);
         }
+        return;
+    }
+
+    // ===== 🔄 دریافت سورس بروز (فقط ادمین) =====
+    // ترتیب: همهٔ مسیرها اول «تأیید» می‌خواهند (src:ask / src:allask) و بعد
+    // اجرا (src:go / src:goall). اجرا بدون تأیید عمداً هیچ راهی ندارد.
+    if (str_starts_with($data, 'src:')) {
+        if (!$admin) { BotApi::send($TOKEN, $chatId, "⛔️ فقط ادمین."); return; }
+        $action = substr($data, 4);
+
+        if ($action === 'refresh') {
+            SourceUpdate::clearCounter();
+            showSourcePanel($cfg, $store, $TOKEN, $chatId, $msgId);
+            return;
+        }
+
+        if ($action === 'allask') {
+            $targets = [];
+            foreach ($store->allBots() as $b) {
+                $pl = SourceUpdate::plan((string)($b['type'] ?? ''), (string)($b['folder'] ?? ''));
+                if ($pl['ok'] && !empty($pl['out_of_date'])) $targets[] = (string)$b['folder'];
+            }
+            if ($targets === []) {
+                BotApi::edit($TOKEN, $chatId, $msgId, "✅ هیچ رباتی سورسِ عقب‌افتاده ندارد.");
+                return;
+            }
+            $list = array_slice($targets, 0, 20);
+            $text = "🔄 <b>بروزرسانی سورس همهٔ ربات‌ها</b>\n\n"
+                . "تعداد: " . count($targets) . " ربات\n"
+                . "نام‌ها: <code>" . htmlspecialchars(implode('، ', $list), ENT_QUOTES, 'UTF-8') . "</code>"
+                . (count($targets) > count($list) ? "\n… و " . (count($targets) - count($list)) . " مورد دیگر" : '')
+                . "\n\n🗂 برای <b>هر</b> ربات اول بکاپ کامل گرفته و فرستاده می‌شود.\n"
+                . "🛡 <code>config.php</code> و دیتابیس‌ها دست‌نخورده می‌مانند.\n"
+                . "⏱ ممکن است چند دقیقه طول بکشد.\n\nشروع شود؟";
+            $kb = BotApi::ikb([
+                [['text' => '✅ بله، همه را بروزرسانی کن', 'callback_data' => 'src:goall']],
+                [['text' => '❌ انصراف', 'callback_data' => 'src:refresh']],
+            ]);
+            BotApi::edit($TOKEN, $chatId, $msgId, $text, ['reply_markup' => $kb]);
+            return;
+        }
+
+        if ($action === 'goall') {
+            runSourceUpdateAll($cfg, $store, $TOKEN, $SUPERS, $user, $chatId);
+            return;
+        }
+
+        $parts = explode(':', $action);
+        $sub = $parts[0] ?? '';
+        $botId = (int)($parts[1] ?? 0);
+        $bot = $botId > 0 ? $store->botById($botId) : null;
+        if (!$bot) {
+            Logger::getInstance()->warning('source', "source update for missing bot #{$botId} (uid {$uid})");
+            BotApi::send($TOKEN, $chatId, "⛔️ رباتی با شناسهٔ <code>{$botId}</code> پیدا نشد (احتمالاً حذف شده است).");
+            return;
+        }
+        if ($sub === 'ask') {
+            showSourceAsk($cfg, $store, $TOKEN, $chatId, $msgId, $bot, true);
+            return;
+        }
+        if ($sub === 'go') {
+            runSourceUpdate($cfg, $store, $TOKEN, $user, $chatId, $bot);
+            return;
+        }
+        // کال‌بک کهنه/ناشناخته ⇒ برگشت به فهرست، نه سکوت
+        Logger::getInstance()->warning('source', "unknown source callback '{$action}' (uid {$uid})");
+        BotApi::send($TOKEN, $chatId, "⚠️ این دکمه دیگر معتبر نیست — فهرست سورس تازه 👇",
+            ['reply_markup' => BotApi::ikb([[['text' => '🔄 فهرست سورس', 'callback_data' => 'src:refresh']]])]);
         return;
     }
 
@@ -3348,10 +3436,370 @@ function sendPendingRequests(Store $store, string $TOKEN, $chatId): void
     }
 }
 
-function showBotPanel(array $cfg, Store $store, string $TOKEN, $chatId, $msgId, array $bot, string $from = ''): void
+// ================= 🔄 دریافت سورس بروز (فقط ادمین) =================
+//
+// ربات‌های فرزند «کپی» قالب‌ها از لحظهٔ ساخت‌اند؛ وقتی خودِ قالب در
+// templates/<قالب> به‌روز می‌شود (git pull یا tools/update.sh)، کد آن‌ها
+// عقب می‌ماند. این بخش کدِ هر ربات را با نسخهٔ فعلی قالب هم‌تراز می‌کند:
+//
+//   • فقط فایل‌های سورس کپی می‌شوند؛ config.php و دیتابیس در PROTECTED
+//     ماژول SourceUpdate هستند و هیچ راهی برای بازنویسی‌شان نیست.
+//   • پیش از هر تغییر یک بکاپ کاملِ پوشهٔ ربات گرفته و برای ادمین فرستاده
+//     می‌شود (و چند نسخهٔ آخر روی سرور می‌ماند تا برگشت ممکن باشد).
+//   • اگر نسخهٔ تازهٔ قالب خطای نحوی داشته باشد، همان فایل به نسخهٔ قبلی
+//     برمی‌گردد (lint) و بقیهٔ بروزرسانی انجام می‌شود.
+
+/** شمارندهٔ منوی اصلی: «🔄 دریافت سورس بروز (۲)» — فقط ادمین */
+function countOutdatedBots(Store $store): string
+{
+    try {
+        $n = SourceUpdate::counter($store->allBots());
+    } catch (Throwable $e) {
+        return '';
+    }
+    return $n > 0 ? " ({$n})" : '';
+}
+
+/**
+ * پنل «دریافت سورس بروز» — وضعیت سورس همهٔ ربات‌ها + دکمهٔ بروزرسانی هرکدام.
+ * مشترک بین دکمهٔ منوی اصلی و کال‌بک‌ها.
+ */
+function showSourcePanel(array $cfg, Store $store, string $TOKEN, $chatId, int $msgId = 0): void
+{
+    $all = $store->allBots();
+    $head = "🔄 <b>دریافت سورس بروز</b>\n\n"
+        . "ربات‌های فرزند کپیِ قالب‌ها از لحظهٔ ساختشان‌اند. این پنل کدِ هر ربات را با نسخهٔ فعلیِ <code>templates/</code> هم‌تراز می‌کند.\n"
+        . "🛡 <code>config.php</code> و دیتابیس هر ربات <b>دست‌نخورده</b> می‌ماند؛ پیش از هر تغییر هم بکاپ کاملِ پوشهٔ ربات گرفته و همین‌جا فرستاده می‌شود.\n"
+        . "ℹ️ سورس تازه باید اول روی سرور بیاید: <code>bash tools/update.sh</code> یا <code>git pull</code>\n";
+
+    // پیام قبلی (اگر کال‌بک بود) کوتاه می‌شود تا دو پیام بزرگ پشت‌سرهم نداشته باشیم
+    if ($msgId > 0) {
+        try { BotApi::edit($TOKEN, $chatId, $msgId, "🔄 فهرست سورس 👇"); } catch (Throwable $e) { /* پیام کهنه */ }
+    }
+
+    if ($all === []) {
+        BotApi::send($TOKEN, $chatId, $head . "\nرباتی ثبت نشده است.", ['reply_markup' => sourcePanelKb([], 0)]);
+        return;
+    }
+
+    $rows = [];
+    $lines = [];
+    $chunk = [];
+    $len = 0;
+    $outdated = 0;
+    $broken = 0;
+    // پروژهٔ بزرگ‌تر از این ⇒ فهرست کوتاه می‌شود (تلگرام روی ۱۰۰ دکمه هم سقف دارد)
+    foreach (array_slice($all, 0, 40) as $b) {
+        $id = (int)($b['id'] ?? 0);
+        $folder = (string)($b['folder'] ?? '');
+        $st = SourceUpdate::statusLine($b);
+        if (!$st['ok']) $broken++;
+        $line = (string)$st['icon'] . ' <b>' . htmlspecialchars($folder, ENT_QUOTES, 'UTF-8') . '</b> — '
+            . htmlspecialchars((string)$st['text'], ENT_QUOTES, 'UTF-8');
+        if ($len + mb_strlen($line) > 1200 && $chunk !== []) {
+            $lines[] = implode("\n", $chunk);
+            $chunk = [];
+            $len = 0;
+        }
+        $chunk[] = $line;
+        $len += mb_strlen($line);
+        $pending = (int)$st['pending'];
+        if ($st['ok'] && $pending > 0) {
+            $outdated++;
+            $rows[] = [['text' => '🔄 ' . $folder . " ({$pending})", 'callback_data' => "src:ask:{$id}"]];
+        }
+    }
+    if ($chunk !== []) $lines[] = implode("\n", $chunk);
+
+    if ($outdated === 0) $tail = "\n\n✅ همهٔ ربات‌ها به‌روز هستند.";
+    else $tail = "\n\n🟡 سورس تازه دارد | 🟢 به‌روز | 🔴 قابل بررسی نیست";
+    if ($broken > 0) $tail .= "\n⚠️ {$broken} ربات قابل بررسی نبود (پوشه یا قالبش روی سرور نیست).";
+    if (count($all) > 40) $tail .= "\nℹ️ فقط ۴۰ ربات اول نمایش داده شد.";
+    $body = $head . implode("\n", $lines) . $tail;
+    $kb = sourcePanelKb($rows, $outdated);
+
+    // پیام بلند ⇒ چندتکه (سقف تلگرام ۴۰۹۶ کاراکتر است)
+    if (mb_strlen($body) > 3800) {
+        BotApi::send($TOKEN, $chatId, mb_substr($body, 0, 3800) . "\n… (ادامه در پیام بعد)", ['reply_markup' => $kb]);
+        $rest = trim(mb_substr($body, 3800));
+        if ($rest !== '') BotApi::send($TOKEN, $chatId, $rest, ['reply_markup' => $kb]);
+        return;
+    }
+    BotApi::send($TOKEN, $chatId, $body, ['reply_markup' => $kb]);
+}
+
+/** صفحهٔ تأیید بروزرسانی یک ربات — دکمه‌های بله/انصراف */
+function showSourceAsk(array $cfg, Store $store, string $TOKEN, $chatId, int $msgId, array $bot, bool $isAdmin)
+{
+    $uid = (int)$bot['id'];
+    $folder = (string)($bot['folder'] ?? '');
+    $label = htmlspecialchars($folder, ENT_QUOTES, 'UTF-8');
+    $type = (string)($bot['type'] ?? '');
+    $plan = SourceUpdate::plan($type, $folder);
+
+    $kb = BotApi::ikb([
+        [['text' => '↩️ بازگشت', 'callback_data' => $isAdmin ? "src:refresh" : "mybot:{$uid}"]],
+    ]);
+
+    if (!$plan['ok']) {
+        $text = "⚠️ <b>{$label}</b>\n\n" . htmlspecialchars((string)$plan['error'], ENT_QUOTES, 'UTF-8')
+            . "\n\nساخت دوبارهٔ این ربات یا بررسی پوشهٔ <code>bots/{$folder}</code> لازم است.";
+        if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, $text, ['reply_markup' => $kb]);
+        else BotApi::send($TOKEN, $chatId, $text, ['reply_markup' => $kb]);
+        return;
+    }
+
+    $c = (array)$plan['counts'];
+    if (!$plan['out_of_date']) {
+        $last = (string)(SourceUpdate::lastUpdate($folder)['at'] ?? '');
+        $text = "✅ <b>{$label}</b> از قبل به‌روز است.\n"
+            . "قالب: " . htmlspecialchars((string)$plan['label'], ENT_QUOTES, 'UTF-8')
+            . "\nفایل‌های مقایسه‌شده: {$c['tracked']}"
+            . ($last !== '' ? "\nآخرین بروزرسانی: {$last}" : "");
+        if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, $text, ['reply_markup' => $kb]);
+        else BotApi::send($TOKEN, $chatId, $text, ['reply_markup' => $kb]);
+        return;
+    }
+
+    $changed = (int)$c['changed'];
+    $new = (int)$c['new'];
+    $obsolete = (int)$c['obsolete'];
+    $text = "🔄 <b>بروزرسانی سورس: {$label}</b>\n\n"
+        . "قالب: " . htmlspecialchars((string)$plan['label'], ENT_QUOTES, 'UTF-8') . "\n"
+        . "🔁 {$changed} فایل تغییر کرده\n"
+        . "➕ {$new} فایل تازه\n"
+        . "🛡 <code>config.php</code> و دیتابیس دست‌نخورده می‌مانند\n"
+        . "🗂 پیش از تغییر، بکاپ کامل گرفته و همین‌جا فرستاده می‌شود\n";
+    if ($obsolete > 0) {
+        $text .= "⚠️ {$obsolete} فایل در نسخهٔ تازهٔ قالب نیست؛ خودکار پاک نمی‌شود (فقط گزارش).\n";
+    }
+    if (!empty($plan['config_new'])) {
+        $text .= "⚠️ <code>config.php</code> خودِ قالب هم عوض شده؛ برای حفظ توکن/دیتابیس ربات اعمال <b>نشد</b> — دستی بررسی کنید.\n";
+    }
+    $text .= "\nمطمئنی؟";
+
+    $kb = BotApi::ikb([
+        [['text' => '✅ بله، بروزرسانی کن', 'callback_data' => "src:go:{$uid}"]],
+        [['text' => '❌ انصراف', 'callback_data' => $isAdmin ? "src:refresh" : "mybot:{$uid}"]],
+    ]);
+    if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, $text, ['reply_markup' => $kb]);
+    else BotApi::send($TOKEN, $chatId, $text, ['reply_markup' => $kb]);
+}
+
+/** ارسال آرشیو بکاپ به ادمینی که دکمه را زده (اگر بزرگ‌تر از سقف تلگرام باشد، فقط مسیر سرور) */
+function sendSourceBackup(string $TOKEN, $chatId, array $backup, string $folder): void
+{
+    if (empty($backup['file']) || !is_file((string)$backup['file'])) return;
+    $size = (int)($backup['size'] ?? 0);
+    $path = (string)$backup['file'];
+    $caption = "🗂 <b>بکاپ کامل پیش از بروزرسانی سورس</b>\n"
+        . "ربات: " . htmlspecialchars($folder, ENT_QUOTES, 'UTF-8') . "\n"
+        . "زمان: " . date('Y-m-d H:i') . "\n"
+        . "فایل‌ها: " . (int)($backup['files'] ?? 0) . "\n"
+        . "حجم: " . SourceUpdate::fmtSize($size) . "\n\n"
+        . "⚠️ این آرشیو <b>config.php</b> (توکن و مشخصات دیتابیس) و دیتابیس ربات را دارد؛ محرمانه نگه دارید.\n"
+        . "بازگردانی: محتویات آرشیو را روی پوشهٔ <code>bots/" . htmlspecialchars($folder, ENT_QUOTES, 'UTF-8') . "</code> کپی کنید.";
+    if ($size > SourceUpdate::MAX_SEND_BYTES) {
+        BotApi::send($TOKEN, $chatId,
+            "⚠️ بکاپ " . SourceUpdate::fmtSize($size) . " است و در تلگرام جا نمی‌شود؛ روی سرور نگه داشته شد:\n<code>"
+            . htmlspecialchars($path, ENT_QUOTES, 'UTF-8') . "</code>");
+        return;
+    }
+    $r = BotApi::sendDocument($TOKEN, $chatId, $path, $caption);
+    if (empty($r['ok'])) {
+        BotApi::send($TOKEN, $chatId,
+            "⚠️ ارسال آرشیو ناموفق بود (" . htmlspecialchars((string)($r['description'] ?? '?'), ENT_QUOTES, 'UTF-8')
+            . "). نسخهٔ محلی روی سرور هست:\n<code>" . htmlspecialchars($path, ENT_QUOTES, 'UTF-8') . "</code>");
+    }
+}
+
+/** گزارش نتیجهٔ یک بروزرسانی */
+function sourceResultText(array $bot, array $res): string
+{
+    $folder = htmlspecialchars((string)($bot['folder'] ?? ''), ENT_QUOTES, 'UTF-8');
+    if (empty($res['ok'])) {
+        return "❌ <b>بروزرسانی سورس {$folder} انجام نشد</b>\n"
+            . htmlspecialchars((string)($res['error'] ?? 'خطای نامشخص'), ENT_QUOTES, 'UTF-8');
+    }
+    $applied = (int)($res['applied'] ?? 0);
+    if ($applied === 0) {
+        $t = "ℹ️ <b>{$folder}</b>: چیزی برای بروزرسانی نبود.";
+    } else {
+        $t = "✅ <b>سورس {$folder} بروزرسانی شد</b>\n"
+            . "🔁 {$applied} فایل کپی شد";
+        if ((int)($res['failed'] ?? 0) > 0) $t .= " | ⚠️ {$res['failed']} فایل نشد";
+        if ((int)($res['reverted'] ?? 0) > 0) $t .= " | ↩️ {$res['reverted']} فایل به دلیل خطای نحوی برگشت";
+        $t .= "\n🛡 config.php و دیتابیس دست‌نخورده\n"
+            . "⏱ " . SourceUpdate::fmtMs((int)($res['elapsed_ms'] ?? 0));
+    }
+    foreach ((array)($res['notes'] ?? []) as $n) {
+        $t .= "\nℹ️ " . htmlspecialchars((string)$n, ENT_QUOTES, 'UTF-8');
+    }
+    if (!empty($res['config_new'])) {
+        $t .= "\n⚠️ <code>config.php</code> خودِ قالب هم تغییر کرده و اعمال نشد (تا توکن و دیتابیس ربات سالم بماند).";
+    }
+    if ((int)($res['obsolete'] ?? 0) > 0) {
+        $t .= "\nℹ️ {$res['obsolete']} فایل در نسخهٔ تازهٔ قالب نیست؛ خودکار پاک نشد.";
+    }
+    return $t;
+}
+
+/**
+ * اجرای بروزرسانی سورس یک ربات + ارسال بکاپ + گزارش.
+ * بکاپ داخل خود SourceUpdate::apply گرفته می‌شود و شکستش یعنی هیچ تغییری
+ * انجام نشده؛ اینجا فقط فایلش را برای ادمین می‌فرستیم.
+ */
+function runSourceUpdate(array $cfg, Store $store, string $TOKEN, array $user, $chatId, array $bot): void
+{
+    $uid = (int)$user['user_id'];
+    $folder = (string)($bot['folder'] ?? '');
+    $type = (string)($bot['type'] ?? '');
+    $name = htmlspecialchars($folder, ENT_QUOTES, 'UTF-8');
+
+    @set_time_limit(0);
+    $waiting = BotApi::send($TOKEN, $chatId, "⏳ بکاپ کامل و بروزرسانی سورس <b>{$name}</b>…\n(لحظاتی طول می‌کشد)");
+    $msgId = 0;
+    if (!empty($waiting['result']['message_id'])) $msgId = (int)$waiting['result']['message_id'];
+
+    $plan = SourceUpdate::plan($type, $folder);
+    $res = SourceUpdate::apply($plan, $uid);
+
+    // بکاپ اول: حتی وقتی بروزرسانی شکست خورد، بکاپ ساخته شده و باید برسد
+    if (!empty($res['backup']['ok'])) sendSourceBackup($TOKEN, $chatId, (array)$res['backup'], $folder);
+
+    $text = sourceResultText($bot, $res);
+    $backKb = ['reply_markup' => BotApi::ikb([
+        [['text' => '🔄 فهرست سورس', 'callback_data' => 'src:refresh']],
+        [['text' => '↩️ پنل همین ربات', 'callback_data' => "mybot:{$bot['id']}"]],
+    ])];
+    if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, $text, $backKb);
+    else BotApi::send($TOKEN, $chatId, $text, $backKb);
+
+    // بعد از موفقیت: جدول‌های قالب دوباره نصب می‌شوند (مایگریشن/table.php)
+    if (!empty($res['ok']) && (int)($res['applied'] ?? 0) > 0) {
+        foreach (applyTemplateSchema($cfg, $store, $bot) as $note) {
+            BotApi::send($TOKEN, $chatId, "ℹ️ " . htmlspecialchars($note, ENT_QUOTES, 'UTF-8'));
+        }
+    }
+    SourceUpdate::clearCounter();
+}
+
+/**
+ * نصب/به‌روزرسانی جدول‌های قالبِ یک رباتِ موجود — بعد از کپی سورس تازه ممکن
+ * است جدول یا مایگریشن تازه‌ای در قالب باشد. همان کاری که نصب انجام می‌دهد.
+ * @return string[] یادداشت‌های قابل نمایش
+ */
+function applyTemplateSchema(array $cfg, Store $store, array $bot): array
+{
+    $notes = [];
+    $type = (string)($bot['type'] ?? '');
+    $folder = (string)($bot['folder'] ?? '');
+    $botDir = Manager::childBotsDir() . '/' . $folder;
+    $spec = Manager::templateSpec($type);
+    if ($spec === null || !is_dir($botDir)) return $notes;
+    $schema = Manager::templateSchema($type);
+    $tableFile = (string)($spec['table'] ?? '');
+    try {
+        if ($schema === 'migrate') {
+            $inst = Manager::installTemplateSchema($type, $botDir);
+            if (!empty($inst['note'])) $notes[] = (string)$inst['note'];
+        } elseif ($schema === 'http' && $tableFile !== '') {
+            $tok = childToken($bot);
+            $baseUrl = rtrim((string)($cfg['base_url'] ?? ''), '/') . '/bots/' . $folder;
+            $okTable = Manager::triggerTable($baseUrl . '/' . $tableFile, Manager::tableSecret($type, $tok));
+            $notes[] = $okTable
+                ? 'جدول‌های قالب دوباره بررسی/ساخته شد.'
+                : '⚠️ اجرای ' . $tableFile . ' ناموفق بود؛ اگر جدول تازه‌ای اضافه شده، دستی بازش کنید.';
+        }
+    } catch (Throwable $e) {
+        $notes[] = 'خطا در نصب جدول‌ها: ' . $e->getMessage();
+    }
+    return $notes;
+}
+
+/** کیبورد پنل سورس: «بروزرسانی همه» + یک دکمه برای هر ربات عقب‌افتاده */
+function sourcePanelKb(array $rows, int $outdated = -1): string
+{
+    $kb = [];
+    if ($outdated > 0) {
+        $kb[] = [['text' => "🔄 بروزرسانی همه ({$outdated})", 'callback_data' => 'src:allask']];
+    }
+    for ($i = 0; $i < count($rows); $i += 2) {
+        $row = [];
+        if (isset($rows[$i][0])) $row[] = $rows[$i][0];
+        if (isset($rows[$i + 1][0])) $row[] = $rows[$i + 1][0];
+        if ($row !== []) $kb[] = $row;
+    }
+    $kb[] = [
+        ['text' => '🔄 تازه‌سازی فهرست', 'callback_data' => 'src:refresh'],
+        ['text' => Nav::BACK, 'callback_data' => Nav::CB_BACK_MAIN],
+    ];
+    return BotApi::ikb($kb);
+}
+
+/** اجرای بروزرسانی همهٔ ربات‌های عقب‌افتاده (با سقف، تا وبهوک تلگرام قطع نشود) */
+function runSourceUpdateAll(array $cfg, Store $store, string $TOKEN, array $SUPERS, array $user, $chatId): void
+{
+    $uid = (int)$user['user_id'];
+    $bots = [];
+    foreach ($store->allBots() as $b) {
+        $plan = SourceUpdate::plan((string)($b['type'] ?? ''), (string)($b['folder'] ?? ''));
+        if ($plan['ok'] && !empty($plan['out_of_date'])) $bots[] = $b;
+    }
+    if ($bots === []) {
+        BotApi::send($TOKEN, $chatId, "✅ هیچ رباتی سورسِ عقب‌افتاده ندارد.");
+        return;
+    }
+    $total = count($bots);
+    $slice = array_slice($bots, 0, 15);
+    @set_time_limit(0);
+    BotApi::send($TOKEN, $chatId,
+        "⏳ بروزرسانی سورس {$total} ربات…\nبرای هرکدام اول بکاپ کامل گرفته و فرستاده می‌شود.\n"
+        . "این پیام ممکن است چند دقیقه طول بکشد.");
+
+    $lines = [];
+    foreach ($slice as $bot) {
+        $res = SourceUpdate::apply(SourceUpdate::plan((string)($bot['type'] ?? ''), (string)($bot['folder'] ?? '')), $uid);
+        if (!empty($res['backup']['ok'])) {
+            sendSourceBackup($TOKEN, $chatId, (array)$res['backup'], (string)($bot['folder'] ?? ''));
+        }
+        $folderSafe = htmlspecialchars((string)($bot['folder'] ?? ''), ENT_QUOTES, 'UTF-8');
+        if (!empty($res['ok']) && (int)($res['applied'] ?? 0) > 0) {
+            foreach (applyTemplateSchema($cfg, $store, $bot) as $note) {
+                $lines[] = "ℹ️ {$folderSafe}: " . htmlspecialchars((string)$note, ENT_QUOTES, 'UTF-8');
+            }
+        }
+        $one = sourceResultText($bot, $res);
+        $lines[] = mb_substr(str_replace("\n", ' ', $one), 0, 300);
+    }
+    if ($total > count($slice)) {
+        $lines[] = "ℹ️ {$total} ربات عقب‌افتاده بود؛ {$total} - " . count($slice) . " مورد دیگر در این نوبت انجام نشد (برای بقیه دوباره بزن).";
+    }
+    // گزارش خلاصه در چند پیام (سقف ۴۰۹۶ کاراکتر)
+    $chunks = [];
+    $cur = [];
+    $len = 0;
+    foreach ($lines as $l) {
+        if ($len + mb_strlen($l) > 3500 && $cur !== []) { $chunks[] = $cur; $cur = []; $len = 0; }
+        $cur[] = $l;
+        $len += mb_strlen($l);
+    }
+    if ($cur !== []) $chunks[] = $cur;
+    foreach ($chunks as $i => $chunk) {
+        $head = $i === 0 ? "🔄 <b>نتیجهٔ بروزرسانی سورس</b>\n" : "🔄 نتیجه (ادامه)\n";
+        BotApi::send($TOKEN, $chatId, $head . implode("\n", $chunk));
+        if (isset($chunks[$i + 1])) usleep(300000);
+    }
+    SourceUpdate::clearCounter();
+    BotApi::send($TOKEN, $chatId, "برای دیدن وضعیت تازه، پنل را دوباره باز کنید.", ['reply_markup' => BotApi::ikb([
+        [['text' => '🔄 فهرست سورس', 'callback_data' => 'src:refresh']],
+    ])]);
+}
+
+function showBotPanel(array $cfg, Store $store, string $TOKEN, $chatId, $msgId, array $bot, string $from = '', bool $isAdmin = false): void
 {
     $t = botPanelText($cfg, $bot);
-    $kb = Nav::botPanelKb($bot);
+    $kb = Nav::botPanelKb($bot, $isAdmin);
     if ($msgId > 0) {
         BotApi::edit($TOKEN, $chatId, $msgId, $t, ['reply_markup' => $kb]);
     } else {
@@ -3406,7 +3854,16 @@ function botAction(array $cfg, Store $store, string $TOKEN, array $SUPERS, array
                 }
             }
             $bot['status'] = $new;
-            showBotPanel($cfg, $store, $TOKEN, $chatId, $msgId, $bot);
+            showBotPanel($cfg, $store, $TOKEN, $chatId, $msgId, $bot, '', isAdmin($user, $SUPERS));
+            return;
+        }
+        case 'srcask': {
+            // فقط ادمین ربات‌ساز؛ صاحب ربات (کاربر عادی) این دکمه را نمی‌بیند
+            if (!isAdmin($user, $SUPERS)) {
+                BotApi::send($TOKEN, $chatId, "⛔️ فقط ادمین می‌تواند سورس ربات را بروزرسانی کند.");
+                return;
+            }
+            showSourceAsk($cfg, $store, $TOKEN, $chatId, $msgId, $bot, true);
             return;
         }
         case 'delask': {
@@ -3472,7 +3929,7 @@ function botAction(array $cfg, Store $store, string $TOKEN, array $SUPERS, array
             BotApi::send($TOKEN, $chatId,
                 "⚠️ عملیات ناشناخته: <code>" . htmlspecialchars($action, ENT_QUOTES, 'UTF-8') . "</code>\n"
                 . "احتمالاً کیبورد قدیمی است؛ منوی این ربات دوباره باز شد.",
-                ['reply_markup' => Nav::botPanelKb($bot)]);
+                ['reply_markup' => Nav::botPanelKb($bot, isAdmin($user, $SUPERS))]);
             return;
     }
 }

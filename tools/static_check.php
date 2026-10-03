@@ -15,6 +15,8 @@ $classes = [
     'BotApi'          => '/src/BotApi.php',
     'Logger'          => '/src/Logger.php',
     'DbBackup'        => '/src/DbBackup.php',
+    // SourceUpdate به Manager/Logger نیاز دارد ⇒ بعد از آن‌ها
+    'SourceUpdate'    => '/src/SourceUpdate.php',
     'Payments'        => '/src/Payment/Payments.php',
     'PaymentGateways' => '/src/Payment/Gateways.php',
     'PaymentLimits'   => '/src/Payment/Limits.php',

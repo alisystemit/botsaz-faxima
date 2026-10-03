@@ -99,16 +99,21 @@ class Nav
         return BotApi::ikb($botRows);
     }
 
-    /** کیبورد پنل یک ربات + بازگشت به لیست */
-    public static function botPanelKb(array $bot): string
+    /** کیبورد پنل یک ربات + بازگشت به لیست
+     *  $isAdmin ⇒ دکمهٔ «دریافت سورس بروز» هم اضافه می‌شود (فقط مدیر ربات‌ساز) */
+    public static function botPanelKb(array $bot, bool $isAdmin = false): string
     {
         $toggle = ($bot['status'] ?? 'active') === 'active' ? '🔴 غیرفعال' : '🟢 فعال‌سازی';
-        return BotApi::ikb([
+        $rows = [
             [['text' => '📊 آمار', 'callback_data' => "act:stats:{$bot['id']}"], ['text' => '📣 همگانی', 'callback_data' => "act:broadcast:{$bot['id']}"]],
             [['text' => '🔗 ست مجدد وبهوک', 'callback_data' => "act:webhook:{$bot['id']}"], ['text' => $toggle, 'callback_data' => "act:toggle:{$bot['id']}"]],
-            [['text' => '🗑 حذف ربات', 'callback_data' => "act:delask:{$bot['id']}"]],
-            [['text' => '↩️ بازگشت به لیست', 'callback_data' => self::CB_MY_BOTS]],
-        ]);
+        ];
+        if ($isAdmin) {
+            $rows[] = [['text' => '🔄 دریافت سورس بروز', 'callback_data' => "act:srcask:{$bot['id']}"]];
+        }
+        $rows[] = [['text' => '🗑 حذف ربات', 'callback_data' => "act:delask:{$bot['id']}"]];
+        $rows[] = [['text' => '↩️ بازگشت به لیست', 'callback_data' => self::CB_MY_BOTS]];
+        return BotApi::ikb($rows);
     }
 
     /** کیبورد پنل بکاپ + برگشت */

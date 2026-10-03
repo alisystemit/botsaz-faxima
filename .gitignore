@@ -10,6 +10,8 @@
 /data/db_backup.json
 /data/cron_state.json
 /data/backups/
+/data/manifests/
+/data/source_update.json
 /bots/*/states/
 /templates/*/states/
 /.env
