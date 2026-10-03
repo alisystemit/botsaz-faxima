@@ -77,7 +77,8 @@ print_help() {
     BOTSAZ_LIVE_DIR=/path   مسیرِ زنده را دستی تعیین می‌کند (تست یا نصب سفارشی)
 
   خروجی:
-    0 = موفق | 1 = خطا/هشدار مهم
+    0 = اجرا شد (ممکن است هشدار داشته باشد – پیام‌ها را ببین)
+    1 = خطا (fetch، استقرار، قفل همزمان، نبود گیت و …)
 HELP
 }
 
@@ -275,7 +276,7 @@ info "live (served) : $LIVE_DIR"
 if [ "$LIVE_DIR" = "$SRC_DIR" ]; then
   ok "Single-directory layout"
 else
-  warn "Split layout detected (live != source)"
+  ok "Split layout (source → live): $SRC_DIR → $LIVE_DIR"
   [ -f "$LIVE_DIR/config.php" ] || warn "No config.php in live dir – it will be bootstrapped from source"
 fi
 [ -n "$WEB_USER" ] && info "web user      : $WEB_USER" || warn "No web user detected"
@@ -304,7 +305,7 @@ git status --porcelain > "$BACKUP_DIR/local_git_status.txt" 2>/dev/null
 git diff > "$BACKUP_DIR/local_changes.patch" 2>/dev/null
 git diff --cached >> "$BACKUP_DIR/local_changes.patch" 2>/dev/null
 if [ -s "$BACKUP_DIR/local_changes.patch" ]; then
-  warn "Local git changes found – saved to $BACKUP_DIR/local_changes.patch"
+  info "Local git changes found – saved to $BACKUP_DIR/local_changes.patch"
 fi
 info "Backup dir: $BACKUP_DIR"
 
@@ -319,6 +320,7 @@ fi
 # ===== ۲. fetch و پاک‌سازی درخت git (جلوگیری از «Local tracked files modified») =====
 step "Step 2: Fetching latest code (clean git tree)"
 DO_RESET=0
+RESET_OCCURRED=0
 ROLLBACK_TARGET=""
 if [ "$ROLLBACK" -eq 1 ]; then
   # ===== حالت بازگشت: کد به آخرین نسخهٔ قبل از آپدیت برمی‌گردد =====
@@ -339,6 +341,7 @@ if [ "$ROLLBACK" -eq 1 ]; then
       warn "Local changes were backed up before rollback: $BACKUP_DIR/local_changes.patch"
     fi
     git reset --hard "$REC_PREV" >/dev/null 2>&1 || die "git reset --hard $REC_PREV failed"
+    RESET_OCCURRED=1
     ok "Source reset to $REC_PREV"
   fi
 else
@@ -371,8 +374,11 @@ if [ "$DO_RESET" -eq 1 ]; then
     git clean -fdn -e data -e bots > "$BACKUP_DIR/clean_plan.txt" 2>/dev/null
     if [ "$LOCAL_MOD" -gt 0 ]; then
       warn "$LOCAL_MOD tracked file(s) modified locally – resetting to origin/$CUR_BRANCH"
-      info "Local diff saved: $BACKUP_DIR/local_changes.patch (apply later with: git apply)"
+      info "Locally modified tracked files:"
+      git status --short --untracked-files=no 2>/dev/null | head -10 | sed 's/^/   /'
+      info "Their diff is saved: $BACKUP_DIR/local_changes.patch"
       git reset --hard "origin/$CUR_BRANCH" 2>/dev/null || die "git reset --hard failed"
+      RESET_OCCURRED=1
       ok "Source tree reset to clean origin/$CUR_BRANCH"
     else
       ok "Working tree clean"
@@ -696,41 +702,63 @@ fi
 step "Step 6: Configure web server vhost (point to live path)"
 if [ "$DRY_RUN" -eq 0 ] && [ "$(id -u)" -eq 0 ] && [ "$LIVE_DIR" != "$SRC_DIR" ]; then
   LIVE_ABS="$LIVE_DIR"
+  # حذف نقل‌قول‌ها تا مقایسه درست شود: DocumentRoot "/var/www/x"  ==  /var/www/x
+  unquote() {
+    local v="$1"
+    v="${v#\"}"; v="${v%\"}"
+    v="${v#\'}"; v="${v%\'}"
+    printf '%s' "$v"
+  }
+  trim() { printf '%s' "$1" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'; }
+  _seen=" "
   # Apache
   for c in /etc/apache2/sites-available/*.conf /etc/apache2/sites-enabled/*.conf; do
     [ -f "$c" ] || continue
+    # sites-enabled معمولاً symlink است → همان فایل را دو بار ویرایش نکن
+    _real="$(readlink -f "$c" 2>/dev/null || printf '%s' "$c")"
+    case "$_seen" in *" $_real "*) continue ;; esac
+    _seen="$_seen$_real "
     grep -qE "botsaz|faxima" "$c" 2>/dev/null || continue
     grep -q "DocumentRoot" "$c" 2>/dev/null || continue
     CURDR="$(sed -n 's/^[[:space:]]*DocumentRoot[[:space:]]\{1,\}\([^[:space:]#]*\).*/\1/p' "$c" | head -n1)"
+    CURDR="$(unquote "$CURDR")"
     # فقط به فایل‌هایی دست می‌زنیم که نام یا DocumentRoot شان واقعاً متعلق به همین پروژه است
     case "$(basename "$c")|$CURDR" in
       *botsaz*|*faxima*) : ;;
       *) info "Skipping $(basename "$c"): DocumentRoot '$CURDR' does not look like this project"; continue ;;
     esac
-    if [ -n "$CURDR" ] && [ "$CURDR" != "$LIVE_ABS" ]; then
+    if [ -z "$CURDR" ]; then
+      warn "No DocumentRoot parsed in $(basename "$c")"
+    elif [ "$CURDR" != "$LIVE_ABS" ]; then
       sed -i "s|^[[:space:]]*DocumentRoot[[:space:]]\{1,\}[^[:space:]#]*|	DocumentRoot $LIVE_ABS|" "$c" 2>/dev/null \
         && ok "Apache DocumentRoot updated in $(basename "$c"): $CURDR → $LIVE_ABS" \
         || warn "Could not update DocumentRoot in $c"
     else
-      [ "$CURDR" = "$LIVE_ABS" ] && ok "Apache DocumentRoot correct in $(basename "$c")"
+      ok "Apache DocumentRoot correct in $(basename "$c")"
     fi
   done
   # Nginx
   for c in /etc/nginx/sites-available/*.conf /etc/nginx/sites-enabled/* /etc/nginx/conf.d/*.conf; do
     [ -f "$c" ] || continue
+    _real="$(readlink -f "$c" 2>/dev/null || printf '%s' "$c")"
+    case "$_seen" in *" $_real "*) continue ;; esac
+    _seen="$_seen$_real "
     grep -qE "botsaz|faxima" "$c" 2>/dev/null || continue
     grep -qE "^[[:space:]]*root[[:space:]]" "$c" 2>/dev/null || continue
-    CURR="$(sed -n 's/^[[:space:]]*root[[:space:]]\{1,\}\([^;#]*\);.*/\1/p' "$c" | head -n1 | xargs)"
+    CURR="$(sed -n 's/^[[:space:]]*root[[:space:]]\{1,\}\([^;#]*\);.*/\1/p' "$c" | head -n1)"
+    CURR="$(unquote "$(trim "$CURR")")"
     case "$(basename "$c")|$CURR" in
       *botsaz*|*faxima*) : ;;
       *) info "Skipping $(basename "$c"): root '$CURR' does not look like this project"; continue ;;
     esac
-    if [ -n "$CURR" ] && [ "$CURR" != "$LIVE_ABS" ]; then
+    if [ -z "$CURR" ]; then
+      warn "No root parsed in $(basename "$c")"
+    elif [ "$CURR" != "$LIVE_ABS" ]; then
       sed -i "s|^[[:space:]]*root[[:space:]]\{1,\}[^;#]*;|	root $LIVE_ABS;|" "$c" 2>/dev/null \
         && ok "Nginx root updated in $(basename "$c"): $CURR → $LIVE_ABS" \
         || warn "Could not update root in $c"
     else
-      [ "$CURR" = "$LIVE_ABS" ] && ok "Nginx root correct in $(basename "$c")"
+      ok "Nginx root correct in $(basename "$c")"
     fi
   done
 else
@@ -746,10 +774,13 @@ elif [ -f "$LIVE_DIR/config.php" ] && have_php; then
   BASE="$("$PHP_BIN" -r '$c=@include $argv[1]; echo rtrim((string)($c["base_url"]??""),"/");' "$LIVE_DIR/config.php" 2>/dev/null)"
   if [ -n "$TOKEN" ] && [ -n "$BASE" ]; then
     if [ -f "$LIVE_DIR/tools/set_webhook.php" ]; then
-      if "$PHP_BIN" "$LIVE_DIR/tools/set_webhook.php" >/dev/null 2>&1; then
+      "$PHP_BIN" "$LIVE_DIR/tools/set_webhook.php" > "$BACKUP_DIR/set_webhook.log" 2>&1
+      _whc=$?
+      if [ "$_whc" -eq 0 ]; then
         ok "Webhook checked/updated via tools/set_webhook.php"
       else
-        warn "tools/set_webhook.php returned non-zero (check its output above/logs)"
+        warn "tools/set_webhook.php failed (exit $_whc):"
+        tail -8 "$BACKUP_DIR/set_webhook.log" 2>/dev/null | sed 's/^/   /'
         info "Run manually: $PHP_BIN $LIVE_DIR/tools/set_webhook.php"
       fi
     elif command -v curl >/dev/null 2>&1; then
@@ -765,7 +796,19 @@ elif [ -f "$LIVE_DIR/config.php" ] && have_php; then
       warn "Neither tools/set_webhook.php nor curl available – webhook not verified"
     fi
   else
-    warn "main_token/base_url missing or placeholder in live config – skipping webhook"
+    # دقیقاً بگو کدام مقدار خالی است تا سریع حل شود
+    if [ -z "$TOKEN" ]; then
+      warn "Webhook SKIPPED: main_token is empty or still the placeholder in $LIVE_DIR/config.php"
+      info "Fix: put the real @BotFather token in 'main_token' then run: $PHP_BIN $LIVE_DIR/tools/set_webhook.php"
+    else
+      info "main_token: OK ($(printf '%s' "$TOKEN" | wc -c) chars, hidden)"
+    fi
+    if [ -z "$BASE" ]; then
+      warn "Webhook SKIPPED: base_url is empty in $LIVE_DIR/config.php"
+      info "Fix: set 'base_url' to your public https URL (e.g. https://domain.com/botsaz-faxima)"
+    else
+      info "base_url: $BASE"
+    fi
   fi
 else
   info "Skipping webhook (no config.php or no PHP CLI)"
@@ -805,12 +848,15 @@ fi
 
 # healthcheck بعد از استقرار (فقط هشدار می‌دهد، خطا نیست)
 if [ "$DRY_RUN" -eq 0 ] && [ -f "$LIVE_DIR/tools/healthcheck.php" ] && have_php; then
-  "$PHP_BIN" "$LIVE_DIR/tools/healthcheck.php" >/dev/null 2>&1
+  "$PHP_BIN" "$LIVE_DIR/tools/healthcheck.php" > "$BACKUP_DIR/healthcheck.log" 2>&1
   _hc=$?
   if [ "$_hc" -eq 0 ]; then
     ok "Healthcheck: healthy (no hard errors)"
   else
-    warn "Healthcheck reported errors (exit $_hc) – run: $PHP_BIN $LIVE_DIR/tools/healthcheck.php"
+    warn "Healthcheck reported errors (exit $_hc):"
+    grep -E "✗|❌|ERRORS \(" "$BACKUP_DIR/healthcheck.log" 2>/dev/null | head -6 | sed 's/^/   /'
+    info "full output: $BACKUP_DIR/healthcheck.log"
+    info "re-run: $PHP_BIN $LIVE_DIR/tools/healthcheck.php"
   fi
 fi
 
@@ -850,15 +896,43 @@ elif [ "$(id -u)" -ne 0 ]; then
 else
   step "Step 9: Restarting web/services (safe)"
   _restarted=0
-  for s in apache2 httpd nginx php8.5-fpm php8.4-fpm php8.3-fpm php8.2-fpm php-fpm; do
-    if command -v systemctl >/dev/null 2>&1; then
-      systemctl list-units --type=service --full --all --no-pager 2>/dev/null | grep -q "^${s}.service" || continue
-    elif ! command -v service >/dev/null 2>&1; then
-      continue
+  _targets=""
+  if command -v systemctl >/dev/null 2>&1; then
+    # واحد‌های واقعاً در حال اجرا را پیدا کن (با --plain/--no-legend تا کاراکتر درختی grep را خراب نکند)
+    _targets="$(systemctl list-units --type=service --state=running --no-pager --plain --no-legend -l 2>/dev/null \
+                | awk 'NF {print $1}' \
+                | grep -E '^(apache2|httpd|nginx|php[0-9.]*-fpm|php-fpm|lighttpd|caddy|openlitespeed|litespeed)\.service$' \
+                | tr '\n' ' ')"
+    if [ -z "$_targets" ]; then
+      _web_units="$(systemctl list-units --type=service --state=running --no-pager --plain --no-legend -l 2>/dev/null \
+                    | awk 'NF {print $1}' \
+                    | grep -iE 'apache|httpd|nginx|php|caddy|litespeed|web' | tr '\n' ' ')"
+      if [ -n "$_web_units" ]; then
+        info "Known web units not matched, but these are running:"
+        for _u in $_web_units; do info "   $_u"; done
+        _targets="$_web_units"
+      else
+        info "No web-related running unit found under systemd."
+        info "systemd state: $(systemctl is-system-running 2>&1 | head -1)"
+        info "First running units:"
+        systemctl list-units --type=service --state=running --no-pager --plain --no-legend -l 2>/dev/null | head -8 | sed 's/^/   /'
+      fi
     fi
-    restart_service "$s" && _restarted=$((_restarted + 1)) || warn "Could not restart $s"
+  else
+    for s in apache2 httpd nginx php8.5-fpm php8.4-fpm php8.3-fpm php8.2-fpm php-fpm; do
+      [ -x "/etc/init.d/$s" ] && _targets="$_targets $s "
+    done
+    [ -z "$_targets" ] && info "No systemctl and no matching /etc/init.d scripts"
+  fi
+  for s in $_targets; do
+    s="${s%.service}"
+    if restart_service "$s"; then
+      _restarted=$((_restarted + 1))
+    else
+      warn "Could not restart $s"
+    fi
   done
-  [ "$_restarted" -eq 0 ] && info "No managed web service found/restarted"
+  [ "$_restarted" -eq 0 ] && info "No web service was restarted"
 fi
 
 # ===== ۱۰. پاک‌سازی فایل‌های حساس در /root برای امنیت بیشتر =====
@@ -911,6 +985,9 @@ info "Live    : $LIVE_DIR"
 info "Branch  : $CUR_BRANCH ($NEW_COMMIT)"
 [ "$DRY_RUN" -eq 0 ] && info "Configs preserved: YES (only git-tracked files were touched)"
 [ -n "$BACKUP_DIR" ] && [ -d "$BACKUP_DIR" ] && info "Backups : $BACKUP_DIR"
+if [ "$RESET_OCCURRED" -eq 1 ] && [ -s "$BACKUP_DIR/local_changes.patch" ]; then
+  warn "Local tracked edits were reset by this update – review their diff: $BACKUP_DIR/local_changes.patch"
+fi
 if [ "$CUR_COMMIT" != "$NEW_COMMIT" ] && [ "$DRY_RUN" -eq 0 ] && [ "$ROLLBACK" -eq 0 ]; then
   info "Changes:"
   git --no-pager diff --stat "$CUR_COMMIT" "$NEW_COMMIT" 2>/dev/null | tail -5 | sed 's/^/   /'
