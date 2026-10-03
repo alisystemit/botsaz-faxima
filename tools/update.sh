@@ -1,47 +1,104 @@
-bash
 #!/usr/bin/env bash
 # ===== بروزرسانی ربات‌ساز از گیت‌هاب (حالت سرور /root → /var/www) =====
-# استفاده: bash tools/update.sh [--dry-run] [--no-restart] [--force] [--web]
+# استفاده: bash tools/update.sh [گزینه‌ها]      (راهنما: bash tools/update.sh --help)
 #
 # فلسفه طراحی (مطابق درخواست کاربر):
 #   ۱. بعد از دانلود نسخه جدید در /root، مشخصات کامل از /var/www/botsaz-faxima گرفته می‌شود
 #   ۲. تنظیمات زنده (config.php + bots/*/config.php) داخل فایل‌های سورس (/root/...) جایگذاری می‌شوند
 #   ۳. سورس تمیز (/root) → کد به /var/www/botsaz-faxima کپی می‌شود (بدون دست‌زدن به config/data/bots زنده)
-#   ۴. مشخصات دیتابیس بررسی/جایگذاری می‌شود (اگر در کد موجود هست استفاده می‌شود، در غیر این صورت از کاربر گرفته می‌شود)
-#   ۵. وی‌هوست (Apache/Nginx) بررسی و اصلاح می‌شود تا به مسیر زنده اشاره کند
-#   ۶. وب‌هوک بروزرسانی/تأیید می‌شود
-#   ۷. بررسی نیازهای توسعه (TODO/FIXME) + اجرای مایگریشن‌ها داخل پوشه زنده
-#   ۸. در انتها فایل‌های حساس داخل /root برای امنیت بیشتر پاک می‌شوند
+#   ۴. مشخصات دیتابیس بررسی/جایگذاری می‌شود (اگر در کد موجود است استفاده می‌شود، وگرنه از کاربر گرفته می‌شود)
+#   ۵. کلیدهای تنظیماتِ تازه‌ی آپدیت (که هنوز در config زنده نیستند) با مقدار پیش‌فرض اضافه می‌شوند
+#   ۶. وی‌هوست (Apache/Nginx) بررسی و اصلاح می‌شود تا به مسیر زنده اشاره کند
+#   ۷. وب‌هوک بروزرسانی/تأیید می‌شود
+#   ۸. بررسی نیازهای توسعه (TODO/FIXME) + اجرای مایگریشن‌ها + healthcheck داخل پوشه زنده
+#   ۹. در انتها فایل‌های حساس داخل /root برای امنیت بیشتر پاک می‌شوند
+#
+# ===== روش استقرار (نسخهٔ جدید – امن‌تر از rsync --delete) =====
+#   فقط فایل‌هایی که در گیت «ردیابی» می‌شوند به زنده کپی می‌شوند؛ یعنی هیچ‌وقت:
+#     config.php زنده، data/ (دیتابیس/لاگ)، bots/، کش و لاگِ قالب‌ها، users.json و .env پاک نمی‌شوند.
+#   فایل‌هایی که در آپدیت جدید از گیت «حذف» شده‌اند، به‌صورت هدفمند از زنده هم حذف می‌شوند.
 #
 # آپشن‌ها:
-#   --dry-run     فقط پیش‌نمایش می‌دهد، تغییر نمی‌دهد
-#   --no-restart  سرویس‌ها ری‌استارت نمی‌شوند
-#   --force       برخی پیش‌بینی‌ها رد می‌شوند
-#   --web         مناسب اجرای از داخل ربات (ری‌استارت/ریلود محدود)
+#   --dry-run, -n   فقط پیش‌نمایش؛ هیچ تغییری در فایل‌ها/گیت نمی‌دهد
+#   --no-restart    سرویس‌ها ری‌استارت نمی‌شوند
+#   --force, -f     ادامه حتی اگر دسترسی به گیت‌هاب قطع باشد
+#   --web           مناسب اجرای از داخل ربات (ری‌استارت/ریلود محدود)
+#   --rollback      بازگشت کد به وضعیتِ قبل از آخرین بروزرسانی موفق
+#   --help, -h      نمایش همین راهنما
+#
+# ===== باگ‌های رفع‌شده نسبت به نسخهٔ قبل =====
+#   1. خط اولِ زائدِ «bash» قبل از #! → اسکریپت اصلاً اجرا نمی‌شد (شلِ تعاملیِ تو در تو باز می‌کرد)
+#   2. --dry-run قبلاً reset --hard + git clean انجام می‌داد (مخرب!) → الان هیچ تغییری نمی‌دهد
+#   3. تغییرات git محلی قبل از reset پشتیبان‌گیری نمی‌شد → الان در BACKUP_DIR ذخیره می‌شود
+#   4. rsync --delete با excludeهای ناقص، داده‌های زنده را پاک می‌کرد (vendorِ قالب‌ها، کش،
+#      users.json، .env، لاگ‌ها) → روش «کپی فقط فایل‌های ردیابی‌شده» جایگزین شد
+#   5. Step 10 فایل‌های ردیابی‌شده (.htaccess/.gitignore/config.example.php) را از سورس پاک می‌کرد
+#      و اگر سورس == زنده بود، config.php «زنده» را هم حذف می‌کرد (از بین رفتن تنظیمات!) → گارددار شد
+#   6. تنظیمات DB فقط در سورس نوشته می‌شد و rsync آن را به زنده نمی‌برد → الان به هر دو نوشته می‌شود
+#   7. پرسش DB با read وقتی stdin بسته است (cron/ربات/وب) → هنگ می‌کرد → فقط وقتی TTY باشد
+#   8. ادغام config با eval روی var_exportِ تک‌خطی‌شده → رشته‌های چندخطی داخل آرایه خراب می‌شدند
+#      → الان یک فراخوانی PHP ساده بدون eval و بدون دست‌زدن به متن مقادیر
+#   9. «php» در بعضی جاها و «$PHP_BIN» در جاهای دیگر → یکدست شد + خواندن php_bin از config
+#  10. خروجی همیشه exit 0 بود (خطاها پنهان می‌شد) → شمارش خطا/هشدار و کد خروجی درست
+#  11. قفل فقط با flock (اگر نبود هیچ قفلی نبود) → قفل جایگزین با mkdir + پاک‌سازی با trap
+#  12. نبودِ: راهنما (--help)، بازگشت نسخه (--rollback)، ثبت وضعیت، healthcheck بعد از استقرار
+#  13. تشخیص live از روی هر وی‌هوستی (حتی وی‌هوستِ کهنه‌ای که config ندارد) → اولویت با نصبِ واقعی
+#  14. کلیدهای تنظیماتِ جدیدِ آپدیت هرگز وارد config زنده نمی‌شدند → اکنون اضافه می‌شوند (بدون overwrite)
 
 set +e
 
+# ===== رنگ‌ها و پیام‌ها =====
+R='\033[0;31m'; G='\033[0;32m'; Y='\033[1;33m'; B='\033[1;34m'; NC='\033[0m'
+ERRORS=0
+WARNINGS=0
+ok()   { echo -e "${G}✔${NC} $1"; }
+warn() { echo -e "${Y}⚠️${NC} $1"; WARNINGS=$((WARNINGS + 1)); }
+fail() { echo -e "${R}✘${NC} $1"; ERRORS=$((ERRORS + 1)); }
+step() { echo -e "\n${B}━━━ $1 ━━━${NC}"; }
+info() { echo -e "   $1"; }
+die()  { fail "$1"; exit "${2:-1}"; }
+
+print_help() {
+  cat <<'HELP'
+  ===== بروزرسانی ربات‌ساز (tools/update.sh) =====
+
+  استفاده:
+    bash tools/update.sh [--dry-run] [--no-restart] [--force] [--web] [--rollback]
+
+  گزینه‌ها:
+    --dry-run, -n   فقط پیش‌نمایش؛ هیچ تغییری در فایل‌ها یا گیت نمی‌دهد
+    --no-restart    سرویس‌ها (apache/nginx/php-fpm) ری‌استارت نمی‌شوند
+    --force, -f     ادامهٔ کار حتی اگر دسترسی به گیت‌هاب قطع باشد
+    --web           حالت اجرا از داخل ربات (ری‌استارت محدود)
+    --rollback      بازگشت کد به وضعیتِ قبل از آخرین بروزرسانی موفق
+    --help, -h      نمایش همین راهنما
+
+  متغیر محیطی:
+    BOTSAZ_LIVE_DIR=/path   مسیرِ زنده را دستی تعیین می‌کند (تست یا نصب سفارشی)
+
+  خروجی:
+    0 = موفق | 1 = خطا/هشدار مهم
+HELP
+}
+
+# ===== آپشن‌ها =====
 DRY_RUN=0
 NO_RESTART=0
 FORCE=0
 WEB=0
-
-for arg in "$@"; do
-  case "$arg" in
-    --dry-run)   DRY_RUN=1 ;;
+ROLLBACK=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run|-n) DRY_RUN=1 ;;
     --no-restart) NO_RESTART=1 ;;
-    --force)     FORCE=1 ;;
-    --web)       WEB=1; NO_RESTART=1 ;;
+    --force|-f)   FORCE=1 ;;
+    --web)        WEB=1; NO_RESTART=1 ;;
+    --rollback)   ROLLBACK=1 ;;
+    --help|-h)    print_help; exit 0 ;;
+    *)            warn "Unknown option ignored: $1  (run with --help)" ;;
   esac
+  shift
 done
-
-# ===== رنگ‌ها =====
-R='\033[0;31m'; G='\033[0;32m'; Y='\033[1;33m'; B='\033[1;34m'; NC='\033[0m'
-ok()  { echo -e "${G}✔${NC} $1"; }
-fail(){ echo -e "${R}✘${NC} $1"; }
-warn(){ echo -e "${Y}⚠️${NC} $1"; }
-step(){ echo -e "\n${B}━━━ $1 ━━━${NC}"; }
-info(){ echo -e "   $1"; }
 
 # ===== ROOT_DIR (سورس git) =====
 if [ -z "${BASH_SOURCE[0]:-}" ] || [ ! -f "${BASH_SOURCE[0]}" ]; then
@@ -50,12 +107,45 @@ if [ -z "${BASH_SOURCE[0]:-}" ] || [ ! -f "${BASH_SOURCE[0]}" ]; then
 else
   ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fi
-cd "$ROOT_DIR" || exit 1
+cd "$ROOT_DIR" || die "Cannot cd to $ROOT_DIR"
+
+command -v git >/dev/null 2>&1 || die "git not found in PATH"
 
 # Git safe.directory
 export GIT_CONFIG_COUNT=1
 export GIT_CONFIG_KEY_0="safe.directory"
 export GIT_CONFIG_VALUE_0="$ROOT_DIR"
+
+# ===== پیدا کردن PHP (CLI) =====
+find_php() {
+  local c p
+  for c in php php8.5 php8.4 php8.3 php8.2 php8.1 /usr/bin/php /usr/local/bin/php; do
+    p="$(command -v "$c" 2>/dev/null)" || p=""
+    if [ -n "$p" ] && [ -x "$p" ]; then printf '%s\n' "$p"; return 0; fi
+    if [ -x "$c" ]; then printf '%s\n' "$c"; return 0; fi
+  done
+  return 1
+}
+PHP_BIN="$(find_php 2>/dev/null || true)"
+if [ -z "$PHP_BIN" ]; then
+  # php_bin داخل config ممکن است مسیرِ کامل باشد (مثلاً ویندوز/لاراگون)
+  # فقط خطوطِ فعال (بدون // یا #) خوانده می‌شوند تا مثالِ داخلِ کامنت انتخاب نشود
+  for _cfg in "$ROOT_DIR/config.php" "/var/www/botsaz-faxima/config.php"; do
+    [ -f "$_cfg" ] || continue
+    _p="$(grep -E "^[[:space:]]*['\"]php_bin['\"][[:space:]]*=>" "$_cfg" 2>/dev/null | head -1 \
+          | sed -n "s/.*=>[[:space:]]*['\"]\([^'\"]*\)['\"].*/\1/p")"
+    [ -n "$_p" ] || continue
+    if command -v "$_p" >/dev/null 2>&1 || [ -x "$_p" ]; then
+      PHP_BIN="$(command -v "$_p" 2>/dev/null || printf '%s' "$_p")"
+      break
+    fi
+  done
+fi
+have_php() { [ -n "${PHP_BIN:-}" ] && [ -x "$PHP_BIN" ]; }
+if ! have_php; then
+  PHP_BIN=""
+  warn "PHP CLI not found – config merge / installer / healthcheck will be skipped"
+fi
 
 # ===== تشخیص LIVE_DIR (مسیر زنده وب‌سرور) =====
 detect_web_user() {
@@ -64,84 +154,138 @@ detect_web_user() {
   done
   return 1
 }
-docroot_of() {
+
+# همهٔ DocumentRoot/root هایی که به این پروژه تعلق دارند
+candidate_docroots() {
   local c d
-  # Apache
-  for c in /etc/apache2/sites-available/botsaz.conf /etc/apache2/sites-enabled/botsaz.conf /etc/apache2/sites-available/*.conf /etc/apache2/sites-enabled/*.conf; do
+  for c in /etc/apache2/sites-available/*.conf /etc/apache2/sites-enabled/*.conf \
+           /etc/nginx/sites-available/*.conf /etc/nginx/sites-enabled/* /etc/nginx/conf.d/*.conf; do
     [ -f "$c" ] || continue
-    grep -qE "botsaz|faxima|$ROOT_DIR|/var/www/botsaz" "$c" 2>/dev/null || continue
+    grep -qE "botsaz|faxima|/var/www/botsaz" "$c" 2>/dev/null || continue
     d="$(sed -n 's/^[[:space:]]*DocumentRoot[[:space:]]\{1,\}\([^[:space:]#]*\).*/\1/p' "$c" 2>/dev/null | head -n1)"
-    [ -n "$d" ] && { printf '%s' "$d"; return 0; }
+    [ -z "$d" ] && d="$(sed -n 's/^[[:space:]]*root[[:space:]]\{1,\}\([^;#]*\);.*/\1/p' "$c" 2>/dev/null | head -n1)"
+    [ -n "$d" ] && printf '%s\n' "$d"
   done
-  # Nginx
-  for c in /etc/nginx/sites-available/botsaz.conf /etc/nginx/sites-enabled/botsaz.conf /etc/nginx/sites-enabled/* /etc/nginx/conf.d/*.conf; do
-    [ -f "$c" ] || continue
-    grep -qE "botsaz|faxima|$ROOT_DIR|/var/www/botsaz" "$c" 2>/dev/null || continue
-    d="$(sed -n 's/^[[:space:]]*root[[:space:]]\{1,\}\([^;#]*\);.*/\1/p' "$c" 2>/dev/null | head -n1)"
-    [ -n "$d" ] && { printf '%s' "$d"; return 0; }
-  done
+  printf '%s\n' "/var/www/botsaz-faxima"
+}
+
+# اولویت با مسیری است که bot.php + config.php دارد (نصبِ واقعی)، نه صرفاً اولین وی‌هوست
+pick_live_dir() {
+  local cand best=""
+  while IFS= read -r cand; do
+    [ -n "$cand" ] && [ -d "$cand" ] || continue
+    cand="$(cd "$cand" 2>/dev/null && pwd -P)" || continue
+    [ -f "$cand/bot.php" ] || continue
+    if [ -f "$cand/config.php" ]; then printf '%s' "$cand"; return 0; fi
+    [ -z "$best" ] && best="$cand"
+  done <<EOF
+$(candidate_docroots | awk '!seen[$0]++')
+EOF
+  [ -n "$best" ] && { printf '%s' "$best"; return 0; }
   return 1
 }
 
 SRC_DIR="$(cd "$ROOT_DIR" && pwd -P)"
-LIVE_DIR=""
 WEB_USER="$(detect_web_user || true)"
 
-_doc="$(docroot_of 2>/dev/null || true)"
-if [ -n "$_doc" ] && [ -d "$_doc" ] && [ -f "$_doc/bot.php" ]; then
-  LIVE_DIR="$(cd "$_doc" && pwd -P)"
-elif [ -f "/var/www/botsaz-faxima/bot.php" ]; then
-  LIVE_DIR="$(cd "/var/www/botsaz-faxima" && pwd -P)"
+_live=""
+if [ -n "${BOTSAZ_LIVE_DIR:-}" ]; then
+  # تخصیص دستیِ مسیر زنده (برای تست یا نصب سفارشی)
+  _live="$BOTSAZ_LIVE_DIR"
+  info "LIVE_DIR override (BOTSAZ_LIVE_DIR): $_live"
+else
+  _live="$(pick_live_dir 2>/dev/null || true)"
+fi
+if [ -n "$_live" ]; then
+  LIVE_DIR="$_live"
 else
   LIVE_DIR="$SRC_DIR"
 fi
 
+# هشدار: وی‌هوستِ کهنه/دیگری که مسیری متفاوت و قدیمی سرو می‌کند
+while IFS= read -r _other; do
+  [ -n "$_other" ] || continue
+  [ -f "$_other/bot.php" ] || continue
+  [ "$_other" = "$LIVE_DIR" ] && continue
+  warn "Another docroot serves an old copy: $_other  (fix its DocumentRoot/root to $LIVE_DIR)"
+done <<EOF
+$(candidate_docroots | awk '!seen[$0]++')
+EOF
+
 # ===== قفل همزمان =====
 mkdir -p "$SRC_DIR/data" 2>/dev/null || true
-if command -v flock >/dev/null 2>&1 && exec 9>"$SRC_DIR/data/update.lock" 2>/dev/null; then
-  if ! flock -n 9 2>/dev/null; then
-    fail "Another update is already running - exiting."
-    exit 1
+LOCK_DIR="$SRC_DIR/data/update.lock.d"
+LOCK_FD_OPEN=0
+ACQUIRED_LOCK=0
+if command -v flock >/dev/null 2>&1; then
+  # { exec 9>...; } داخل آکولاد است تا فقط stderrِ همین بلاک خفّ شود؛
+  # نوشتنِ exec 9>file 2>/dev/null باعث می‌شد stderrِ کل اسکریپت برای همیشه به /dev/null برود!
+  if { exec 9>"$SRC_DIR/data/update.lock"; } 2>/dev/null; then
+    LOCK_FD_OPEN=1
+    if flock -n 9 2>/dev/null; then
+      ACQUIRED_LOCK=1
+    fi
   fi
 fi
+if [ "$ACQUIRED_LOCK" -ne 1 ]; then
+  if mkdir "$LOCK_DIR" 2>/dev/null; then
+    ACQUIRED_LOCK=1
+  fi
+fi
+if [ "$ACQUIRED_LOCK" -ne 1 ]; then
+  die "Another update is already running (lock: $SRC_DIR/data/update.lock) – exiting."
+fi
+cleanup_lock() {
+  [ -d "$LOCK_DIR" ] && rmdir "$LOCK_DIR" 2>/dev/null
+  if [ "$LOCK_FD_OPEN" = "1" ]; then
+    exec 9>&- 2>/dev/null || true
+  fi
+  return 0
+}
+trap cleanup_lock EXIT
 
 # ===== پیش‌بینی =====
 step "Step 0: Pre-flight checks"
 if [ ! -d "$SRC_DIR/.git" ]; then
-  fail "No .git directory in $SRC_DIR"
-  exit 1
+  die "No .git directory in $SRC_DIR"
 fi
-if [ "$FORCE" -eq 0 ]; then
-  curl -s --max-time 3 https://github.com >/dev/null 2>&1 || warn "Cannot reach GitHub (continuing)"
+if ! command -v curl >/dev/null 2>&1; then
+  warn "curl not found – cannot check GitHub reachability"
+elif [ "$FORCE" -eq 0 ]; then
+  curl -s --max-time 3 https://github.com >/dev/null 2>&1 || warn "Cannot reach GitHub (continuing with local state)"
 fi
-DISK_AVAIL=$(df "$SRC_DIR" 2>/dev/null | awk 'NR==2{print $4}')
-if [ -n "$DISK_AVAIL" ] && [ "$DISK_AVAIL" -lt 51200 ] 2>/dev/null; then
-  fail "Low disk space ($DISK_AVAIL KB) < 50MB"
-  exit 1
+DISK_AVAIL="$(df -Pk "$SRC_DIR" 2>/dev/null | awk 'NR==2{print $4}')"
+case "$DISK_AVAIL" in ''|*[!0-9]*) DISK_AVAIL="" ;; esac
+if [ -n "$DISK_AVAIL" ] && [ "$DISK_AVAIL" -lt 51200 ]; then
+  die "Low disk space ($DISK_AVAIL KB) < 50MB"
 fi
 if ! git symbolic-ref -q HEAD >/dev/null 2>&1; then
-  fail "Detached HEAD - checkout a branch first (git checkout main)"
-  exit 1
+  die "Detached HEAD - checkout a branch first (git checkout main)"
 fi
-CUR_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
-CUR_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+if ! git remote get-url origin >/dev/null 2>&1; then
+  [ "$FORCE" -eq 1 ] && warn "No 'origin' remote – continuing with local commits only" || die "No 'origin' remote configured"
+fi
+CUR_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
+CUR_COMMIT="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 
 step "Step 0b: Layout detection"
 info "source (git)  : $SRC_DIR"
 info "live (served) : $LIVE_DIR"
+[ -n "$PHP_BIN" ] && info "php binary    : $PHP_BIN"
 if [ "$LIVE_DIR" = "$SRC_DIR" ]; then
   ok "Single-directory layout"
 else
   warn "Split layout detected (live != source)"
+  [ -f "$LIVE_DIR/config.php" ] || warn "No config.php in live dir – it will be bootstrapped from source"
 fi
 [ -n "$WEB_USER" ] && info "web user      : $WEB_USER" || warn "No web user detected"
 APP_VER_SRC="$(grep -m1 "APP_VERSION" "$SRC_DIR/src/Manager.php" 2>/dev/null | sed -n "s/.*'\([^']*\)'.*/\1/p")"
-[ -n "$APP_VER_SRC" ] && info "source version: $APP_VER_SRC"
+[ -n "$APP_VER_SRC" ] && info "source version: $APP_VER_SRC" || warn "APP_VERSION not found in src/Manager.php"
 
-# ===== ۱. بک‌آپ کامل تنظیمات زنده =====
+# ===== ۱. بک‌آپ کامل تنظیمات زنده + تغییرات محلی گیت =====
 step "Step 1: Backing up live configuration files"
 BACKUP_DIR="/tmp/botsaz-config-backup-$(date +%Y%m%d%H%M%S)"
-mkdir -p "$BACKUP_DIR"
+mkdir -p "$BACKUP_DIR" 2>/dev/null || BACKUP_DIR="$(mktemp -d /tmp/botsaz-config-backup.XXXXXX 2>/dev/null || echo /tmp)"
 shopt -s nullglob
 
 if [ -f "$LIVE_DIR/config.php" ]; then
@@ -154,325 +298,520 @@ for cf in "$LIVE_DIR"/bots/*/config.php; do
   cp -a "$cf" "$BACKUP_DIR/live/bots/$slug/config.php" 2>/dev/null && ok "Backed up live: bots/$slug/config.php"
 done
 shopt -u nullglob
+
+# پشتیبان از تغییرات git محلی، قبل از هر reset/clean
+git status --porcelain > "$BACKUP_DIR/local_git_status.txt" 2>/dev/null
+git diff > "$BACKUP_DIR/local_changes.patch" 2>/dev/null
+git diff --cached >> "$BACKUP_DIR/local_changes.patch" 2>/dev/null
+if [ -s "$BACKUP_DIR/local_changes.patch" ]; then
+  warn "Local git changes found – saved to $BACKUP_DIR/local_changes.patch"
+fi
 info "Backup dir: $BACKUP_DIR"
 
-# ===== ۲. git fetch/reset تا درخت تمیز شود (جلوگیری از «Local tracked files modified») =====
+# فایل وضعیت (برای --rollback) – مسیرش را زودتر تعریف می‌کنیم
+STATE_FILE="$SRC_DIR/data/last_update.state"
+# آخرین نسخه‌ای که واقعاً روی زنده استقرار یافته (برای حذفِ فایل‌های حذف‌شده در آپدیت جدید)
+LAST_DEPLOYED="$(sed -n 's/^NEW=//p' "$STATE_FILE" 2>/dev/null | head -1)"
+if [ -n "$LAST_DEPLOYED" ]; then
+  git cat-file -e "${LAST_DEPLOYED}^{commit}" 2>/dev/null || LAST_DEPLOYED=""
+fi
+
+# ===== ۲. fetch و پاک‌سازی درخت git (جلوگیری از «Local tracked files modified») =====
 step "Step 2: Fetching latest code (clean git tree)"
-if ! git fetch --prune origin "$CUR_BRANCH" 2>/dev/null; then
-  fail "git fetch failed for origin/$CUR_BRANCH"
-  exit 1
-fi
-
-# پاک کردن تغییرات محلی ردیابی‌شده (مانند .gitattributes/.gitignore/.htaccess حذف‌شده توسط نصب‌کننده)
-LOCAL_MOD=$(git status --porcelain --untracked-files=no 2>/dev/null | wc -l)
-if [ "$LOCAL_MOD" -gt 0 ]; then
-  warn "$LOCAL_MOD tracked file(s) modified locally - resetting to origin/$CUR_BRANCH (safe for deployment)"
-  info "$(git status --short --untracked-files=no | head -10)"
-  git reset --hard "origin/$CUR_BRANCH" 2>/dev/null || {
-    fail "git reset --hard failed"
-    exit 1
-  }
-  git clean -fd 2>/dev/null || true
-  ok "Source tree reset to clean origin/$CUR_BRANCH"
+DO_RESET=0
+ROLLBACK_TARGET=""
+if [ "$ROLLBACK" -eq 1 ]; then
+  # ===== حالت بازگشت: کد به آخرین نسخهٔ قبل از آپدیت برمی‌گردد =====
+  [ -f "$STATE_FILE" ] || die "--rollback: no recorded state ($STATE_FILE) – nothing to roll back"
+  REC_PREV="$(sed -n 's/^PREV=//p' "$STATE_FILE" | head -1)"
+  REC_NEW="$(sed -n 's/^NEW=//p' "$STATE_FILE" | head -1)"
+  REC_BACKUP="$(sed -n 's/^BACKUP=//p' "$STATE_FILE" | head -1)"
+  [ -n "$REC_PREV" ] || die "--rollback: invalid state file ($STATE_FILE)"
+  git cat-file -e "${REC_PREV}^{commit}" 2>/dev/null || die "--rollback: commit $REC_PREV not found locally"
+  info "Rolling back: ${REC_NEW:-?} → $REC_PREV"
+  [ -n "$REC_BACKUP" ] && [ -d "$REC_BACKUP" ] && info "Config backup of that update: $REC_BACKUP"
+  ROLLBACK_TARGET="$REC_PREV"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    info "DRY-RUN: would reset source to $REC_PREV and redeploy it"
+    git --no-pager diff --stat "$REC_PREV" "${REC_NEW:-$REC_PREV}" 2>/dev/null | tail -10 | sed 's/^/   /'
+  else
+    if [ -s "$BACKUP_DIR/local_changes.patch" ]; then
+      warn "Local changes were backed up before rollback: $BACKUP_DIR/local_changes.patch"
+    fi
+    git reset --hard "$REC_PREV" >/dev/null 2>&1 || die "git reset --hard $REC_PREV failed"
+    ok "Source reset to $REC_PREV"
+  fi
 else
-  ok "Working tree clean"
+  if git fetch --prune origin 2>/dev/null; then
+    ok "Fetched origin/$CUR_BRANCH"
+  else
+    if [ "$FORCE" -eq 1 ]; then
+      warn "git fetch failed – continuing with local commits (--force)"
+    else
+      die "git fetch failed for origin/$CUR_BRANCH (use --force to continue offline)"
+    fi
+  fi
+  if ! git rev-parse --verify "origin/$CUR_BRANCH" >/dev/null 2>&1; then
+    [ "$FORCE" -eq 1 ] && warn "origin/$CUR_BRANCH not found – using local HEAD" || die "origin/$CUR_BRANCH not found"
+  else
+    DO_RESET=1
+  fi
 fi
 
-git merge --ff-only "origin/$CUR_BRANCH" 2>/dev/null || true
-NEW_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
-if [ "$CUR_COMMIT" != "$NEW_COMMIT" ]; then
+if [ "$DO_RESET" -eq 1 ]; then
+  if [ "$DRY_RUN" -eq 1 ]; then
+    _pending="$(git rev-list --count "HEAD..origin/$CUR_BRANCH" 2>/dev/null || echo 0)"
+    info "DRY-RUN: $_pending new commit(s) pending on origin/$CUR_BRANCH"
+    git --no-pager log --oneline "HEAD..origin/$CUR_BRANCH" 2>/dev/null | head -10 | sed 's/^/   /'
+    info "DRY-RUN: would reset local tracked changes and copy code to live"
+  else
+    LOCAL_MOD="$(git status --porcelain --untracked-files=no 2>/dev/null | grep -c .)"
+    case "$LOCAL_MOD" in ''|*[!0-9]*) LOCAL_MOD=0 ;; esac
+    # برنامهٔ فایل‌های untracked را قبل از هر چیز ذخیره می‌کنیم (data/bots هرگز حذف نمی‌شوند)
+    git clean -fdn -e data -e bots > "$BACKUP_DIR/clean_plan.txt" 2>/dev/null
+    if [ "$LOCAL_MOD" -gt 0 ]; then
+      warn "$LOCAL_MOD tracked file(s) modified locally – resetting to origin/$CUR_BRANCH"
+      info "Local diff saved: $BACKUP_DIR/local_changes.patch (apply later with: git apply)"
+      git reset --hard "origin/$CUR_BRANCH" 2>/dev/null || die "git reset --hard failed"
+      ok "Source tree reset to clean origin/$CUR_BRANCH"
+    else
+      ok "Working tree clean"
+    fi
+    # فایل‌های untracked فقط با --force حذف می‌شوند (پاک‌سازیِ بی‌اجازه ممکن است کارِ انجام‌شدهٔ کاربر را ببرد)
+    if [ -s "$BACKUP_DIR/clean_plan.txt" ]; then
+      _clean_n="$(grep -c . "$BACKUP_DIR/clean_plan.txt" 2>/dev/null)"
+      if [ "$FORCE" -eq 1 ]; then
+        git clean -fd -e data -e bots >/dev/null 2>&1 || warn "git clean failed"
+        ok "Removed $_clean_n untracked file(s) (listed in $BACKUP_DIR/clean_plan.txt)"
+      else
+        info "$_clean_n untracked file(s) kept (use --force to remove). First few:"
+        head -5 "$BACKUP_DIR/clean_plan.txt" | sed 's/^/   /'
+      fi
+    fi
+    git merge --ff-only "origin/$CUR_BRANCH" >/dev/null 2>&1 || true
+  fi
+fi
+
+NEW_COMMIT="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+if [ "$ROLLBACK" -eq 1 ] && [ "$DRY_RUN" -eq 1 ]; then
+  # در dry-run بازگشت، reset انجام نشده → هدف را دستی می‌گذاریم تا بقیهٔ محاسبات درست بماند
+  NEW_COMMIT="$ROLLBACK_TARGET"
+fi
+if [ "$ROLLBACK" -eq 1 ]; then
+  [ "$CUR_COMMIT" != "$NEW_COMMIT" ] && ok "Rolling back code: $CUR_COMMIT → $NEW_COMMIT" || warn "Already at $NEW_COMMIT"
+elif [ "$CUR_COMMIT" != "$NEW_COMMIT" ]; then
   ok "Updated: $CUR_COMMIT → $NEW_COMMIT"
 else
   ok "Already up to date ($NEW_COMMIT)"
 fi
 
-# ===== ۳. استخراج کامل تنظیمات زنده و جایگذاری داخل سورس (/root) =====
+# ===== ۳. جایگذاری تنظیمات زنده داخل سورس =====
 step "Step 3: Extract live settings and merge into source ($SRC_DIR)"
-PHP_BIN="$(command -v php 2>/dev/null || echo /usr/bin/php)"
 
-# تابع استخراج آرایه config.php با PHP (سالم و دقیق)
-extract_live_config() {
-  local cfg_path="$1"
-  [ -f "$cfg_path" ] || return 1
-  "$PHP_BIN" -r '
-  $f = $argv[1];
-  $c = @include $f;
-  if (!is_array($c)) exit(1);
-  foreach ($c as $k=>$v){
-    if (is_string($v)) {
-      $v = str_replace("\\","\\\\",$v);
-      $v = str_replace("\n","\\n",$v);
-      $v = str_replace("\r","\\r",$v);
-      $v = str_replace("\t","\\t",$v);
-      $v = str_replace("\"","\\\"",$v);
-      echo "STR|".$k."|\"".$v."\"\n";
-    } elseif (is_int($v)||is_float($v)) {
-      echo "NUM|".$k."|".$v."\n";
-    } elseif (is_bool($v)) {
-      echo "BOOL|".$k."|".($v?"true":"false")."\n";
-    } elseif (is_null($v)) {
-      echo "NULL|".$k."|\n";
-    } elseif (is_array($v)) {
-      // فقط آرایه‌های ساده (assoc/index) قابل بازنویسی امن
-      $ser = var_export($v,true);
-      $ser = str_replace("\n"," ",$ser);
-      echo "ARR|".$k."|".$ser."\n";
-    } else {
-      echo "SKIP|".$k."|\n";
-    }
-  }
-  ' "$cfg_path"
-}
-
-# جایگذاری config.php سورس با مقادیر زنده (PHP-safe)
+# ادغام config زنده در config سورس (یک فراخوانی PHP – بدون eval و بدون خراب‌شدن رشته‌های چندخطی)
 merge_config_into_source() {
-  local src_cfg="$1"
-  local live_cfg="$2"
+  local src_cfg="$1" live_cfg="$2" out rc
   [ -f "$live_cfg" ] || return 1
-  [ -f "$src_cfg" ] || cp "$SRC_DIR/config.example.php" "$src_cfg" 2>/dev/null || touch "$src_cfg"
-
-  local tmp_pairs="/tmp/botsaz_cfg_pairs_$$"
-  extract_live_config "$live_cfg" > "$tmp_pairs" 2>/dev/null || return 1
-
-  "$PHP_BIN" -r '
-  $src = $argv[1];
-  $pairs = $argv[2];
-  $c = @include $src;
-  if (!is_array($c)) $c = [];
-  $map = [];
-  if (is_file($pairs)) {
-    foreach (file($pairs, FILE_IGNORE_NEW_LINES|FILE_SKIP_EMPTY_LINES) as $line) {
-      list($t,$k,$val) = explode("|",$line,3);
-      $map[$k] = [$t,$val];
-    }
-  }
-  foreach ($map as $k=>$mv) {
-    list($t,$val) = $mv;
-    if ($t==="STR") { $c[$k] = json_decode($val,true); if ($c[$k]===null) $c[$k] = substr($val,1,-1); continue; }
-    if ($t==="NUM") { $c[$k] = strpos($val,".")!==false ? (float)$val : (int)$val; continue; }
-    if ($t==="BOOL"){ $c[$k] = ($val==="true"); continue; }
-    if ($t==="NULL"){ $c[$k] = null; continue; }
-    if ($t==="ARR") { eval("\$v = ".$val.";"); $c[$k] = $v; continue; }
-  }
-  $out = "<?php\nreturn ".var_export($c,true).";\n";
-  file_put_contents($src, $out);
-  echo "OK";
-  ' "$src_cfg" "$tmp_pairs" >/tmp/botsaz_cfg_merge_$$ 2>&1
-  local res="$(cat /tmp/botsaz_cfg_merge_$$ 2>/dev/null)"
-  rm -f "$tmp_pairs" /tmp/botsaz_cfg_merge_$$ 2>/dev/null
-  [ "$res" = "OK" ] && return 0 || return 1
+  have_php || return 1
+  if [ ! -f "$src_cfg" ]; then
+    cp "$SRC_DIR/config.example.php" "$src_cfg" 2>/dev/null || touch "$src_cfg"
+  fi
+  out="$("$PHP_BIN" -r '
+    $src = $argv[1]; $live = $argv[2];
+    $c = @include $src;  if (!is_array($c)) $c = [];
+    $l = @include $live; if (!is_array($l)) { fwrite(STDERR, "live config is not an array\n"); exit(1); }
+    foreach ($l as $k => $v) { $c[$k] = $v; }
+    $txt = "<?php\nreturn " . var_export($c, true) . ";\n";
+    if (file_put_contents($src, $txt) === false) { fwrite(STDERR, "cannot write source config\n"); exit(1); }
+    echo count($l);
+  ' "$src_cfg" "$live_cfg" 2>"$BACKUP_DIR/merge_cfg.err")"
+  rc=$?
+  if [ $rc -eq 0 ] && [ -n "$out" ]; then
+    MERGED_KEYS="$out"
+    return 0
+  fi
+  [ -s "$BACKUP_DIR/merge_cfg.err" ] && info "merge error: $(head -3 "$BACKUP_DIR/merge_cfg.err")"
+  return 1
 }
 
-# ۳.۱ config.php اصلی
-if [ -f "$LIVE_DIR/config.php" ]; then
-  if merge_config_into_source "$SRC_DIR/config.php" "$LIVE_DIR/config.php"; then
-    ok "Live config.php merged into source tree"
-  else
-    warn "Failed to merge live config.php into source (will try cp fallback)"
-    cp -a "$LIVE_DIR/config.php" "$SRC_DIR/config.php" 2>/dev/null && ok "Live config.php copied to source" || warn "Could not copy live config.php"
-  fi
+# اضافه‌کردن کلیدهای جدیدِ آپدیت به config زنده (فقط کلیدهای غایب؛ مقدارهای موجود دست نمی‌خورند)
+ensure_live_config_keys() {
+  local live_cfg="$1" def_cfg="$2" added
+  [ -f "$live_cfg" ] && [ -f "$def_cfg" ] || return 0
+  have_php || return 0
+  added="$("$PHP_BIN" -r '
+    $live = $argv[1]; $def = $argv[2];
+    $l = @include $live; if (!is_array($l)) exit(0);
+    $d = @include $def;  if (!is_array($d)) exit(0);
+    $added = [];
+    foreach ($d as $k => $v) { if (!array_key_exists($k, $l)) { $l[$k] = $v; $added[] = $k; } }
+    if (!$added) { echo "0"; exit(0); }
+    $txt = "<?php\nreturn " . var_export($l, true) . ";\n";
+    if (file_put_contents($live, $txt) === false) { fwrite(STDERR, "cannot write live config\n"); exit(1); }
+    echo implode(", ", $added);
+  ' "$live_cfg" "$def_cfg" 2>"$BACKUP_DIR/ensure_cfg.err")"
+  _erc=$?
+  case "$added" in
+    "")  if [ "$_erc" -eq 0 ]; then
+           info "Live config already has every upstream key"
+         else
+           warn "Could not add new keys to live config (php exit $_erc)"
+           [ -s "$BACKUP_DIR/ensure_cfg.err" ] && info "$(head -3 "$BACKUP_DIR/ensure_cfg.err")"
+         fi ;;
+    "0") info "Live config already has every upstream key" ;;
+    *)   ok "Added new config key(s) to live config: $added" ;;
+  esac
+  return 0
+}
+
+MERGED_KEYS=0
+if [ "$LIVE_DIR" = "$SRC_DIR" ]; then
+  ok "Single-directory layout – live config IS the source config (merge skipped, comments kept)"
+elif [ "$DRY_RUN" -eq 1 ]; then
+  info "DRY-RUN: would merge live config keys into $SRC_DIR/config.php"
 else
-  warn "No live config.php found at $LIVE_DIR/config.php"
+  if [ ! -f "$LIVE_DIR/config.php" ]; then
+    info "No live config.php yet – source keeps config.example.php defaults"
+  elif merge_config_into_source "$SRC_DIR/config.php" "$LIVE_DIR/config.php"; then
+    ok "Live config.php merged into source tree ($MERGED_KEYS key(s))"
+  elif ! have_php; then
+    cp -a "$LIVE_DIR/config.php" "$SRC_DIR/config.php" 2>/dev/null \
+      && info "PHP CLI missing – live config copied to source instead of merging" \
+      || warn "Could not copy live config.php to source"
+  else
+    cp -a "$LIVE_DIR/config.php" "$SRC_DIR/config.php" 2>/dev/null \
+      && ok "Live config.php copied to source (merge failed)" \
+      || warn "Could not copy live config.php to source"
+  fi
+
+  # ۳.۲ ربات‌های فرزند
+  shopt -s nullglob
+  _cbc=0
+  for cf_live in "$LIVE_DIR"/bots/*/config.php; do
+    slug="$(basename "$(dirname "$cf_live")")"
+    mkdir -p "$SRC_DIR/bots/$slug"
+    cf_src="$SRC_DIR/bots/$slug/config.php"
+    if merge_config_into_source "$cf_src" "$cf_live"; then
+      _cbc=$((_cbc + 1))
+    else
+      cp -a "$cf_live" "$cf_src" 2>/dev/null && _cbc=$((_cbc + 1))
+    fi
+  done
+  shopt -u nullglob
+  [ "$_cbc" -gt 0 ] && ok "Merged $_cbc child bot config(s) into source" || info "No child bot configs found in live"
 fi
 
-# ۳.۲ ربات‌های فرزند
-shopt -s nullglob
-_cbc=0
-for cf_live in "$LIVE_DIR"/bots/*/config.php; do
-  slug="$(basename "$(dirname "$cf_live")")"
-  mkdir -p "$SRC_DIR/bots/$slug"
-  cf_src="$SRC_DIR/bots/$slug/config.php"
-  if merge_config_into_source "$cf_src" "$cf_live"; then
-    _cbc=$((_cbc+1))
-  else
-    cp -a "$cf_live" "$cf_src" 2>/dev/null && _cbc=$((_cbc+1))
-  fi
-done
-shopt -u nullglob
-[ $_cbc -gt 0 ] && ok "Merged $_cbc child bot config(s) into source" || info "No child bot configs found in live"
-
-# ===== ۴. بررسی/جایگذاری مشخصات دیتابیس (اگر در کد وجود دارد استفاده کن، در غیر این صورت از کاربر بگیر) =====
+# ===== ۴. بررسی/جایگذاری مشخصات دیتابیس =====
 step "Step 4: Database configuration – verify & ensure"
+# منبعِ بررسی: config زنده (مهم‌تر) وگرنه config سورس
+CHECK_CFG=""
+if [ -f "$LIVE_DIR/config.php" ]; then
+  CHECK_CFG="$LIVE_DIR/config.php"
+elif [ -f "$SRC_DIR/config.php" ]; then
+  CHECK_CFG="$SRC_DIR/config.php"
+fi
+
 NEED_DB_PROMPT=0
-if [ ! -f "$SRC_DIR/config.php" ]; then
+if [ -z "$CHECK_CFG" ]; then
   NEED_DB_PROMPT=1
+elif have_php; then
+  HAS_DB_KEYS="$("$PHP_BIN" -r '$c=@include $argv[1]; echo (is_array($c)&&(isset($c["db_host"])||isset($c["db_user"])||isset($c["db_pass"])))?"1":"0";' "$CHECK_CFG" 2>/dev/null)"
+  [ "$HAS_DB_KEYS" != "1" ] && NEED_DB_PROMPT=1
 else
-  # بررسی وجود کلیدهای DB در config فعلی سورس
-  HAS_DB_KEYS=$("$PHP_BIN" -r '$c=@include $argv[1]; echo (isset($c["db_host"])||isset($c["db_user"])||isset($c["db_pass"]))?"1":"0";' "$SRC_DIR/config.php" 2>/dev/null || echo 0)
-  if [ "$HAS_DB_KEYS" != "1" ]; then
-    NEED_DB_PROMPT=1
-  fi
+  grep -q "db_host" "$CHECK_CFG" 2>/dev/null || NEED_DB_PROMPT=1
 fi
 
-# اگر هنوز نیاز به ورودی دارد (و --dry-run نیست)
-if [ "$NEED_DB_PROMPT" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; then
-  warn "Database settings missing in config.php"
-  read -p "  MySQL Host [127.0.0.1]: " DB_HOST; DB_HOST=${DB_HOST:-127.0.0.1}
-  read -p "  MySQL Port [3306]: "      DB_PORT; DB_PORT=${DB_PORT:-3306}
-  read -p "  MySQL User [root]: "      DB_USER; DB_USER=${DB_USER:-root}
-  read -s -p "  MySQL Password (hidden): " DB_PASS; echo ""
-  read -p "  DB Prefix [botsaz_]: "    DB_PREF; DB_PREF=${DB_PREF:-botsaz_}
-
+write_db_settings() {
+  local cfg="$1"
+  have_php || return 1
   "$PHP_BIN" -r '
-  $src = $argv[1];
-  $c = @include $src; if (!is_array($c)) $c = [];
-  $c["db_host"]   = $argv[2];
-  $c["db_port"]   = intval($argv[3]);
-  $c["db_user"]   = $argv[4];
-  $c["db_pass"]   = $argv[5];
-  $c["db_prefix"] = $argv[6];
-  file_put_contents($src, "<?php\nreturn ".var_export($c,true).";\n");
-  ' "$SRC_DIR/config.php" "$DB_HOST" "$DB_PORT" "$DB_USER" "$DB_PASS" "$DB_PREF" 2>/dev/null && ok "DB settings written to source/config.php" || warn "Failed to write DB settings"
-else
-  if [ "$NEED_DB_PROMPT" -eq 0 ]; then
-    ok "Database keys present in source config"
+    $src = $argv[1];
+    $c = @include $src; if (!is_array($c)) $c = [];
+    $c["db_host"]   = $argv[2];
+    $c["db_port"]   = intval($argv[3]);
+    $c["db_user"]   = $argv[4];
+    $c["db_pass"]   = $argv[5];
+    $c["db_prefix"] = $argv[6];
+    if (file_put_contents($src, "<?php\nreturn " . var_export($c, true) . ";\n") === false) exit(1);
+  ' "$cfg" "$DB_HOST" "$DB_PORT" "$DB_USER" "$DB_PASS" "$DB_PREF" 2>/dev/null
+}
+
+if [ "$NEED_DB_PROMPT" -eq 1 ]; then
+  if [ "$DRY_RUN" -eq 1 ]; then
+    info "DRY-RUN: DB settings missing – would ask for them interactively"
+  elif [ ! -t 0 ]; then
+    warn "Database settings missing in config and stdin is not a terminal (cron/web) – skipping prompt"
+    info "Run interactively: bash tools/update.sh"
   else
-    info "DRY-RUN: DB prompt skipped"
+    warn "Database settings missing in config.php"
+    read -r -p "  MySQL Host [127.0.0.1]: " DB_HOST; DB_HOST=${DB_HOST:-127.0.0.1}
+    read -r -p "  MySQL Port [3306]: "      DB_PORT; DB_PORT=${DB_PORT:-3306}
+    read -r -p "  MySQL User [root]: "      DB_USER; DB_USER=${DB_USER:-root}
+    read -r -s -p "  MySQL Password (hidden): " DB_PASS; echo ""
+    read -r -p "  DB Prefix [botsaz_]: "    DB_PREF; DB_PREF=${DB_PREF:-botsaz_}
+
+    # در حالت دوپوشه باید هم سورس و هم زنده تنظیم شوند (کپی‌کردنِ بعدی، config را جا نمی‌اندازد)
+    _wrote=0
+    if [ -f "$SRC_DIR/config.php" ] || cp "$SRC_DIR/config.example.php" "$SRC_DIR/config.php" 2>/dev/null; then
+      write_db_settings "$SRC_DIR/config.php" && _wrote=1 && ok "DB settings written to source/config.php"
+    fi
+    if [ "$LIVE_DIR" != "$SRC_DIR" ]; then
+      if [ -f "$LIVE_DIR/config.php" ]; then
+        write_db_settings "$LIVE_DIR/config.php" && _wrote=1 && ok "DB settings written to live/config.php"
+      fi
+    fi
+    [ "$_wrote" -eq 1 ] || warn "Failed to write DB settings"
+  fi
+else
+  ok "Database keys present in $CHECK_CFG"
+fi
+
+# کلیدهای جدیدِ آپدیت را به config زنده اضافه کن (قبل از استقرار/مایگریشن)
+if [ "$LIVE_DIR" != "$SRC_DIR" ] && [ "$DRY_RUN" -eq 0 ] && [ -f "$LIVE_DIR/config.php" ]; then
+  if have_php; then
+    _def="$SRC_DIR/config.php"
+    [ -f "$_def" ] || _def="$SRC_DIR/config.example.php"
+    ensure_live_config_keys "$LIVE_DIR/config.php" "$_def"
+  else
+    info "PHP CLI missing – cannot add new upstream keys to live config"
   fi
 fi
 
-# ===== ۵. کپی کد از /root → /var/www/botsaz-faxima (حفظ config/data/bots زنده) =====
+# ===== ۵. کپی کد از سورس → زنده (فقط فایل‌های ردیابی‌شدهٔ گیت) =====
 step "Step 5: Deploy code from $SRC_DIR → $LIVE_DIR"
-if [ "$DRY_RUN" -eq 1 ]; then
-  info "DRY-RUN: would rsync code excluding config.php, data/, bots/, .git/"
-elif [ "$LIVE_DIR" = "$SRC_DIR" ]; then
-  ok "Source == Live – no copy needed"
+
+TRACKED_LIST="$BACKUP_DIR/tracked_files.list"
+git ls-files -z > "$TRACKED_LIST" 2>/dev/null
+TRACKED_COUNT="$(tr -cd '\0' < "$TRACKED_LIST" 2>/dev/null | wc -c | tr -d ' ')"
+
+# فایل‌هایی که در کامیت جدید از گیت حذف شده‌اند و باید از زنده هم بروند
+plan_removed_files() { # $1=from-commit  $2=to-commit
+  git diff --no-renames --name-only --diff-filter=D "$1" "$2" 2>/dev/null | sed '/^$/d' > "$BACKUP_DIR/removed_from_live.txt"
+  [ -s "$BACKUP_DIR/removed_from_live.txt" ] || : > "$BACKUP_DIR/removed_from_live.txt"
+}
+
+apply_removed_files() {
+  local p n=0
+  [ -s "$BACKUP_DIR/removed_from_live.txt" ] || { REMOVED_COUNT=0; return 0; }
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    case "$p" in /*|*..*) continue ;; esac        # مسیر ناامن را نادیده بگیر
+    case "$p" in data/*|bots/*|config.php|config.example.php) continue ;; esac  # دست‌نخورده
+    [ -f "$LIVE_DIR/$p" ] || continue
+    if [ "$DRY_RUN" -eq 1 ]; then
+      info "[dry-run] would remove from live: $p"
+    else
+      rm -f "$LIVE_DIR/$p" 2>/dev/null && n=$((n + 1))
+    fi
+  done < "$BACKUP_DIR/removed_from_live.txt"
+  REMOVED_COUNT="$n"
+}
+
+if [ "$LIVE_DIR" = "$SRC_DIR" ]; then
+  # تک‌پوشه: گیت خودش درختِ کاری را همگام می‌کند (فایل‌های حذف‌شده هم با reset پاک می‌شوند)
+  if [ "$DRY_RUN" -eq 1 ]; then
+    info "DRY-RUN: source == live – would sync the working tree with git (no file copy)"
+    plan_removed_files "${LAST_DEPLOYED:-$CUR_COMMIT}" "$NEW_COMMIT"
+    apply_removed_files
+    if [ "${REMOVED_COUNT:-0}" -gt 0 ]; then
+      info "$REMOVED_COUNT file(s) would disappear from the working tree on the real run"
+    fi
+  else
+    ok "Source == Live – no copy needed (git already synced the working tree)"
+  fi
+elif [ "$DRY_RUN" -eq 1 ]; then
+  info "DRY-RUN: would copy $TRACKED_COUNT tracked file(s) to $LIVE_DIR (config/data/bots untouched)"
+  plan_removed_files "${LAST_DEPLOYED:-$CUR_COMMIT}" "$NEW_COMMIT"
+  apply_removed_files
 else
   mkdir -p "$LIVE_DIR" 2>/dev/null
+  _deploy_rc=1
   if command -v rsync >/dev/null 2>&1; then
-    rsync -a --delete \
-      --exclude '.git/' \
-      --exclude '.gitattributes' --exclude '.gitignore' \
-      --exclude 'config.php' \
-      --exclude 'data/' \
-      --exclude 'bots/' \
-      --exclude '*.bak' --exclude '*.log' --exclude '*.lock' --exclude '*.swp' \
-      "$SRC_DIR/" "$LIVE_DIR/" >/dev/null 2>&1 && ok "Deployed code to live (config/data/bots untouched)" || {
-        fail "rsync failed – deploying with selective cp"
-        # fallback cp
-        for f in bot.php index.php nowpayments_ipn.php .htaccess; do
-          [ -f "$SRC_DIR/$f" ] && cp -a "$SRC_DIR/$f" "$LIVE_DIR/" 2>/dev/null
-        done
-        for d in src tools templates includes vendor public; do
-          [ -d "$SRC_DIR/$d" ] && mkdir -p "$LIVE_DIR/$d" && cp -a "$SRC_DIR/$d/." "$LIVE_DIR/$d/" 2>/dev/null
-        done
-        ok "Selective copy completed"
-      }
+    rsync -a --from0 --files-from="$TRACKED_LIST" "$SRC_DIR/" "$LIVE_DIR/" > "$BACKUP_DIR/rsync.log" 2>&1
+    _deploy_rc=$?
+    [ "$_deploy_rc" -ne 0 ] && warn "rsync failed (rc=$_deploy_rc): $(tail -3 "$BACKUP_DIR/rsync.log" 2>/dev/null | tr '\n' ' ')"
   else
-    warn "rsync not found – using cp fallback"
-    for f in bot.php index.php nowpayments_ipn.php .htaccess; do
-      [ -f "$SRC_DIR/$f" ] && cp -a "$SRC_DIR/$f" "$LIVE_DIR/" 2>/dev/null
-    done
-    for d in src tools templates includes vendor public; do
-      [ -d "$SRC_DIR/$d" ] && mkdir -p "$LIVE_DIR/$d" && cp -a "$SRC_DIR/$d/." "$LIVE_DIR/$d/" 2>/dev/null
-    done
-    ok "Selective copy completed"
+    # tar همیشه هست؛ لیست فایل‌ها NUL جدا شده تا مسیرهای دارای فاصله/آپاستروف سالم بمانند
+    ( cd "$SRC_DIR" && tar --null -T "$TRACKED_LIST" -cf - ) 2>"$BACKUP_DIR/tar.log" | tar -xf - -C "$LIVE_DIR" 2>>"$BACKUP_DIR/tar.log"
+    _st=( "${PIPESTATUS[@]}" )
+    _deploy_rc=0
+    [ "${_st[0]:-1}" = "0" ] || { _deploy_rc=1; warn "tar (read) failed: $(tail -3 "$BACKUP_DIR/tar.log" 2>/dev/null | tr '\n' ' ')"; }
+    [ "${_st[1]:-1}" = "0" ] || { _deploy_rc=1; warn "tar (write) failed: $(tail -3 "$BACKUP_DIR/tar.log" 2>/dev/null | tr '\n' ' ')"; }
   fi
 
-  # بازنویسی تنظیمات زنده داخل LIVE_DIR (مهم: بعد کپی کد نباید overwrite شده باشند)
-  if [ -f "$LIVE_DIR/config.php" ]; then
-    merge_config_into_source "$LIVE_DIR/config.php" "$BACKUP_DIR/live/config.php" 2>/dev/null || cp -a "$BACKUP_DIR/live/config.php" "$LIVE_DIR/config.php" 2>/dev/null
+  if [ "$_deploy_rc" -eq 0 ]; then
+    ok "Deployed $TRACKED_COUNT tracked file(s) to live (config/data/bots untouched)"
+  else
+    fail "Code deployment failed – live directory may be partially updated"
+    info "Backup + tracked file list kept in $BACKUP_DIR"
   fi
+
+  # حذف فایل‌هایی که در آپدیت جدید از گیت حذف شده‌اند
+  # مبنا: آخرین نسخهٔ استقراریافته (از state) وگرنه HEAD قبل از این اجرا
+  plan_removed_files "${LAST_DEPLOYED:-$CUR_COMMIT}" "$NEW_COMMIT"
+  apply_removed_files
+  [ "${REMOVED_COUNT:-0}" -gt 0 ] && ok "Removed $REMOVED_COUNT file(s) deleted upstream from live"
+
+  # اگر config.php ای در زنده نیست (نصب تازه)، از سورس بساز
+  if [ ! -f "$LIVE_DIR/config.php" ] && [ -f "$SRC_DIR/config.php" ]; then
+    cp -a "$SRC_DIR/config.php" "$LIVE_DIR/config.php" 2>/dev/null && ok "Bootstrapped live/config.php from source"
+  fi
+  # گارددار: هرگز نباید بدون config.php بمانیم
+  if [ ! -f "$LIVE_DIR/config.php" ] && [ -s "$BACKUP_DIR/live/config.php" ]; then
+    cp -a "$BACKUP_DIR/live/config.php" "$LIVE_DIR/config.php" 2>/dev/null && warn "Live config was missing – restored from backup"
+  fi
+  [ -f "$LIVE_DIR/config.php" ] || fail "Live config.php is missing – restore it from $BACKUP_DIR/live/"
+
+  # بازنویسیِ ایمن تنظیمات زنده (کمربند ایمنی؛ rsync/لیست فایل‌ها آن‌ها را دست نزده‌اند)
   shopt -s nullglob
   for cf_b in "$BACKUP_DIR/live/bots"/*/config.php; do
     slug="$(basename "$(dirname "$cf_b")")"
     mkdir -p "$LIVE_DIR/bots/$slug"
-    cf_l="$LIVE_DIR/bots/$slug/config.php"
-    merge_config_into_source "$cf_l" "$cf_b" 2>/dev/null || cp -a "$cf_b" "$cf_l" 2>/dev/null
+    [ -f "$LIVE_DIR/bots/$slug/config.php" ] || cp -a "$cf_b" "$LIVE_DIR/bots/$slug/config.php" 2>/dev/null
   done
   shopt -u nullglob
-  ok "Live configs re-applied to $LIVE_DIR"
 
-  # بررسی نسخه
-  _v_s="$(grep -m1 "APP_VERSION" "$SRC_DIR/src/Manager.php" 2>/dev/null | sed -n "s/.*'\([^']*\)'.*/\1/p")"
-  _v_l="$(grep -m1 "APP_VERSION" "$LIVE_DIR/src/Manager.php" 2>/dev/null | sed -n "s/.*'\([^']*\)'.*/\1/p")"
-  if [ -n "$_v_l" ] && [ "$_v_l" = "$_v_s" ]; then
-    ok "Live version verified: $_v_l"
-  else
-    warn "Version mismatch: live='${_v_l:-?}' source='${_v_s:-?}'"
+  # بررسی صحت استقرار
+  if [ -f "$SRC_DIR/bot.php" ] && [ -f "$LIVE_DIR/bot.php" ]; then
+    if cmp -s "$SRC_DIR/bot.php" "$LIVE_DIR/bot.php"; then
+      ok "Verified: live/bot.php is identical to source"
+    else
+      fail "live/bot.php differs from source after deploy"
+    fi
   fi
+fi
+
+# بررسی نسخه (در هر دو حالت تک‌پوشه/دوپوشه)
+_v_s="$(grep -m1 "APP_VERSION" "$SRC_DIR/src/Manager.php" 2>/dev/null | sed -n "s/.*'\([^']*\)'.*/\1/p")"
+_v_l="$(grep -m1 "APP_VERSION" "$LIVE_DIR/src/Manager.php" 2>/dev/null | sed -n "s/.*'\([^']*\)'.*/\1/p")"
+if [ -n "$_v_l" ] && [ "$_v_l" = "$_v_s" ]; then
+  ok "Live version verified: $_v_l"
+elif [ "$DRY_RUN" -eq 1 ]; then
+  info "DRY-RUN: live version '${_v_l:-?}' vs source '${_v_s:-?}'"
+else
+  warn "Version mismatch: live='${_v_l:-?}' source='${_v_s:-?}'"
 fi
 
 # ===== ۶. تنظیم وی‌هوست (Apache/Nginx) → اشاره به LIVE_DIR =====
 step "Step 6: Configure web server vhost (point to live path)"
-if [ "$DRY_RUN" -eq 0 ] && [ "$(id -u)" -eq 0 ]; then
-  LIVE_ABS="$(cd "$LIVE_DIR" && pwd -P)"
+if [ "$DRY_RUN" -eq 0 ] && [ "$(id -u)" -eq 0 ] && [ "$LIVE_DIR" != "$SRC_DIR" ]; then
+  LIVE_ABS="$LIVE_DIR"
   # Apache
-  for c in /etc/apache2/sites-available/botsaz.conf /etc/apache2/sites-enabled/botsaz.conf; do
+  for c in /etc/apache2/sites-available/*.conf /etc/apache2/sites-enabled/*.conf; do
     [ -f "$c" ] || continue
-    if grep -q "DocumentRoot" "$c" 2>/dev/null; then
-      CURDR="$(sed -n 's/^[[:space:]]*DocumentRoot[[:space:]]\{1,\}\([^[:space:]#]*\).*/\1/p' "$c" | head -n1)"
-      if [ -n "$CURDR" ] && [ "$CURDR" != "$LIVE_ABS" ]; then
-        sed -i "s|^[[:space:]]*DocumentRoot[[:space:]]\{1,\}[^[:space:]#]*|	DocumentRoot $LIVE_ABS|" "$c" 2>/dev/null && ok "Apache DocumentRoot updated in $(basename "$c"): $CURDR → $LIVE_ABS"
-      else
-        [ "$CURDR" = "$LIVE_ABS" ] && ok "Apache DocumentRoot correct in $(basename "$c")"
-      fi
+    grep -qE "botsaz|faxima" "$c" 2>/dev/null || continue
+    grep -q "DocumentRoot" "$c" 2>/dev/null || continue
+    CURDR="$(sed -n 's/^[[:space:]]*DocumentRoot[[:space:]]\{1,\}\([^[:space:]#]*\).*/\1/p' "$c" | head -n1)"
+    # فقط به فایل‌هایی دست می‌زنیم که نام یا DocumentRoot شان واقعاً متعلق به همین پروژه است
+    case "$(basename "$c")|$CURDR" in
+      *botsaz*|*faxima*) : ;;
+      *) info "Skipping $(basename "$c"): DocumentRoot '$CURDR' does not look like this project"; continue ;;
+    esac
+    if [ -n "$CURDR" ] && [ "$CURDR" != "$LIVE_ABS" ]; then
+      sed -i "s|^[[:space:]]*DocumentRoot[[:space:]]\{1,\}[^[:space:]#]*|	DocumentRoot $LIVE_ABS|" "$c" 2>/dev/null \
+        && ok "Apache DocumentRoot updated in $(basename "$c"): $CURDR → $LIVE_ABS" \
+        || warn "Could not update DocumentRoot in $c"
+    else
+      [ "$CURDR" = "$LIVE_ABS" ] && ok "Apache DocumentRoot correct in $(basename "$c")"
     fi
   done
   # Nginx
-  for c in /etc/nginx/sites-available/botsaz.conf /etc/nginx/sites-enabled/botsaz.conf; do
+  for c in /etc/nginx/sites-available/*.conf /etc/nginx/sites-enabled/* /etc/nginx/conf.d/*.conf; do
     [ -f "$c" ] || continue
-    if grep -q "root " "$c" 2>/dev/null; then
-      CURR="$(sed -n 's/^[[:space:]]*root[[:space:]]\{1,\}\([^;#]*\);.*/\1/p' "$c" | head -n1 | xargs)"
-      if [ -n "$CURR" ] && [ "$CURR" != "$LIVE_ABS" ]; then
-        sed -i "s|^[[:space:]]*root[[:space:]]\{1,\}[^;#]*;|	root $LIVE_ABS;|" "$c" 2>/dev/null && ok "Nginx root updated in $(basename "$c"): $CURR → $LIVE_ABS"
-      else
-        [ "$CURR" = "$LIVE_ABS" ] && ok "Nginx root correct in $(basename "$c")"
-      fi
+    grep -qE "botsaz|faxima" "$c" 2>/dev/null || continue
+    grep -qE "^[[:space:]]*root[[:space:]]" "$c" 2>/dev/null || continue
+    CURR="$(sed -n 's/^[[:space:]]*root[[:space:]]\{1,\}\([^;#]*\);.*/\1/p' "$c" | head -n1 | xargs)"
+    case "$(basename "$c")|$CURR" in
+      *botsaz*|*faxima*) : ;;
+      *) info "Skipping $(basename "$c"): root '$CURR' does not look like this project"; continue ;;
+    esac
+    if [ -n "$CURR" ] && [ "$CURR" != "$LIVE_ABS" ]; then
+      sed -i "s|^[[:space:]]*root[[:space:]]\{1,\}[^;#]*;|	root $LIVE_ABS;|" "$c" 2>/dev/null \
+        && ok "Nginx root updated in $(basename "$c"): $CURR → $LIVE_ABS" \
+        || warn "Could not update root in $c"
+    else
+      [ "$CURR" = "$LIVE_ABS" ] && ok "Nginx root correct in $(basename "$c")"
     fi
   done
 else
-  info "Skipping vhost edit (not root or DRY-RUN)"
+  info "Skipping vhost edit (not root, DRY-RUN, or source == live)"
 fi
 
 # ===== ۷. وب‌هوک بروزرسانی/تأیید =====
 step "Step 7: Update/verify Telegram webhook"
-if [ "$DRY_RUN" -eq 0 ] && [ -f "$LIVE_DIR/config.php" ]; then
-  TOKEN=$("$PHP_BIN" -r '$c=@include $argv[1]; $t=$c["main_token"]??""; if ($t==="PUT_MAIN_BOT_TOKEN_HERE") $t=""; echo $t;' "$LIVE_DIR/config.php" 2>/dev/null || echo "")
-  BASE=$("$PHP_BIN" -r '$c=@include $argv[1]; $b=$c["base_url"]??""; echo rtrim($b,"/");' "$LIVE_DIR/config.php" 2>/dev/null || echo "")
+if [ "$DRY_RUN" -eq 1 ]; then
+  info "DRY-RUN: would set/verify the Telegram webhook"
+elif [ -f "$LIVE_DIR/config.php" ] && have_php; then
+  TOKEN="$("$PHP_BIN" -r '$c=@include $argv[1]; $t=$c["main_token"]??""; if ($t==="PUT_MAIN_BOT_TOKEN_HERE") $t=""; echo $t;' "$LIVE_DIR/config.php" 2>/dev/null)"
+  BASE="$("$PHP_BIN" -r '$c=@include $argv[1]; echo rtrim((string)($c["base_url"]??""),"/");' "$LIVE_DIR/config.php" 2>/dev/null)"
   if [ -n "$TOKEN" ] && [ -n "$BASE" ]; then
-    # تلاش استفاده از ابزار داخلی
     if [ -f "$LIVE_DIR/tools/set_webhook.php" ]; then
-      php "$LIVE_DIR/tools/set_webhook.php" >/dev/null 2>&1 && ok "Webhook checked/updated via tools/set_webhook.php" || warn "tools/set_webhook.php returned non-zero (check logs)"
-    else
+      if "$PHP_BIN" "$LIVE_DIR/tools/set_webhook.php" >/dev/null 2>&1; then
+        ok "Webhook checked/updated via tools/set_webhook.php"
+      else
+        warn "tools/set_webhook.php returned non-zero (check its output above/logs)"
+        info "Run manually: $PHP_BIN $LIVE_DIR/tools/set_webhook.php"
+      fi
+    elif command -v curl >/dev/null 2>&1; then
       WH_URL="${BASE}/bot.php"
-      RESP=$(curl -s --max-time 10 "https://api.telegram.org/bot${TOKEN}/setWebhook?url=${WH_URL}&drop_pending_updates=true" 2>/dev/null || echo "")
+      RESP="$(curl -s --max-time 10 "https://api.telegram.org/bot${TOKEN}/setWebhook?url=${WH_URL}" 2>/dev/null)"
       if echo "$RESP" | grep -q '"ok":true'; then
         ok "Webhook set successfully: $WH_URL"
       else
         warn "Failed to set webhook via API. Response: ${RESP:0:120}"
-        info "Run manually: php $LIVE_DIR/tools/set_webhook.php"
+        info "Run manually: $PHP_BIN $LIVE_DIR/tools/set_webhook.php"
       fi
+    else
+      warn "Neither tools/set_webhook.php nor curl available – webhook not verified"
     fi
   else
     warn "main_token/base_url missing or placeholder in live config – skipping webhook"
   fi
 else
-  info "Skipping webhook (DRY-RUN or no config)"
+  info "Skipping webhook (no config.php or no PHP CLI)"
 fi
 
-# ===== ۸. بررسی نیازهای توسعه + مایگریشن‌ها (داخل LIVE_DIR) =====
+# ===== ۸. بررسی نیازهای توسعه + مایگریشن‌ها + healthcheck (داخل LIVE_DIR) =====
 step "Step 8: Dev checks & migrations (run in live dir)"
-TODO_CNT=0
-grep -r "TODO\|FIXME" "$SRC_DIR"/*.php "$SRC_DIR"/src "$SRC_DIR"/tools 2>/dev/null | grep -v "config.example" | wc -l >/tmp/todo_cnt_$$ 2>&1 && TODO_CNT=$(cat /tmp/todo_cnt_$$) || TODO_CNT=0
-rm -f /tmp/todo_cnt_$$ 2>/dev/null
+# فقط فایل‌های PHP بررسی می‌شوند (تا خودِ این اسکریپت و لاگ‌ها false-positive ندهند)
+TODO_CNT="$(grep -rE "TODO|FIXME" --include='*.php' "$SRC_DIR"/*.php "$SRC_DIR"/src "$SRC_DIR"/tools 2>/dev/null | grep -v "config.example" | grep -c .)"
+case "$TODO_CNT" in ''|*[!0-9]*) TODO_CNT=0 ;; esac
 if [ "$TODO_CNT" -gt 0 ]; then
   warn "Found $TODO_CNT TODO/FIXME item(s) (first 5):"
-  grep -r "TODO\|FIXME" "$SRC_DIR"/*.php "$SRC_DIR"/src "$SRC_DIR"/tools 2>/dev/null | grep -v "config.example" | head -5
+  grep -rE "TODO|FIXME" --include='*.php' "$SRC_DIR"/*.php "$SRC_DIR"/src "$SRC_DIR"/tools 2>/dev/null | grep -v "config.example" | head -5 | sed 's/^/   /'
 else
   ok "No TODO/FIXME found"
 fi
 
 # مایگریشن‌ها داخل پوشه زنده
-if [ "$DRY_RUN" -eq 0 ] && [ -f "$LIVE_DIR/tools/install.php" ]; then
-  php "$LIVE_DIR/tools/install.php" >/tmp/install_out_$$ 2>&1 || true
-  tail -15 /tmp/install_out_$$ 2>/dev/null | sed 's/^/   /'
-  rm -f /tmp/install_out_$$ 2>/dev/null
-  ok "Installer/migrations executed in $LIVE_DIR"
+if [ -f "$LIVE_DIR/tools/install.php" ] && have_php; then
+  if [ "$DRY_RUN" -eq 1 ]; then
+    info "DRY-RUN: would run $PHP_BIN $LIVE_DIR/tools/install.php"
+  else
+    "$PHP_BIN" "$LIVE_DIR/tools/install.php" > "$BACKUP_DIR/install_out.log" 2>&1
+    _irc=$?
+    tail -15 "$BACKUP_DIR/install_out.log" 2>/dev/null | sed 's/^/   /'
+    if [ "$_irc" -eq 0 ]; then
+      ok "Installer/migrations executed in $LIVE_DIR"
+    else
+      warn "tools/install.php exited with $_irc (see $BACKUP_DIR/install_out.log)"
+    fi
+  fi
 elif [ -f "$LIVE_DIR/tools/install.php" ]; then
-  info "DRY-RUN: would run php $LIVE_DIR/tools/install.php"
+  warn "tools/install.php present but PHP CLI missing – migrations skipped"
 else
   warn "tools/install.php not found in $LIVE_DIR"
+fi
+
+# healthcheck بعد از استقرار (فقط هشدار می‌دهد، خطا نیست)
+if [ "$DRY_RUN" -eq 0 ] && [ -f "$LIVE_DIR/tools/healthcheck.php" ] && have_php; then
+  "$PHP_BIN" "$LIVE_DIR/tools/healthcheck.php" >/dev/null 2>&1
+  _hc=$?
+  if [ "$_hc" -eq 0 ]; then
+    ok "Healthcheck: healthy (no hard errors)"
+  else
+    warn "Healthcheck reported errors (exit $_hc) – run: $PHP_BIN $LIVE_DIR/tools/healthcheck.php"
+  fi
 fi
 
 # پرمیشن‌های قابل نوشتن برای web user
@@ -487,48 +826,105 @@ if [ "$DRY_RUN" -eq 0 ] && [ -n "$WEB_USER" ] && [ "$(id -u)" -eq 0 ]; then
 fi
 
 # ===== ۹. ری‌استارت سرویس‌ها (اختیاری) =====
-if [ "$NO_RESTART" -eq 0 ] && [ "$DRY_RUN" -eq 0 ] && [ "$(id -u)" -eq 0 ]; then
-  step "Step 9: Restarting web/services (safe)"
-  for s in apache2 httpd nginx php8.5-fpm php8.4-fpm php8.3-fpm php8.2-fpm php-fpm; do
-    if systemctl list-units --type=service --full --all 2>/dev/null | grep -q "^${s}.service"; then
-      systemctl reload-or-restart "$s" >/dev/null 2>&1 && ok "Restarted $s" || warn "Could not restart $s"
-    fi
-  done
-elif [ "$NO_RESTART" -eq 1 ]; then
+restart_service() {
+  local s="$1"
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl reload-or-restart "$s" >/dev/null 2>&1 && ok "Restarted $s" && return 0
+    return 1
+  fi
+  if command -v service >/dev/null 2>&1; then
+    service "$s" reload >/dev/null 2>&1 || service "$s" restart >/dev/null 2>&1 && ok "Restarted $s" && return 0
+  fi
+  return 1
+}
+
+if [ "$NO_RESTART" -eq 1 ]; then
+  step "Step 9: Restarting web/services"
   info "NO_RESTART/--web: skipping service restarts"
+elif [ "$DRY_RUN" -eq 1 ]; then
+  step "Step 9: Restarting web/services"
+  info "DRY-RUN: would restart web services"
+elif [ "$(id -u)" -ne 0 ]; then
+  step "Step 9: Restarting web/services"
+  info "Not root: skipping service restarts"
+else
+  step "Step 9: Restarting web/services (safe)"
+  _restarted=0
+  for s in apache2 httpd nginx php8.5-fpm php8.4-fpm php8.3-fpm php8.2-fpm php-fpm; do
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl list-units --type=service --full --all --no-pager 2>/dev/null | grep -q "^${s}.service" || continue
+    elif ! command -v service >/dev/null 2>&1; then
+      continue
+    fi
+    restart_service "$s" && _restarted=$((_restarted + 1)) || warn "Could not restart $s"
+  done
+  [ "$_restarted" -eq 0 ] && info "No managed web service found/restarted"
 fi
 
 # ===== ۱۰. پاک‌سازی فایل‌های حساس در /root برای امنیت بیشتر =====
-step "Step 10: Security cleanup in /root (remove sensitive files)"
-if [ "$DRY_RUN" -eq 0 ] && [[ "$SRC_DIR" == /root/* ]]; then
-  # حذف فایل‌های حساس/تولیدی در روت سورس
-  rm -f "$SRC_DIR/config.php" 2>/dev/null || true
-  rm -f "$SRC_DIR/config.example.php" 2>/dev/null || true
-  rm -f "$SRC_DIR/.htaccess" 2>/dev/null || true
-  rm -f "$SRC_DIR/.gitattributes" 2>/dev/null || true
-  rm -f "$SRC_DIR/.gitignore" 2>/dev/null || true
-  rm -f "$SRC_DIR"/*.lock 2>/dev/null || true
-  rm -f "$SRC_DIR"/*.zip "$SRC_DIR"/*.tar "$SRC_DIR"/*.tar.gz 2>/dev/null || true
-  rm -rf "$SRC_DIR"/__pycache__ "$SRC_DIR"/.cache 2>/dev/null || true
-  # بک‌آپ‌های قدیمی تمیز
-  find /tmp -name "botsaz-config-backup-*" -mtime +7 2>/dev/null | xargs rm -rf 2>/dev/null || true
-  # /root فقط قابل پیمایش
-  chmod 711 /root 2>/dev/null || true
-  ok "Sensitive/temp files removed from $SRC_DIR and old backups cleaned"
-  info "Note: Live files remain intact at $LIVE_DIR"
+step "Step 10: Security cleanup in source (remove secrets only)"
+# فقط فایل‌های «حساس/تولیدی» پاک می‌شوند؛ هرگز فایلِ ردیابی‌شدهٔ گیت (.htaccess/.gitignore/...)
+if [ "$DRY_RUN" -eq 1 ]; then
+  info "DRY-RUN: would clean secrets from source (if it lives under /root)"
+elif [[ "$SRC_DIR" == /root/* ]]; then
+  if [ "$LIVE_DIR" = "$SRC_DIR" ]; then
+    warn "Source == live and both live under /root – skipping cleanup so live config is not deleted"
+  else
+    rm -f "$SRC_DIR/config.php" 2>/dev/null
+    rm -f "$SRC_DIR/.env" "$SRC_DIR/.env.local" "$SRC_DIR/.env.prod" "$SRC_DIR/.env.dev" 2>/dev/null
+    rm -f "$SRC_DIR"/*.bak "$SRC_DIR"/*.swp "$SRC_DIR"/*~ 2>/dev/null
+    rm -f "$SRC_DIR"/*.zip "$SRC_DIR"/*.tar "$SRC_DIR"/*.tar.gz 2>/dev/null
+    rm -rf "$SRC_DIR"/__pycache__ "$SRC_DIR"/.cache 2>/dev/null
+    chmod 711 /root 2>/dev/null
+    ok "Secrets/temp files removed from $SRC_DIR (tracked files untouched)"
+    info "Note: Live files remain intact at $LIVE_DIR"
+  fi
 else
-  info "No root cleanup needed (SRC not under /root or DRY-RUN)"
+  info "Source is not under /root – no cleanup needed"
+fi
+
+# بک‌آپ‌های قدیمی در /tmp (همیشه، مستقل از root)
+find /tmp -maxdepth 1 -name "botsaz-config-backup-*" -mtime +7 -exec rm -rf {} + 2>/dev/null || true
+
+# ===== ۱۰ب. ثبت وضعیت برای --rollback =====
+if [ "$DRY_RUN" -eq 0 ]; then
+  cat > "$STATE_FILE" 2>/dev/null <<STATE
+PREV=$CUR_COMMIT
+NEW=$NEW_COMMIT
+BRANCH=$CUR_BRANCH
+BACKUP=$BACKUP_DIR
+TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+STATE
+  [ -f "$STATE_FILE" ] && info "Rollback state saved: $STATE_FILE (undo with --rollback)"
 fi
 
 # ===== ۱۱. جمع‌بندی =====
 step "Step 11: Summary"
-ok "Update completed successfully"
+if [ "$ROLLBACK" -eq 1 ]; then
+  [ "$DRY_RUN" -eq 1 ] && ok "Rollback dry-run finished: $CUR_COMMIT → $NEW_COMMIT" || ok "Rollback completed: $CUR_COMMIT → $NEW_COMMIT"
+else
+  ok "Update completed"
+fi
 info "Source  : $SRC_DIR"
 info "Live    : $LIVE_DIR"
-[ -n "$APP_VER_SRC" ] && info "Version : $APP_VER_SRC"
+[ -n "$APP_VER_SRC" ] && info "Version : ${_v_l:-$APP_VER_SRC}"
 info "Branch  : $CUR_BRANCH ($NEW_COMMIT)"
-info "Configs preserved: YES (live configs never overwritten by upstream)"
-[ -n "$BACKUP_DIR" ] && info "Backups : $BACKUP_DIR"
+[ "$DRY_RUN" -eq 0 ] && info "Configs preserved: YES (only git-tracked files were touched)"
+[ -n "$BACKUP_DIR" ] && [ -d "$BACKUP_DIR" ] && info "Backups : $BACKUP_DIR"
+if [ "$CUR_COMMIT" != "$NEW_COMMIT" ] && [ "$DRY_RUN" -eq 0 ] && [ "$ROLLBACK" -eq 0 ]; then
+  info "Changes:"
+  git --no-pager diff --stat "$CUR_COMMIT" "$NEW_COMMIT" 2>/dev/null | tail -5 | sed 's/^/   /'
+  info "Undo with: bash tools/update.sh --rollback"
+fi
 echo
-info "If you see any warnings above, re-run: bash tools/install.sh --check"
+if [ "$ERRORS" -gt 0 ]; then
+  fail "Finished with $ERRORS error(s) and $WARNINGS warning(s)"
+  info "Re-check with: bash tools/install.sh --check"
+  exit 1
+fi
+if [ "$WARNINGS" -gt 0 ]; then
+  warn "Finished with $WARNINGS warning(s) – review messages above"
+  info "Re-check with: bash tools/install.sh --check"
+  exit 0
+fi
 exit 0
