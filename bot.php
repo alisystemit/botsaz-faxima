@@ -11,11 +11,21 @@ ini_set('display_errors', '0');
 ini_set('log_errors', '1');
 $GLOBALS['__webhook_json_sent'] = false;
 
-/** پاسخ نهایی JSON + پایان اسکریپت (پرچم پاسخ‌دادن را می‌زند) */
+/**
+ * پاسخ نهایی JSON + پایان اسکریپت (پرچم پاسخ‌دادن را می‌زند).
+ *
+ * کلید "v" نسخهٔ در حال اجرا را لو می‌دهد. همین یک کلید تنها چیزی است که
+ * «فایل روی دیسک تازه است ولی کدِ اجراشده کهنه است» را از بیرون قابل‌تشخیص
+ * می‌کند (opcache، `--no-restart`، یا اجرای یک کپیِ دیگرِ پروژه مثل
+ * ‎/var/www/... به‌جای ‎/root/...)؛ `tools/install.sh --check` همین را با نسخهٔ
+ * روی دیسک مقایسه می‌کند. چیزی جز شمارهٔ نسخه لو نمی‌رود.
+ */
 function webhookDone(array $out = null): void
 {
     $GLOBALS['__webhook_json_sent'] = true;
-    echo json_encode($out ?? ['ok' => true], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    $res = $out ?? ['ok' => true];
+    if (!isset($res['v'])) $res['v'] = Manager::APP_VERSION;
+    echo json_encode($res, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     exit;
 }
 
@@ -1366,6 +1376,13 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
                 'diag'    => $admin ? "لاگ کامل هم در <code>data/logs/</code> و «🔍 دیاگنوز» است." : '',
                 'contact' => $helpContact,
             ]);
+            // نسخهٔ در حال اجرا همیشه پای پیام می‌آید: اولین چیزی که برای
+            // «آپدیت گرفتم ولی ربات همان نسخهٔ قبلی است» باید دیده شود.
+            $help .= "\n\n" . Manager::versionLine();
+            $diskHelp = Manager::diskVersion(__DIR__);
+            if ($diskHelp !== '' && $diskHelp !== Manager::APP_VERSION) {
+                $help .= " (⚠️ نسخهٔ روی دیسک: <code>{$diskHelp}</code> — کدِ در حال اجرا کهنه است؛ سرویس‌ها را ری‌استارت کنید)";
+            }
             BotApi::send($TOKEN, $chatId, $help, ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
             return;
         }
@@ -3236,10 +3253,21 @@ function showDiagnostics(Store $store, array $cfg, string $TOKEN, $chatId, int $
 {
     $lines = [];
     $lines[] = "🖥️ <b>سیستم</b>\n"
+        . Manager::versionLine() . "\n"
         . "PHP: " . PHP_VERSION . "\n"
         . "SAPI: " . PHP_SAPI . "\n"
         . "Server: " . ($_SERVER['SERVER_SOFTWARE'] ?? 'unknown') . "\n"
         . "OS: " . (PHP_OS ?: 'unknown');
+
+    // اگر opcache یا «کپی دیگرِ پروژه» باعث اجرای کد کهنه شده باشد اینجا دیده می‌شود:
+    // نسخهٔ اجراشده (این کد) با نسخهٔ فایل‌های روی دیسک فرق دارد.
+    $diskVer = Manager::diskVersion(__DIR__);
+    if ($diskVer !== '' && $diskVer !== Manager::APP_VERSION) {
+        $lines[] = "⚠️ <b>نسخهٔ روی دیسک با نسخهٔ در حال اجرا فرق دارد</b>\n"
+            . "روی دیسک: <code>" . htmlspecialchars($diskVer, ENT_QUOTES, 'UTF-8') . "</code>\n"
+            . "یعنی یک کپی دیگرِ پروژه اجرا می‌شود یا opcache کهنه مانده ⇒ "
+            . "سرویس‌ها را ری‌استارت کنید و مسیر اجرا را چک کنید.";
+    }
 
     // ---- پسوندهای لازم ----
     $exts = ['curl' => 'curl', 'pdo_sqlite' => 'pdo_sqlite', 'pdo_mysql' => 'pdo_mysql',
@@ -3559,7 +3587,8 @@ function showSelfUpdatePanel(array $cfg, Store $store, string $TOKEN, $chatId, i
 function showSourcePanel(array $cfg, Store $store, string $TOKEN, $chatId, int $msgId = 0): void
 {
     $all = $store->allBots();
-    $head = "🔄 <b>دریافت سورس بروز</b>\n\n"
+    $head = "🔄 <b>دریافت سورس بروز</b>\n"
+        . Manager::versionLine() . "\n\n"
         . "ربات‌های فرزند کپیِ قالب‌ها از لحظهٔ ساختشان‌اند. این پنل کدِ هر ربات را با نسخهٔ فعلیِ <code>templates/</code> هم‌تراز می‌کند.\n"
         . "🛡 <code>config.php</code> و دیتابیس هر ربات <b>دست‌نخورده</b> می‌ماند؛ پیش از هر تغییر هم بکاپ کاملِ پوشهٔ ربات گرفته و همین‌جا فرستاده می‌شود.\n"
         . "ℹ️ سورس تازه باید اول روی سرور بیاید: <code>bash tools/update.sh</code> یا <code>git pull</code>\n";

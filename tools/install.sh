@@ -1517,6 +1517,91 @@ CHILDREN
         fi
     fi
 
+    # ---------- 12) which code is actually running? ----------
+    # گران‌ترین باگِ سرور زنده: git pull می‌خورد، فایل‌های روی دیسک تازه‌اند،
+    # ولی ربات مثل نسخهٔ قبلی رفتار می‌کند. دو علت که هیچ‌جای دیگرِ این گزارش
+    # دیده نمی‌شود:
+    #   الف) وب‌سرور کپیِ دیگری از پروژه را سرو می‌کند
+    #       (مثلاً /var/www/botsaz-faxima در حالی که /root/botsaz-faxima را آپدیت کرده‌ای)
+    #   ب) ورکرهای PHP هنوز بایت‌کد قدیمی را اجرا می‌کنند
+    #       (opcache با validate_timestamps=0 یا update.sh --no-restart)
+    printf '\n  --- 12) Which code is actually running? ---\n'
+    local disk_ver="" live_ver="" live_body="" root_real="" docroot_real=""
+    disk_ver="$(ROOT_DIR="$ROOT_DIR" "$PHP_BIN" -r '
+        $f = getenv("ROOT_DIR")."/src/Manager.php";
+        if (!is_file($f)) exit;
+        $raw = (string)@file_get_contents($f);
+        if (preg_match("/APP_VERSION\s*=\s*.([0-9][^\x27\"]*)./", $raw, $m)) echo $m[1];' 2>/dev/null || true)"
+
+    # (الف) DocumentRoot ویhost خودمان با پوشه‌ای که داریم چک می‌کنیم
+    root_real="$(cd "$ROOT_DIR" 2>/dev/null && pwd -P || printf '%s' "$ROOT_DIR")"
+    docroot_real="$(sed -n 's/^[[:space:]]*DocumentRoot[[:space:]]\{1,\}\([^[:space:]]*\).*/\1/p' \
+        /etc/apache2/sites-available/botsaz.conf 2>/dev/null | head -n1)"
+    if [ -z "$docroot_real" ]; then
+        h_warn "could not read DocumentRoot out of our vhost (/etc/apache2/sites-available/botsaz.conf)"
+        h_note "check it by hand - if it points somewhere else than $root_real, your updates never reach the bot:"
+        h_note "  sudo apache2ctl -S | head -30   &&   sudo grep -n DocumentRoot /etc/apache2/sites-available/botsaz.conf"
+    else
+        local dr_real
+        dr_real="$(cd "$docroot_real" 2>/dev/null && pwd -P || printf '%s' "$docroot_real")"
+        if [ "$dr_real" != "$root_real" ]; then
+            h_fail "Apache serves '$dr_real' but you are checking/updating '$root_real'"
+            h_note "THIS is why an update changes nothing: two copies of the project, one of them live."
+            h_note "pick one - point the vhost here:"
+            h_note "  sudo sed -i 's#^[[:space:]]*DocumentRoot .*#\\tDocumentRoot $root_real#' /etc/apache2/sites-available/botsaz.conf"
+            h_note "  sudo systemctl reload apache2"
+            h_note "or move your update to the served directory:  cd '$dr_real' && bash tools/update.sh"
+            h_note "which copy is newer:  grep -m1 APP_VERSION '$root_real/src/Manager.php' '$dr_real/src/Manager.php' 2>/dev/null"
+        else
+            h_ok "Apache serves this exact directory ($root_real)"
+        fi
+    fi
+    # وجود کپی دوم در جای دیگر خودش دام است
+    for other in /var/www/botsaz-faxima /var/www/html/botsaz-faxima; do
+        if [ -f "$other/bot.php" ] && [ "$other" != "$root_real" ]; then
+            h_warn "another copy of the project exists at $other"
+            h_note "only one of them is live - confirm with: sudo apache2ctl -S | head -30"
+        fi
+    done
+
+    # (ب) نسخه‌ای که کدِ در حال اجرا گزارش می‌کند با نسخهٔ روی دیسک
+    if [ -n "$base_url" ] && [ "${base_url#https://}" != "$base_url" ] && [ -n "$disk_ver" ]; then
+        live_body="$(WEBHOOK_URL="${base_url%/}/bot.php" ROOT_DIR="$ROOT_DIR" "$PHP_BIN" -r '
+            $u = getenv("WEBHOOK_URL"); $root = getenv("ROOT_DIR"); $secret = "";
+            if (is_file($root."/config.php") && is_file($root."/src/Manager.php")) {
+                $cfg = @include $root."/config.php";
+                if (is_array($cfg)) {
+                    require_once $root."/src/Manager.php";
+                    if (class_exists("Manager") && method_exists("Manager","faximaWebhookSecret")) {
+                        $secret = Manager::faximaWebhookSecret((string)($cfg["main_token"] ?? ""));
+                    }
+                }
+            }
+            $hdr = "Content-Type: application/json\r\n";
+            if ($secret !== "") $hdr .= "X-Telegram-Bot-Api-Secret-Token: ".$secret."\r\n";
+            $ctx = stream_context_create(["http" => ["method" => "POST", "header" => $hdr,
+                "content" => "{}", "timeout" => 10, "ignore_errors" => true]]);
+            $b = @file_get_contents($u, false, $ctx);
+            if (is_string($b) && $b !== "") echo $b;' 2>/dev/null | head -c 400 || true)"
+        live_ver="$(printf '%s' "$live_body" | sed -n 's/.*"v"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
+        if [ -z "$live_ver" ]; then
+            h_warn "the live bot.php reports no version (no \"v\" in its answer)"
+            h_note "either the site is unreachable from here, or the running code predates this check"
+            h_note "inside the bot: /help and the diagnostics panel print the running version"
+        elif [ "$live_ver" = "$disk_ver" ]; then
+            h_ok "the running code IS the code on disk (version $live_ver)"
+        else
+            h_fail "STALE CODE: disk says $disk_ver but the running bot.php is $live_ver"
+            h_note "the update did land on disk; the workers execute the old bytecode. Restart them:"
+            h_note "  sudo systemctl restart $(systemctl list-units --type=service --all --no-legend 2>/dev/null | awk '{print $1}' | grep -E '^(php[0-9.]*-fpm|apache2|nginx)\.service$' | tr '\n' ' ')"
+            h_note "if it happens again, opcache is caching files forever - check:"
+            h_note "  sudo grep -R 'opcache.validate_timestamps' /etc/php/*/fpm/conf.d/ /etc/php/*/mods-available/ 2>/dev/null"
+        fi
+    else
+        h_warn "skipped the running-vs-disk version comparison - base_url must be a real https:// URL"
+    fi
+    if [ -n "$disk_ver" ]; then h_ok "version on disk: $disk_ver"; fi
+
     # ---------- summary ----------
     printf '\n==========================================\n'
     if [ "$HC_FAIL" = "0" ] && [ "$HC_WARN" = "0" ]; then

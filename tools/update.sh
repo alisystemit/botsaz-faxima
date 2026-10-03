@@ -11,6 +11,7 @@
 #   ۱. بک‌آپ config files (۳ نسخه آخر نگه داشته می‌شود)
 #   ۲. git fetch + merge با --ff-only (درخت کثیف = abort، نه merge کور)
 #   ۳. بررسی و بازگردانی config
+#   ۳c. استقرار به پوشهٔ وب‌سرور (اگر جداست): rsync از سورس به /var/www/...
 #   ۴. بازسازی .htaccess گمشده + اجرای install.php (مایگریشن‌ها)
 #   ۵. فیکس /root permissions
 #   ۶. ریلود vhost
@@ -208,6 +209,92 @@ for d in "$ROOT_DIR"/bots/*/; do
     restore_one "bots/$(basename "$d")/config.php"
 done
 shopt -u nullglob
+
+# ===== ۳c. استقرار به پوشهٔ وب‌سرور (اگر از این پوشه سرو نمی‌شود) =====
+# این مرحله دقیقاً دلیل «آپدیت کردم ولی ربات همان نسخهٔ قبلی است» است.
+#
+# اگر vhost از مسیر دیگری سرو می‌کند (مثلاً /var/www/botsaz-faxima در حالی که
+# این ریپو /root/botsaz-faxima است)، پس git pull اینجا هیچ اثری روی ربات زنده
+# ندارد: آپاچی اصلاً این پوشه را نمی‌بیند. پس کد را همان‌جا هم می‌بریم.
+#
+# آنچه هرگز کپی نمی‌شود: config.php (توکن و دیتابیس)، data/ (لاگ و دیتابیس
+# مدیریتی) و bots/ (ربات‌های فرزند و کانفیگ‌هایشان) — این‌ها متعلق به همان
+# کپیِ زنده‌اند و کپی‌کردنشان یعنی خراب‌کردن ربات.
+step "Step 3c: Deploying to the web-served directory (if different)..."
+DEPLOY_TARGET=""
+DOCROOT_FOUND=""
+find_docroot() {
+    local c d
+    for c in /etc/apache2/sites-available/botsaz.conf /etc/apache2/sites-available/*.conf; do
+        [ -f "$c" ] || continue
+        grep -q "botsaz\|$ROOT_DIR" "$c" 2>/dev/null || continue
+        d="$(sed -n 's/^[[:space:]]*DocumentRoot[[:space:]]\{1,\}\([^[:space:]]*\).*/\1/p' "$c" 2>/dev/null | head -n1)"
+        if [ -n "$d" ]; then printf '%s' "$d"; return 0; fi
+    done
+    for c in /etc/nginx/sites-enabled/* /etc/nginx/conf.d/*.conf; do
+        [ -f "$c" ] || continue
+        grep -q "botsaz\|$ROOT_DIR" "$c" 2>/dev/null || continue
+        d="$(sed -n 's/^[[:space:]]*root[[:space:]]\{1,\}\([^;]*\);.*/\1/p' "$c" 2>/dev/null | head -n1)"
+        if [ -n "$d" ]; then printf '%s' "$d"; return 0; fi
+    done
+    return 1
+}
+_doc="$(find_docroot 2>/dev/null || true)"
+[ -n "$_doc" ] && [ -d "$_doc" ] && DOCROOT_FOUND="$_doc"
+_root_real="$(cd "$ROOT_DIR" && pwd -P 2>/dev/null || printf '%s' "$ROOT_DIR")"
+if [ -n "$DOCROOT_FOUND" ]; then
+    DEPLOY_TARGET="$(cd "$DOCROOT_FOUND" 2>/dev/null && pwd -P || printf '%s' "$DOCROOT_FOUND")"
+fi
+
+if [ -z "$DOCROOT_FOUND" ]; then
+    ok "no separate web-served directory found (or it is this one) - nothing to deploy"
+elif [ "$DEPLOY_TARGET" = "$_root_real" ]; then
+    ok "the web server already serves this directory - nothing to deploy"
+else
+    warn "the web server serves $DEPLOY_TARGET, but this repo is $_root_real"
+    if [ ! -f "$DEPLOY_TARGET/config.php" ]; then
+        fail "$DEPLOY_TARGET/config.php is missing - the deployed copy has no token/database"
+        echo "  Put your own config there (never the placeholder from the repo):"
+        echo "    cp $BACKUP_DIR/config.php $DEPLOY_TARGET/config.php"
+    fi
+    if command -v rsync >/dev/null 2>&1; then
+        if rsync -a --delete \
+              --exclude '.git/' --exclude 'config.php' --exclude 'data/' --exclude 'bots/' \
+              --exclude '*.bak' --exclude '*.log' \
+              "$ROOT_DIR/" "$DEPLOY_TARGET/"; then
+            ok "code deployed to $DEPLOY_TARGET (config.php, data/ and bots/ untouched)"
+        else
+            fail "rsync to $DEPLOY_TARGET failed - the live site still runs the old code"
+            echo "  By hand:  sudo rsync -a --delete --exclude '.git/' --exclude 'config.php' \\"
+            echo "        --exclude 'data/' --exclude 'bots/' '$ROOT_DIR/' '$DEPLOY_TARGET/'"
+        fi
+    else
+        warn "rsync is not installed - deploying with cp (files removed upstream are kept)"
+        for _i in bot.php index.php nowpayments_ipn.php .htaccess; do
+            [ -f "$ROOT_DIR/$_i" ] && cp -a "$ROOT_DIR/$_i" "$DEPLOY_TARGET/" 2>/dev/null
+        done
+        for _d in src tools templates; do
+            [ -d "$ROOT_DIR/$_d" ] && cp -a "$ROOT_DIR/$_d/." "$DEPLOY_TARGET/$_d/" 2>/dev/null
+        done
+        ok "code copied to $DEPLOY_TARGET (config.php, data/ and bots/ untouched)"
+        echo "  Tip: sudo apt-get install -y rsync"
+    fi
+    # اثبات اینکه استقرار واقعاً نسخهٔ تازه را برده است
+    _v_src="$(grep -m1 'APP_VERSION' "$ROOT_DIR/src/Manager.php" 2>/dev/null | sed -n "s/.*'\([^']*\)'.*/\1/p")"
+    _v_dst="$(grep -m1 'APP_VERSION' "$DEPLOY_TARGET/src/Manager.php" 2>/dev/null | sed -n "s/.*'\([^']*\)'.*/\1/p")"
+    if [ -n "$_v_dst" ] && [ "$_v_dst" = "$_v_src" ]; then
+        ok "the deployed copy reports the same version ($_v_dst)"
+    else
+        warn "the deployed copy reports '${_v_dst:-unknown}' but this repo is '${_v_src:-unknown}'"
+    fi
+    if [ -f "$BACKUP_DIR/config.php" ] && [ -f "$DEPLOY_TARGET/config.php" ]; then
+        if cmp -s "$BACKUP_DIR/config.php" "$DEPLOY_TARGET/config.php" 2>/dev/null; then
+            ok "the deployed config.php is the one that was already live ✓"
+        fi
+    fi
+fi
+unset _doc _root_real _v_src _v_dst _i _d DEPLOY_TARGET DOCROOT_FOUND
+unset -f find_docroot
 
 # ===== ۴. بازسازی .htaccess گمشده (لیست از خود مخزن) =====
 step "Step 4: Checking .htaccess files..."
@@ -520,10 +607,36 @@ if [ "$WEB" -eq 1 ]; then
     echo "  cron run update.sh) to load the new code:"
     echo "    systemctl restart apache2  (or nginx + php-fpm)"
     echo ""
+elif [ "$NO_RESTART" -eq 1 ]; then
+    # --no-restart یعنی «کد روی دیسک تازه شد ولی ورکرهای PHP هنوز کهنه‌اند».
+    # اگر opcache بی‌نهایت کش کند، ربات تا ری‌استارت دستی همان نسخهٔ قبلی است —
+    # و همان چیزی است که «آپدیت کردم ولی ربات عوض نشد» را می‌سازد.
+    _vt="$(php -i 2>/dev/null | sed -n 's/^opcache\.validate_timestamps => \(.*\)/\1/p' | head -n1)"
+    if [ -z "$_vt" ]; then
+        _vt="$(php -r 'echo (ini_get("opcache.validate_timestamps") === false || ini_get("opcache.validate_timestamps")) ? "1" : "0";' 2>/dev/null)"
+    fi
+    echo "  NOTE (--no-restart): the files on disk are new, the running PHP is NOT."
+    if [ "${_vt:-1}" = "0" ]; then
+        echo "  ⚠️  opcache.validate_timestamps=0 ⇒ PHP never re-reads a changed file."
+        echo "      The bot WILL keep behaving like the old version until you run:"
+        echo "        systemctl restart php*-fpm apache2"
+    else
+        echo "  opcache.validate_timestamps=${_vt:-1} ⇒ PHP re-reads changed files within ~2s,"
+        echo "  but if the panel still looks old, restart anyway:"
+        echo "    systemctl restart php*-fpm apache2"
+    fi
+    unset _vt
+    echo ""
 fi
-echo "  NOTE: child bots run COPIES of the templates from build time -"
-echo "  their code was NOT updated by this script. Rebuild a child bot"
-echo "  (or patch its folder by hand) if the update fixed template code."
+echo "  Child bots run COPIES of the templates from build time - this script"
+echo "  never touches bots/<slug>/. When the template code changed, sync the"
+echo "  child bots from inside the bot itself:"
+echo "    «⬆️ آپدیت ربات‌ساز» (git pull = this script)  →  «🔄 دریافت سورس بروز» (bots/<slug>/)"
+echo "  Each sync takes a full backup of the bot folder first and never touches"
+echo "  the child's config.php or database."
+echo ""
+echo "  Sanity check after any update:"
+echo "    bash tools/install.sh --check   # section 12 compares disk vs running code"
 echo ""
 echo "  If any [✘] appeared above:"
 echo "    bash tools/install.sh --check  (detailed check)"

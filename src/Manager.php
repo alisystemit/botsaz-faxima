@@ -38,6 +38,44 @@ class Manager
     /** یک منبع واحد برای secret_key تا همه‌جا (bot.php / healthcheck / cron / tools) یکی باشند */
     public const DEFAULT_SECRET_KEY = 'change-this-to-a-random-string';
 
+    /**
+     * نسخهٔ اپلیکیشن (ربات‌ساز) — هر آپدیت سورس باید این عدد را یکی زیاد کند.
+     *
+     * چرا لازم است: روی سرور، «کدِ روی دیسک» و «کدی که PHP-FPM اجرا می‌کند»
+     * می‌توانند فرق داشته باشند (opcache با validate_timestamps=0، یا
+     * --no-restart در update.sh، یا اجرای یک کپیِ دیگرِ پروژه مثل
+     * /var/www/botsaz-faxima به‌جای /root/botsaz-faxima). آن‌وقت ادمین فکر
+     * می‌کند «آپدیت کار نکرد» در حالی که اصلاً کد تازه اجرا نشده.
+     *
+     * این عدد سه جا دیده می‌شود و همین سه‌تایی مشکل را لو می‌دهد:
+     *   • پاسخ JSON وبهوک (کلید "v") ⇒ install.sh آن را با نسخهٔ روی دیسک مقایسه می‌کند
+     *   • پنل «🔍 دیاگنوز» و پیام /help ⇒ ادمین می‌بیند چه نسخه‌ای اجرا می‌شود
+     *   • tools/install.sh --check ⇒ خطای «نسخهٔ کهنه در حال اجرا» می‌دهد
+     */
+    public const APP_VERSION = '1.1.0';
+
+    /** نسخه + اطلاعات کاربردی برای نمایش در پنل‌ها */
+    public static function versionLine(): string
+    {
+        return 'نسخهٔ ربات‌ساز: ' . self::APP_VERSION;
+    }
+
+    /**
+     * نسخهٔ نوشته‌شده در فایل‌های روی دیسک — یعنی «کدی که باید اجرا شود».
+     *
+     * این با APP_VERSION فرق دارد وقتی یک کپیِ دیگرِ پروژه اجرا می‌شود
+     * (مثلاً ‎/var/www/... به‌جای ‎/root/...) یا وقتی فایل‌ها دستی عوض شده‌اند.
+     * خالی یعنی فایل ناخوانده/ناموجود است و نباید هشدار ساخت.
+     */
+    public static function diskVersion(string $rootDir): string
+    {
+        $file = rtrim(str_replace('\\', '/', $rootDir), '/') . '/src/Manager.php';
+        if (!is_file($file)) return '';
+        $raw = @file_get_contents($file);
+        if (!is_string($raw)) return '';
+        return preg_match('/APP_VERSION\s*=\s*\'([^\']+)\'/', $raw, $m) ? (string)$m[1] : '';
+    }
+
     public static function secretKey(?array $cfg): string
     {
         $k = trim((string)($cfg['secret_key'] ?? ''));
