@@ -126,12 +126,37 @@ class SelfUpdate
         return DIRECTORY_SEPARATOR === '\\';
     }
 
-    /** خروجی یک دستور git کوتاه با timeout؛ '' یعنی ناموفق */
+    /** آیا gitِ این نصب از --no-optional-locks پشتیبانی می‌کند؟ (git ≥ 2.15) */
+    private static $noOptLocks = null;
+
+    /**
+     * خروجی یک دستور git کوتاه با timeout؛ '' یعنی ناموفق
+     *
+     * همهٔ این فراخوانی‌ها «خواندنی»‌اند و با --no-optional-locks اصلاً
+     * .git/index.lock نمی‌سازند. یک gitِ وسطِ کارِ کشته‌شده (بسته‌شدن لوله توسط
+     * PHP، کشته‌شدن وبهوک) قفل را رها می‌کند و از آن پس هر git reset با
+     * «Unable to create index.lock: File exists» می‌شکند؛ status و fetch اما
+     * سالم می‌مانند و دقیقاً همان خطای گیج‌کنندهٔ «reset hard failed» پیش می‌آید.
+     */
     private static function git(string $args, int $timeout = 8): string
+    {
+        $flag = (self::$noOptLocks === null || self::$noOptLocks) ? '--no-optional-locks ' : '';
+        $out = self::gitRun($args, $timeout, $flag);
+        // gitِ قدیمی (< 2.15) این گزینه را نمی‌شناسد ⇒ یک بار بدون آن دوباره امتحان کن.
+        // پیامِ خودِ گزینه باید دیده شود تا خطای بی‌ربط («unknown option» دیگر)
+        // باعثِ خاموش‌شدنِ دائمیِ این محافظ نشود.
+        if ($flag !== '' && preg_match('/unknown option[^\n]*no-optional-locks/i', $out)) {
+            self::$noOptLocks = false;
+            $out = self::gitRun($args, $timeout, '');
+        }
+        return $out;
+    }
+
+    private static function gitRun(string $args, int $timeout, string $flag): string
     {
         $dir = self::repoDir();
         $cmd = 'git -c safe.directory=' . escapeshellarg($dir)
-            . ' --no-pager ' . $args . ' 2>&1';
+            . ' --no-pager ' . $flag . $args . ' 2>&1';
         $descriptorspec = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
         $proc = @proc_open($cmd, $descriptorspec, $pipes, $dir);
         if (!is_resource($proc)) {
@@ -140,14 +165,24 @@ class SelfUpdate
             return trim($out);
         }
         fclose($pipes[0]);
-        @stream_set_timeout($pipes[1], $timeout);
+        // تایم‌اوت کوچکِ استریم + مهلت کلِ خودمان؛ این‌طور هم خروجی تا انتها خوانده
+        // می‌شود هم زمانِ کل دقیقاً کنترل است.
+        @stream_set_timeout($pipes[1], 1);
         $out = '';
-        while (!feof($pipes[1])) {
+        $deadline = microtime(true) + max(2, $timeout);
+        $eof = false;
+        // تا انتها می‌خوانیم و فقط ذخیره را محدود می‌کنیم؛ بستنِ زودهنگامِ لوله
+        // باعث می‌شود git وسطِ نوشتن با EPIPE بمیرد و قفل را رها کند.
+        while (true) {
             $chunk = fgets($pipes[1]);
-            if ($chunk === false) break;
-            $out .= $chunk;
-            if (strlen($out) > 65536) break;
+            if ($chunk === false) {
+                if (feof($pipes[1])) { $eof = true; break; }
+                if (microtime(true) >= $deadline) break;
+                continue;   // بدونِ داده بود؛ تا موعد دوباره گوش می‌دهیم
+            }
+            if (strlen($out) < 65536) $out .= $chunk;
         }
+        if (!$eof) @proc_terminate($proc, 9);   // واقعاً timeout ⇒ پروسه را بکش
         fclose($pipes[1]);
         fclose($pipes[2]);
         @proc_close($proc);
@@ -365,10 +400,30 @@ class SelfUpdate
         }
         usleep(800000); // 0.8s برای اینکه لاگ شروع شود
         $tail = self::logTail(5);
-        if (str_contains((string)$out, 'started') || self::isRunning()) {
-            return "✅ بروزرسانی در پس‌زمینه شروع شد.\nلاگ زنده: «📜 آخرین لاگ آپدیت».\nپس از اتمام، ادمین از تلگرام نوتیفیکیشن می‌گیرد و کد جدید بعد از ری‌استارت دستی/کرون اعمال می‌شود.";
+        if (!str_contains((string)$out, 'started') && !self::isRunning()) {
+            return "⚠️ اجرای پس‌زمینه تأیید نشد. آخرین لاگ:\n" . ($tail !== '' ? $tail : '(خالی)');
         }
-        return "⚠️ اجرای پس‌زمینه تأیید نشد. آخرین لاگ:\n" . ($tail !== '' ? $tail : '(خالی)');
+        if (!self::isRunning()) {
+            // خیلی زود تمام شد: اگر با خطا تمام شده باشد نباید «✅ شروع شد» بگوییم.
+            // همین پیامِ دروغینِ موفقیت بود که ادمین را گیج می‌کرد (لاگِ شکست، پیامِ موفقیت).
+            $seg = self::logSinceLastMarker();
+            if ($seg !== '' && preg_match('/✘|fatal:|Another update is already running/i', $seg)) {
+                return "⚠️ بروزرسانی همان ابتدا متوقف شد:\n<pre>"
+                    . htmlspecialchars(mb_substr($seg, -1500), ENT_QUOTES, 'UTF-8') . "</pre>";
+            }
+        }
+        return "✅ بروزرسانی در پس‌زمینه شروع شد.\nلاگ زنده: «📜 آخرین لاگ آپدیت».\nپس از اتمام، ادمین از تلگرام نوتیفیکیشن می‌گیرد و کد جدید بعد از ری‌استارت دستی/کرون اعمال می‌شود.";
+    }
+
+    /** فقط بخشِ بعد از آخرین مارکرِ لاگ (یعنی خروجی همین اجرای نو) */
+    private static function logSinceLastMarker(): string
+    {
+        $f = self::logPath();
+        if (!is_file($f)) return '';
+        $s = (string)@file_get_contents($f);
+        if ($s === '') return '';
+        $p = strrpos($s, '========== SelfUpdate');
+        return $p === false ? $s : substr($s, $p);
     }
 
     /** آیا الان update.sh در حال اجراست؟ (بر اساس فایل قفل + ps) */

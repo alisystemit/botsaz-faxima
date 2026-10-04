@@ -60,7 +60,78 @@ foreach ($targets as $rel) {
     }
 }
 
+// ---- ۳) هر callback_data که bot.php/Nav.php می‌فرستند باید در handleCallback پردازش شود ----
+//
+// دقیقاً همان باگی که دکمهٔ «🏠 منو» در پنل‌های ⬆️/🔄 را می‌شکست: callback_data
+// برابر 'menu' بود ولی هیچ شاخه‌ای برایش نبود ⇒ کاربر «این دکمه دیگر معتبر نیست»
+// می‌گرفت. این بررسی جلوی تکرارش را برای همهٔ دکمه‌ها می‌گیرد.
+$botSrc  = (string)file_get_contents($root . '/bot.php');
+$navSrc  = (string)file_get_contents($root . '/src/Nav.php');
+
+$navConst = [];
+if (preg_match_all("/const\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*'([^']*)'/", $navSrc, $m, PREG_SET_ORDER)) {
+    foreach ($m as $c) { $navConst[$c[1]] = $c[2]; }
+}
+
+$emitted = [];
+foreach ([$botSrc, $navSrc] as $src) {
+    if (!preg_match_all("/callback_data'\\s*=>\\s*(?:'([^']*)'|Nav::([A-Za-z_][A-Za-z0-9_]*))/", $src, $m, PREG_SET_ORDER)) {
+        continue;
+    }
+    foreach ($m as $hit) {
+        $v = (isset($hit[1]) && $hit[1] !== '') ? $hit[1] : ($navConst[$hit[2]] ?? null);
+        if (is_string($v) && $v !== '') $emitted[] = $v;
+    }
+}
+$emitted = array_values(array_unique($emitted));
+
+$exact = [];
+if (preg_match_all('/\$data\\s*===\\s*(?:\'([^\']*)\'|Nav::([A-Za-z_][A-Za-z0-9_]*))/', $botSrc, $m, PREG_SET_ORDER)) {
+    foreach ($m as $hit) {
+        $v = (isset($hit[1]) && $hit[1] !== '') ? $hit[1] : ($navConst[$hit[2]] ?? null);
+        if (is_string($v) && $v !== '') $exact[] = $v;
+    }
+}
+$prefixes = [];
+if (preg_match_all('/str_starts_with\\(\\s*\\$data\\s*,\\s*\'([^\']*)\'\\s*\\)/', $botSrc, $m, PREG_OFFSET_CAPTURE)) {
+    $hits = $m[1];
+    $n = count($hits);
+    for ($i = 0; $i < $n; $i++) {
+        $p = $hits[$i][0];
+        $from = $hits[$i][1];
+        // بدنهٔ همان if تا شروعِ شرط بعدی؛ بعضی خانواده‌ها (pay:/texts:/newbot:)
+        // کل $data را به تابع دیگر می‌سپارند و بعضی‌ها (su:/src:/backup:) با
+        // $action = substr داخلی توزیع می‌کنند. فقط برای دستهٔ دوم پسوند مهم است.
+        $block = (string)substr($botSrc, $from, 1500);
+        if ($i + 1 < $n) {
+            $len = $hits[$i + 1][1] - $from;
+            if ($len > 0 && $len < 1500) $block = (string)substr($botSrc, $from, $len);
+        }
+        $prefixes[$p] = ($prefixes[$p] ?? false) || strpos($block, '$action = substr(') !== false;
+    }
+}
+// مقادیر داخلیِ خانواده‌های پیشوندیِ توزیع‌کننده: if (str_starts_with($data,'src:')) { $action=substr(...); if ($action==='go') …
+$actions = [];
+if (preg_match_all('/\$action\\s*===\\s*\'([^\']*)\'/', $botSrc, $m)) {
+    $actions = $m[1];
+}
+
+$unhandled = [];
+foreach ($emitted as $cb) {
+    $handled = in_array($cb, $exact, true);
+    if (!$handled) {
+        foreach ($prefixes as $p => $dispatched) {
+            if ($p === '' || strncmp($cb, $p, strlen($p)) !== 0) continue;
+            $suffix = substr($cb, strlen($p));
+            // خانوادهٔ واگذارشده: هر پسوندی پردازش می‌شود. خانوادهٔ توزیع‌کننده:
+            // یا پسوند خالی است (رشته با قطعات متغیر ساخته شده) یا شاخهٔ داخلی دارد.
+            if (!$dispatched || $suffix === '' || in_array($suffix, $actions, true)) { $handled = true; break; }
+        }
+    }
+    if (!$handled) { $unhandled[] = $cb; $bad++; echo "NO HANDLER  callback_data '{$cb}' ارسال می‌شود ولی در handleCallback پردازش نمی‌شود\n"; }
+}
+
 echo $bad === 0
-    ? "STATIC CHECK CLEAN ({$checked} فراخوانی کلاسی بررسی شد)\n"
+    ? "STATIC CHECK CLEAN ({$checked} فراخوانی کلاسی + " . count($emitted) . " callback_data بررسی شد)\n"
     : "STATIC CHECK FAILED: {$bad} مورد نامعتبر\n";
 exit($bad === 0 ? 0 : 1);

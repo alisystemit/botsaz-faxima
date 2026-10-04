@@ -61,6 +61,81 @@ step() { echo -e "\n${B}━━━ $1 ━━━${NC}"; }
 info() { echo -e "   $1"; }
 die()  { fail "$1"; exit "${2:-1}"; }
 
+# ===== پاک‌سازی قفل‌های باقی‌ماندهٔ git =====
+#
+# اگر یک عملیات git وسطِ کار کشته شود (kill وبهوک، Ctrl+C، timeout و …)
+# فایل‌هایی مثل .git/index.lock یا .git/refs/remotes/origin/*.lock باقی می‌مانند.
+# از آن لحظه به بعد همه‌چیز «نصفه» کار می‌کند: git status و git fetch معمولاً
+# سالم‌اند ولی هر git reset/merge با «Unable to create index.lock: File exists»
+# می‌شکند — دقیقاً همان خطای گیج‌کننده‌ای که ادمین می‌بیند.
+#
+# فقط وقتی قفل «بی‌صاحب» است پاک می‌شود:
+#   • اگر پروسهٔ git دیگری واقعاً روی همین مخزن کار می‌کند، دست نمی‌زند.
+#   • اگر نمی‌شود پروسه‌ها را بازرسی کرد (غیر از لینوکس)، فقط قفلِ ≥۶۰ ثانیه‌ای.
+#   • حذف هم که نشد، فقط هشدار می‌دهد تا خطای واقعیِ git بعداً دیده شود.
+_stale_git_busy() {
+  # خروجی 0 یعنی الان git دیگری روی همین مخزن زنده است (فقط لینوکس با /proc)
+  local p cwd exe cl
+  [ "$(uname -s 2>/dev/null)" = "Linux" ] && [ -d /proc ] || return 1
+  for p in /proc/[0-9]*; do
+    exe="$(basename "$(readlink -f "$p/exe" 2>/dev/null)" 2>/dev/null)"
+    case "$exe" in git*) ;; *) continue ;; esac
+    cwd="$(readlink -f "$p/cwd" 2>/dev/null)"
+    case "$cwd" in
+      "$SRC_DIR"|"$SRC_DIR"/*) return 0 ;;
+    esac
+    # «git -C مسیر» یا «--git-dir=…» ممکن است از بیرونِ مخزن اجرا شده باشد
+    cl="$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null)"
+    case "$cl" in
+      *"$SRC_DIR"*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+clear_stale_git_locks() {
+  local lock now mt age left=0 have_proc=0
+
+  if _stale_git_busy; then
+    warn "Another git process is running on $SRC_DIR – leaving .git lock files alone"
+    return 1
+  fi
+  # جایی که نمی‌شود پروسه‌ها را بازرسی کرد فقط قفلِ مشخصاً کهنه برمی‌داشته می‌شود
+  [ "$(uname -s 2>/dev/null)" = "Linux" ] && [ -d /proc ] && have_proc=1
+  now="$(date +%s 2>/dev/null || echo '')"
+
+  for lock in "$SRC_DIR/.git/index.lock" \
+              "$SRC_DIR/.git/HEAD.lock" \
+              "$SRC_DIR/.git/packed-refs.lock" \
+              "$SRC_DIR"/.git/refs/remotes/*.lock \
+              "$SRC_DIR"/.git/refs/remotes/*/*.lock \
+              "$SRC_DIR"/.git/refs/heads/*.lock; do
+    [ -f "$lock" ] || continue
+    age='?'
+    mt="$(stat -c %Y "$lock" 2>/dev/null || echo '')"
+    if [ -n "$now" ] && [ -n "$mt" ] && [ "$mt" -le "$now" ] 2>/dev/null; then
+      age=$((now - mt))
+      if [ "$have_proc" -eq 0 ] && [ "$age" -lt 60 ]; then
+        warn "$(basename "$lock") is only ${age}s old – leaving it (a git run may have just started)"
+        left=$((left + 1))
+        continue
+      fi
+    elif [ "$have_proc" -eq 0 ]; then
+      warn "Cannot read $(basename "$lock") age – leaving it in place"
+      left=$((left + 1))
+      continue
+    fi
+    if rm -f "$lock" 2>/dev/null; then
+      ok "Removed stale ${lock#"$SRC_DIR"/} (age ${age}s) left by an interrupted git run"
+    else
+      warn "Cannot remove $lock (permissions?) – git will keep failing until it is gone"
+      left=$((left + 1))
+    fi
+  done
+  [ "$left" -eq 0 ] && return 0
+  return 1
+}
+
 print_help() {
   cat <<'HELP'
   ===== بروزرسانی ربات‌ساز (tools/update.sh) =====
@@ -342,6 +417,18 @@ if [ -s "$BACKUP_DIR/local_changes.patch" ]; then
 fi
 info "Backup dir: $BACKUP_DIR"
 
+# قفلِ باقی‌ماندهٔ index.lock را قبل از هر نوشتنی در git برمی‌داریم. اگر یک اجرای
+# قبلی وسطِ کار کشته شده باشد این فایل می‌ماند و بعداً هر reset/merge را با
+# «Unable to create index.lock: File exists» می‌کُشد، در حالی که status و fetch
+# همچنان سالم‌اند. در dry-run فقط هشدار می‌دهیم و چیزی حذف نمی‌کنیم.
+if [ "$DRY_RUN" -eq 1 ]; then
+  if [ -f "$SRC_DIR/.git/index.lock" ]; then
+    warn "A stale .git/index.lock exists – a real run would remove it first"
+  fi
+else
+  clear_stale_git_locks
+fi
+
 # فایل وضعیت (برای --rollback) – مسیرش را زودتر تعریف می‌کنیم
 STATE_FILE="$SRC_DIR/data/last_update.state"
 # آخرین نسخه‌ای که واقعاً روی زنده استقرار یافته (برای حذفِ فایل‌های حذف‌شده در آپدیت جدید)
@@ -373,14 +460,21 @@ if [ "$ROLLBACK" -eq 1 ]; then
     if [ -s "$BACKUP_DIR/local_changes.patch" ]; then
       warn "Local changes were backed up before rollback: $BACKUP_DIR/local_changes.patch"
     fi
-    git reset --hard "$REC_PREV" >/dev/null 2>&1 || die "git reset --hard $REC_PREV failed"
+    _rb_err="$(git reset --hard "$REC_PREV" 2>&1)"
+    if [ $? -ne 0 ]; then
+      fail "git reset --hard $REC_PREV failed:"
+      [ -n "$_rb_err" ] && printf '%s\n' "$_rb_err" | sed 's/^/   /'
+      die "git reset --hard $REC_PREV failed"
+    fi
     RESET_OCCURRED=1
     ok "Source reset to $REC_PREV"
   fi
 else
-  if git fetch --prune origin 2>/dev/null; then
+  _fetch_err="$(git fetch --prune origin 2>&1)"
+  if [ $? -eq 0 ]; then
     ok "Fetched origin/$CUR_BRANCH"
   else
+    [ -n "$_fetch_err" ] && { warn "git fetch output:"; printf '%s\n' "$_fetch_err" | sed 's/^/   /'; }
     if [ "$FORCE" -eq 1 ]; then
       warn "git fetch failed – continuing with local commits (--force)"
     else
@@ -410,9 +504,38 @@ if [ "$DO_RESET" -eq 1 ]; then
       info "Locally modified tracked files:"
       git status --short --untracked-files=no 2>/dev/null | head -10 | sed 's/^/   /'
       info "Their diff is saved: $BACKUP_DIR/local_changes.patch"
-      git reset --hard "origin/$CUR_BRANCH" 2>/dev/null || die "git reset --hard failed"
-      RESET_OCCURRED=1
-      ok "Source tree reset to clean origin/$CUR_BRANCH"
+      _reset_err="$(git reset --hard "origin/$CUR_BRANCH" 2>&1)"
+      _reset_rc=$?
+      if [ "$_reset_rc" -ne 0 ]; then
+        # خطای واقعیِ git را حتماً نشان بده (قبلاً پشت 2>/dev/null پنهان می‌شد)
+        fail "git reset --hard origin/$CUR_BRANCH failed:"
+        [ -n "$_reset_err" ] && printf '%s\n' "$_reset_err" | sed 's/^/   /'
+        _first_err="$(printf '%s' "$_reset_err" | head -1)"
+        case "$_first_err" in
+          *'File exists'*)
+            die "git could not create .git/index.lock (another git run left it behind). Remove it manually: rm -f $SRC_DIR/.git/index.lock" ;;
+          *Permission*|*permission*|*'Read-only'*|*denied*)
+            die "No write permission on the source tree ($SRC_DIR). Run once as a user that owns it: sudo bash tools/update.sh" ;;
+        esac
+        # اگر محتوای فایل‌ها از قبل دقیقاً با origin یکی است، نوشتنِ فایل‌ها لازم
+        # نیست؛ کافی است HEAD و index جلو بروند (reset معمولی بدون --hard).
+        if git diff --quiet "origin/$CUR_BRANCH" 2>/dev/null; then
+          info "Working tree already matches origin/$CUR_BRANCH – only fast-forwarding HEAD"
+          _ff_err="$(git reset "origin/$CUR_BRANCH" 2>&1)"
+          if [ $? -ne 0 ]; then
+            fail "git reset (mixed) also failed:"
+            printf '%s\n' "$_ff_err" | sed 's/^/   /'
+            die "git reset failed"
+          fi
+          RESET_OCCURRED=1
+          ok "Source HEAD fast-forwarded to origin/$CUR_BRANCH (no file had to be rewritten)"
+        else
+          die "git reset --hard failed: ${_first_err:-unknown git error}"
+        fi
+      else
+        RESET_OCCURRED=1
+        ok "Source tree reset to clean origin/$CUR_BRANCH"
+      fi
     else
       ok "Working tree clean"
     fi
@@ -427,7 +550,15 @@ if [ "$DO_RESET" -eq 1 ]; then
         head -5 "$BACKUP_DIR/clean_plan.txt" | sed 's/^/   /'
       fi
     fi
-    git merge --ff-only "origin/$CUR_BRANCH" >/dev/null 2>&1 || true
+    # HEAD را با origin جلو می‌بریم. خطا را قبلاً کاملاً بی‌صدا نادیده می‌گرفتیم
+    # (|| true) و آپدیتِ بی‌نتیجه «موفق» گزارش می‌شد؛ حالا هشدار دیده می‌شود.
+    _merge_err="$(git merge --ff-only "origin/$CUR_BRANCH" 2>&1)"
+    if [ $? -ne 0 ]; then
+      case "$_merge_err" in
+        *'not something we can merge'*|*'Already up to date'*|*'Already up-to-date'*) : ;;
+        *) warn "git merge --ff-only origin/$CUR_BRANCH did not fast-forward:"; printf '%s\n' "$_merge_err" | sed 's/^/   /' ;;
+      esac
+    fi
   fi
 fi
 

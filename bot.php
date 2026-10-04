@@ -2278,12 +2278,13 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
         // را می‌زد و پیام «انصراف داده شد» می‌گرفت.
         $openForUser = $data === 'cancel'
             || $data === Nav::CB_BACK_MAIN
+            || $data === 'menu'   // کیبورد کهنهٔ پنل‌های ⬆️/🔄
             || $data === Nav::CB_BACK_TYPE
             || $data === Nav::CB_MY_BOTS
             || str_starts_with($data, 'pay:')
             || str_starts_with($data, 'newbot:');
         if ($openForUser) {
-            if ($data === 'cancel' || $data === Nav::CB_BACK_MAIN) {
+            if ($data === 'cancel' || $data === Nav::CB_BACK_MAIN || $data === 'menu') {
                 $store->clearStep($uid);
                 if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, "❌ انصراف داده شد.");
                 BotApi::send($TOKEN, $chatId, "🏠 منوی اصلی", ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
@@ -2315,7 +2316,9 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
     }
 
     // ===== برگشت‌های اینلاین (همیشه بدون خطا) =====
-    if ($data === Nav::CB_BACK_MAIN) {
+    // «menu» callback_dataِ کیبوردهای کهنهٔ پنل‌های ⬆️/🔄 است؛ اگر قبولش نکنیم
+    // کاربر پس از زدن «🏠 منو» پیام «این دکمه دیگر معتبر نیست» می‌گیرد.
+    if ($data === Nav::CB_BACK_MAIN || $data === 'menu') {
         $store->clearStep($uid);
         if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, "🏠 منوی اصلی");
         BotApi::send($TOKEN, $chatId, "🏠 منوی اصلی", ['reply_markup' => mainMenu($store->user($uid), $SUPERS, $store)]);
@@ -2523,10 +2526,10 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
             $st = SelfUpdate::status();
             $txt = "⚠️ <b>اجرای آپدیت ربات‌ساز</b>\n\n"
                 . "شاخه: <code>{$st['branch']}</code> | کامیت: <code>{$st['commit']}</code>\n"
-                . ($st['dirty'] ? "⚠️ <b>درخت کثیف است</b>: فایل tracked روی سرور دستی عوض شده — آپدیتر خودش می‌ایستد.\n" : "درخت کاری تمیز ✓\n")
+                . ($st['dirty'] ? "⚠️ <b>درخت کثیف است</b>: فایل tracked روی سرور دستی عوض شده — تغییراتش اول بکاپ گرفته می‌شود و بعد درخت با origin هم‌تراز می‌شود (توقف نمی‌آید).\n" : "درخت کاری تمیز ✓\n")
                 . "\nچه اتفاقی می‌افتد:\n"
                 . "• بکاپ <code>config.php</code> و <code>bots/*/config.php</code>\n"
-                . "• <code>git pull --ff-only</code>\n"
+                . "• <code>git fetch</code> و هم‌ترازسازی با <code>origin</code>\n"
                 . "• برگرداندن <code>config.php</code> و <code>.htaccess</code> در صورت نیاز\n"
                 . "• اجرای مایگریشن‌ها\n"
                 . "• <b>دیتابیس و دیتاها دست‌نخورده</b>\n"
@@ -3530,7 +3533,11 @@ function showSelfUpdatePanel(array $cfg, Store $store, string $TOKEN, $chatId, i
 {
     $probs = SelfUpdate::problems();
     $st = SelfUpdate::status();
-    $dirty = $st['dirty'] ? "⚠️ <b>درخت کثیف</b> (فایل‌های tracked دستی عوض شده — آپدیت متوقف می‌شود)" : '✓ درخت تمیز';
+    // درخت کثیف «توقف» نمی‌آورد: update.sh اول diff را بکاپ می‌گیرد و بعد درخت را
+    // با origin هم‌تراز می‌کند. پیامِ قبلی («آپدیت متوقف می‌شود») با رفتار واقعی نمی‌خواند.
+    $dirty = $st['dirty']
+        ? "⚠️ <b>درخت کثیف</b> (فایل‌های tracked دستی عوض شده — قبل از آپدیت بکاپ گرفته و با origin هم‌تراز می‌شود)"
+        : '✓ درخت تمیز';
     $behind = $st['behind'] >= 0 ? ($st['behind'] > 0 ? "🟡 {$st['behind']} کامیت عقب" : '🟢 هم‌تراز با origin') : '؟';
     $txt = "⬆️ <b>آپدیت ربات‌ساز</b>\n\n"
         . "شاخه: <code>{$st['branch']}</code> | آخرین کامیت: <code>{$st['commit']}</code>\n"
@@ -3551,13 +3558,34 @@ function showSelfUpdatePanel(array $cfg, Store $store, string $TOKEN, $chatId, i
     if ($probs === []) $rows[] = [['text' => '⬇️ اجرای بروزرسانی', 'callback_data' => 'su:ask']];
     $rows[] = [['text' => '🔄 بررسی نسخهٔ تازه (git fetch)', 'callback_data' => 'su:check']];
     $rows[] = [['text' => '📜 آخرین لاگ کامل', 'callback_data' => 'su:log']];
-    $rows[] = [['text' => '🏠 منو', 'callback_data' => 'menu']];
+    $rows[] = [['text' => '🏠 منو', 'callback_data' => Nav::CB_BACK_MAIN]];
     $kb = BotApi::ikb($rows);
     if ($msgId > 0) {
         BotApi::edit($TOKEN, $chatId, $msgId, $txt, ['reply_markup' => $kb]);
         return;
     }
     BotApi::send($TOKEN, $chatId, $txt, ['reply_markup' => $kb]);
+}
+
+/**
+ * متنِ «چیزی برای دریافت نیست».
+ *
+ * باید بین «۲ کامیت تازه ولی هیچ‌کدام templates/ را عوض نکرده» و «همه‌چیز
+ * هم‌تراز است» فرق بگذارد؛ وگرنه ادمین می‌بیند «۲ کامیت عقب» ولی پیام
+ * «همه‌چیز با origin/main هم‌تراز است» → فکر می‌کند دکمه کار نکرده است.
+ */
+function sourceNothingText(array $st): string
+{
+    $branch = (string)($st['branch'] ?? 'main');
+    $behind = (int)($st['behind'] ?? -1);
+    if ($behind > 0) {
+        return "✅ تغییری در <code>templates/</code> نیست — {$behind} کامیت تازه روی <code>origin/{$branch}</code> هست"
+            . " ولی هیچ‌کدام پوشهٔ قالب‌ها را عوض نکرده‌اند؛ چیزی برای دریافت نیست.";
+    }
+    if ($behind === 0) {
+        return "✅ سورسِ تازه‌ای برای <code>templates/</code> نیست — همه‌چیز با <code>origin/{$branch}</code> هم‌تراز است.";
+    }
+    return "✅ تغییری در <code>templates/</code> دیده نمی‌شود؛ چیزی برای دریافت نیست.";
 }
 
 /**
@@ -3594,6 +3622,10 @@ function showSourcePanel(array $cfg, Store $store, string $TOKEN, $chatId, int $
         }
     } elseif ($st['behind'] === 0 && SelfUpdate::sourceDir() !== null) {
         $txt .= "\n✅ همه‌چیز به‌روز است؛ چیزی برای دریافت نیست.\n";
+    } elseif ($st['behind'] > 0 && SelfUpdate::sourceDir() !== null) {
+        // کامیت تازه هست ولی هیچ‌کدام templates/ را عوض نکرده‌اند: باید صریح
+        // گفته شود، وگرنه خطِ «۲ کامیت عقب» بدون هیچ فهرستی بی‌نتیجه به نظر می‌رسد.
+        $txt .= "\n" . sourceNothingText($st) . "\n";
     }
 
     $probs = SelfUpdate::problems();
@@ -3607,7 +3639,7 @@ function showSourcePanel(array $cfg, Store $store, string $TOKEN, $chatId, int $
     if ($probs === []) $rows[] = [['text' => '⬇️ دریافت سورس تازه', 'callback_data' => 'src:ask']];
     $rows[] = [['text' => '🔄 بررسی (git fetch)', 'callback_data' => 'src:check']];
     $rows[] = [['text' => '📜 آخرین لاگ', 'callback_data' => 'src:log']];
-    $rows[] = [['text' => '🏠 منو', 'callback_data' => 'menu']];
+    $rows[] = [['text' => '🏠 منو', 'callback_data' => Nav::CB_BACK_MAIN]];
     $kb = BotApi::ikb($rows);
     if ($msgId > 0) {
         BotApi::edit($TOKEN, $chatId, $msgId, $txt, ['reply_markup' => $kb]);
@@ -3622,7 +3654,7 @@ function showSourceConfirm(array $cfg, Store $store, string $TOKEN, $chatId, int
     $st = SelfUpdate::templatesStatus();
     $files = (array)$st['files'];
     if ($files === []) {
-        $t = "✅ سورسِ تازه‌ای برای <code>templates/</code> نیست — همه‌چیز با <code>origin/{$st['branch']}</code> هم‌تراز است.";
+        $t = sourceNothingText($st);
         $kb = BotApi::ikb([[['text' => '🔄 پنل سورس', 'callback_data' => 'src:refresh']]]);
         if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, $t, ['reply_markup' => $kb]);
         else BotApi::send($TOKEN, $chatId, $t, ['reply_markup' => $kb]);
@@ -3726,7 +3758,7 @@ function runTemplatesUpdate(string $TOKEN, $chatId): void
     $st = SelfUpdate::templatesStatus();
     $files = (array)$st['files'];
     if ($files === []) {
-        $report("✅ سورسِ تازه‌ای برای <code>templates/</code> نیست — همه‌چیز با <code>origin/{$st['branch']}</code> هم‌تراز است.");
+        $report(sourceNothingText($st));
         return;
     }
 
