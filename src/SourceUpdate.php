@@ -175,13 +175,52 @@ class SourceUpdate
         $out = [];
         $dir = Manager::templateDir($type);
         if (is_dir($dir)) {
+            // فایل‌های «کپی‌شونده ولی تحویل‌نشده» (کلید cleanup در spec) عمداً کنار گذاشته
+            // می‌شوند: آنها بعد از نصب پاک می‌شوند، پس اگر اینجا شمرده شوند هر بار
+            // «۱ فایل در انتظار» می‌ماند و هیچ‌وقت به «همه‌چیز به‌روز» نمی‌رسیدیم
+            // (کپی‌شدن و بلافاصله حذف‌شدنِ همان یک فایل در هر اجرا).
+            $clean = self::cleanupSet($type);
             foreach (self::walk($dir, Manager::copyExcludes($type)) as $rel => $abs) {
                 if (self::isProtected($rel)) continue;
+                if (self::isCleanupPath($rel, $clean)) continue;
                 $out[$rel] = ['size' => (int)@filesize($abs), 'sha' => self::hashFile($abs)];
             }
         }
         self::$tplCache[$type] = $out;
         return $out;
+    }
+
+    /**
+     * فهرستِ مسیرهای کلید `cleanup` در spec قالب، به‌صورت مجموعهٔ نام → true.
+     * («cleanup» یعنی کپی لازم بود ولی نباید به ربات تحویل شود.)
+     *
+     * @return array<string,bool>
+     */
+    private static function cleanupSet(string $type): array
+    {
+        try {
+            $spec = Manager::templateSpec($type);
+        } catch (Throwable $e) {
+            $spec = null;
+        }
+        $out = [];
+        foreach ((array)(is_array($spec) ? ($spec['cleanup'] ?? []) : []) as $p) {
+            $p = rtrim(trim((string)$p), '/');
+            if ($p !== '') $out[$p] = true;
+        }
+        return $out;
+    }
+
+    /** آیا مسیرِ نسبی، خودِ فایل/پوشهٔ cleanup است یا زیرِ آن پوشه می‌رود؟ */
+    private static function isCleanupPath(string $rel, array $set): bool
+    {
+        if ($set === []) return false;
+        $rel = ltrim(str_replace('\\', '/', $rel), '/');
+        if (isset($set[$rel])) return true;
+        foreach (array_keys($set) as $p) {
+            if ($p !== '' && strpos($rel, $p . '/') === 0) return true;
+        }
+        return false;
     }
 
     /** امضای کلی سورس قالب — تغییرش یعنی «نسخهٔ تازه آمده» */
@@ -488,16 +527,20 @@ class SourceUpdate
      * پسوند واقعی را تعیین می‌کند (zip اگر ext-zip باشد، وگرنه tar.gz).
      * $method فقط برای تست است تا مسیر tar.gz هم روی هاستی که ext-zip دارد سنجیده شود.
      *
+     * @param string|null $note متنِ داخلِ آرشیو (پیش‌فرض: یادداشتِ بکاپِ ربات)
+     *
      * @return array{ok:bool, error:string, file?:string, size?:int, files?:int, method?:string}
      */
-    public static function backupDir(string $dir, string $destPrefix, ?string $method = null): array
+    public static function backupDir(string $dir, string $destPrefix, ?string $method = null, ?string $note = null): array
     {
         if (!is_dir($dir)) return ['ok' => false, 'error' => "پوشه پیدا نشد: {$dir}"];
         $files = self::walk($dir);
         $count = count($files);
-        $note = "botsaz source-update backup\nfolder: " . basename(rtrim($dir, '/\\')) . "\n"
-            . "date: " . date('Y-m-d H:i:s') . "\nfiles: {$count}\n\n"
-            . "این آرشیو شامل config.php و دیتابیس ربات است؛ آن را محرمانه نگه دارید.\n";
+        if ($note === null) {
+            $note = "botsaz source-update backup\nfolder: " . basename(rtrim($dir, '/\\')) . "\n"
+                . "date: " . date('Y-m-d H:i:s') . "\nfiles: {$count}\n\n"
+                . "این آرشیو شامل config.php و دیتابیس ربات است؛ آن را محرمانه نگه دارید.\n";
+        }
         $useZip = ($method === 'tar.gz') ? false : ($method === 'zip' ? true : class_exists('ZipArchive'));
         $res = $useZip
             ? self::backupZip($dir, $files, $destPrefix . '.zip', $note)

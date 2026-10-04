@@ -100,7 +100,8 @@ class Nav
     }
 
     /** کیبورد پنل یک ربات + بازگشت به لیست
-     *  $isAdmin ⇒ دکمهٔ «دریافت سورس بروز» هم اضافه می‌شود (فقط مدیر ربات‌ساز) */
+     *  (دکمهٔ «دریافت سورس بروز» حذف شد: بروزرسانی دیگر روی ربات‌های ساخته‌شده
+     *   انجام نمی‌شود و از پنل سوپرادمین روی templates/ انجام می‌گیرد) */
     public static function botPanelKb(array $bot, bool $isAdmin = false): string
     {
         $toggle = ($bot['status'] ?? 'active') === 'active' ? '🔴 غیرفعال' : '🟢 فعال‌سازی';
@@ -108,9 +109,6 @@ class Nav
             [['text' => '📊 آمار', 'callback_data' => "act:stats:{$bot['id']}"], ['text' => '📣 همگانی', 'callback_data' => "act:broadcast:{$bot['id']}"]],
             [['text' => '🔗 ست مجدد وبهوک', 'callback_data' => "act:webhook:{$bot['id']}"], ['text' => $toggle, 'callback_data' => "act:toggle:{$bot['id']}"]],
         ];
-        if ($isAdmin) {
-            $rows[] = [['text' => '🔄 دریافت سورس بروز', 'callback_data' => "act:srcask:{$bot['id']}"]];
-        }
         $rows[] = [['text' => '🗑 حذف ربات', 'callback_data' => "act:delask:{$bot['id']}"]];
         $rows[] = [['text' => '↩️ بازگشت به لیست', 'callback_data' => self::CB_MY_BOTS]];
         return BotApi::ikb($rows);

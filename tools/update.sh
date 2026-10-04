@@ -19,12 +19,15 @@
 #   فایل‌هایی که در آپدیت جدید از گیت «حذف» شده‌اند، به‌صورت هدفمند از زنده هم حذف می‌شوند.
 #
 # آپشن‌ها:
-#   --dry-run, -n   فقط پیش‌نمایش؛ هیچ تغییری در فایل‌ها/گیت نمی‌دهد
-#   --no-restart    سرویس‌ها ری‌استارت نمی‌شوند
-#   --force, -f     ادامه حتی اگر دسترسی به گیت‌هاب قطع باشد
-#   --web           مناسب اجرای از داخل ربات (ری‌استارت/ریلود محدود)
-#   --rollback      بازگشت کد به وضعیتِ قبل از آخرین بروزرسانی موفق
-#   --help, -h      نمایش همین راهنما
+#   --dry-run, -n       فقط پیش‌نمایش؛ هیچ تغییری در فایل‌ها/گیت نمی‌دهد
+#   --no-restart        سرویس‌ها ری‌استارت نمی‌شوند
+#   --force, -f         ادامه حتی اگر دسترسی به گیت‌هاب قطع باشد
+#   --web               مناسب اجرای از داخل ربات (ری‌استارت/ریلود محدود)
+#   --templates-only    فقط پوشهٔ templates/ استقرار می‌یابد (کد ربات‌ساز،
+#                       دیتابیس، وبهوک و وی‌هوست دست نمی‌خورند؛ ربات‌های
+#                       ساخته‌شده هرگز تغییری نمی‌بینند)
+#   --rollback          بازگشت کد به وضعیتِ قبل از آخرین بروزرسانی موفق
+#   --help, -h          نمایش همین راهنما
 #
 # ===== باگ‌های رفع‌شده نسبت به نسخهٔ قبل =====
 #   1. خط اولِ زائدِ «bash» قبل از #! → اسکریپت اصلاً اجرا نمی‌شد (شلِ تعاملیِ تو در تو باز می‌کرد)
@@ -63,15 +66,19 @@ print_help() {
   ===== بروزرسانی ربات‌ساز (tools/update.sh) =====
 
   استفاده:
-    bash tools/update.sh [--dry-run] [--no-restart] [--force] [--web] [--rollback]
+    bash tools/update.sh [--dry-run] [--no-restart] [--force] [--web]
+                         [--templates-only] [--rollback]
 
   گزینه‌ها:
-    --dry-run, -n   فقط پیش‌نمایش؛ هیچ تغییری در فایل‌ها یا گیت نمی‌دهد
-    --no-restart    سرویس‌ها (apache/nginx/php-fpm) ری‌استارت نمی‌شوند
-    --force, -f     ادامهٔ کار حتی اگر دسترسی به گیت‌هاب قطع باشد
-    --web           حالت اجرا از داخل ربات (ری‌استارت محدود)
-    --rollback      بازگشت کد به وضعیتِ قبل از آخرین بروزرسانی موفق
-    --help, -h      نمایش همین راهنما
+    --dry-run, -n       فقط پیش‌نمایش؛ هیچ تغییری در فایل‌ها یا گیت نمی‌دهد
+    --no-restart        سرویس‌ها (apache/nginx/php-fpm) ری‌استارت نمی‌شوند
+    --force, -f         ادامهٔ کار حتی اگر دسترسی به گیت‌هاب قطع باشد
+    --web               حالت اجرا از داخل ربات (ری‌استارت محدود)
+    --templates-only    فقط پوشهٔ templates/ به‌روز می‌شود؛ کد ربات‌ساز،
+                        دیتابیس، وبهوک و وی‌هوست دست نمی‌خورند و ربات‌های
+                        ساخته‌شده تغییری نمی‌بینند (نصبِ بعدی نسخهٔ جدید می‌گیرد)
+    --rollback          بازگشت کد به وضعیتِ قبل از آخرین بروزرسانی موفق
+    --help, -h          نمایش همین راهنما
 
   متغیر محیطی:
     BOTSAZ_LIVE_DIR=/path   مسیرِ زنده را دستی تعیین می‌کند (تست یا نصب سفارشی)
@@ -89,12 +96,14 @@ NO_RESTART=0
 FORCE=0
 WEB=0
 ROLLBACK=0
+TPL_ONLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run|-n) DRY_RUN=1 ;;
     --no-restart) NO_RESTART=1 ;;
     --force|-f)   FORCE=1 ;;
     --web)        WEB=1; NO_RESTART=1 ;;
+    --templates-only) TPL_ONLY=1 ;;
     --rollback)   ROLLBACK=1 ;;
     --help|-h)    print_help; exit 0 ;;
     # گزینهٔ ناشناخته خطاست نه هشدار: تایپ‌اشتباه (مثلاً --dryrun) نباید آپدیت واقعی را اجرا کند!
@@ -293,8 +302,12 @@ step "Step 0b: Layout detection"
 info "source (git)  : $SRC_DIR"
 info "live (served) : $LIVE_DIR"
 [ -n "$PHP_BIN" ] && info "php binary    : $PHP_BIN"
+if [ "$TPL_ONLY" -eq 1 ]; then
+  info "mode          : templates-only (only templates/ will be deployed)"
+fi
 if [ "$LIVE_DIR" = "$SRC_DIR" ]; then
   ok "Single-directory layout"
+  [ "$TPL_ONLY" -eq 1 ] && info "--templates-only in a single directory: git syncs the whole tree (only templates/ is reported)"
 else
   ok "Split layout (source → live): $SRC_DIR → $LIVE_DIR"
   [ -f "$LIVE_DIR/config.php" ] || warn "No config.php in live dir – it will be bootstrapped from source"
@@ -432,6 +445,9 @@ else
 fi
 
 # ===== ۳. جایگذاری تنظیمات زنده داخل سورس =====
+# در حالت --templates-only هیچ فایلِ کدِ ربات‌ساز استقرار نمی‌یابد؛ پس ادغام config،
+# پرسشِ دیتابیس و افزودنِ کلیدهای جدید همگی بی‌معنی شده و کلاً رد می‌شوند.
+if [ "$TPL_ONLY" -eq 0 ]; then
 step "Step 3: Extract live settings and merge into source ($SRC_DIR)"
 
 # ادغام config زنده در config سورس (یک فراخوانی PHP – بدون eval و بدون خراب‌شدن رشته‌های چندخطی)
@@ -602,17 +618,30 @@ if [ "$LIVE_DIR" != "$SRC_DIR" ] && [ "$DRY_RUN" -eq 0 ] && [ -f "$LIVE_DIR/conf
     info "PHP CLI missing – cannot add new upstream keys to live config"
   fi
 fi
+else
+  info "--templates-only: config merge and database checks skipped (no app code is deployed)"
+fi  # end of: not --templates-only
 
 # ===== ۵. کپی کد از سورس → زنده (فقط فایل‌های ردیابی‌شدهٔ گیت) =====
 step "Step 5: Deploy code from $SRC_DIR → $LIVE_DIR"
 
 TRACKED_LIST="$BACKUP_DIR/tracked_files.list"
-git ls-files -z > "$TRACKED_LIST" 2>/dev/null
+# --templates-only ⇒ فقط فایل‌های ردیابی‌شدهٔ templates/ استقرار می‌یابند
+if [ "$TPL_ONLY" -eq 1 ]; then
+  git ls-files -z -- templates/ > "$TRACKED_LIST" 2>/dev/null
+else
+  git ls-files -z > "$TRACKED_LIST" 2>/dev/null
+fi
 TRACKED_COUNT="$(tr -cd '\0' < "$TRACKED_LIST" 2>/dev/null | wc -c | tr -d ' ')"
 
 # فایل‌هایی که در کامیت جدید از گیت حذف شده‌اند و باید از زنده هم بروند
 plan_removed_files() { # $1=from-commit  $2=to-commit
-  git diff --no-renames --name-only --diff-filter=D "$1" "$2" 2>/dev/null | sed '/^$/d' > "$BACKUP_DIR/removed_from_live.txt"
+  if [ "$TPL_ONLY" -eq 1 ]; then
+    # فقط حذف‌های داخل templates/؛ کدِ ربات‌ساز نباید دست بخورد
+    git diff --no-renames --name-only --diff-filter=D "$1" "$2" -- templates/ 2>/dev/null | sed '/^$/d' > "$BACKUP_DIR/removed_from_live.txt"
+  else
+    git diff --no-renames --name-only --diff-filter=D "$1" "$2" 2>/dev/null | sed '/^$/d' > "$BACKUP_DIR/removed_from_live.txt"
+  fi
   [ -s "$BACKUP_DIR/removed_from_live.txt" ] || : > "$BACKUP_DIR/removed_from_live.txt"
 }
 
@@ -635,6 +664,9 @@ apply_removed_files() {
 
 if [ "$LIVE_DIR" = "$SRC_DIR" ]; then
   # تک‌پوشه: گیت خودش درختِ کاری را همگام می‌کند (فایل‌های حذف‌شده هم با reset پاک می‌شوند)
+  if [ "$TPL_ONLY" -eq 1 ]; then
+    info "--templates-only: single directory – git already synced the tree above (no copy step)"
+  fi
   if [ "$DRY_RUN" -eq 1 ]; then
     info "DRY-RUN: source == live – would sync the working tree with git (no file copy)"
     plan_removed_files "${LAST_DEPLOYED:-$CUR_COMMIT}" "$NEW_COMMIT"
@@ -698,7 +730,21 @@ else
   shopt -u nullglob
 
   # بررسی صحت استقرار
-  if [ -f "$SRC_DIR/bot.php" ] && [ -f "$LIVE_DIR/bot.php" ]; then
+  if [ "$TPL_ONLY" -eq 1 ]; then
+    # فقط templates/ مستقر شده و عمداً کدِ ربات‌ساز به‌روز نشده ⇒ باید همان قالب‌ها
+    # یکی‌یکی با سورس یکی باشند (کپیِ ناقص یا نیمه‌کاره همین‌جا لو می‌رود)
+    _m=0; _n=0
+    while IFS= read -r -d '' _p; do
+      [ -n "$_p" ] || continue
+      _n=$((_n + 1))
+      cmp -s "$SRC_DIR/$_p" "$LIVE_DIR/$_p" || _m=$((_m + 1))
+    done < "$TRACKED_LIST"
+    if [ "$_m" -eq 0 ] && [ "$_n" -gt 0 ]; then
+      ok "Verified: $_n template file(s) identical to source"
+    else
+      fail "$_m of $_n template file(s) differ from source after deploy"
+    fi
+  elif [ -f "$SRC_DIR/bot.php" ] && [ -f "$LIVE_DIR/bot.php" ]; then
     if cmp -s "$SRC_DIR/bot.php" "$LIVE_DIR/bot.php"; then
       ok "Verified: live/bot.php is identical to source"
     else
@@ -710,7 +756,10 @@ fi
 # بررسی نسخه (در هر دو حالت تک‌پوشه/دوپوشه)
 _v_s="$(grep -m1 "APP_VERSION" "$SRC_DIR/src/Manager.php" 2>/dev/null | sed -n "s/.*'\([^']*\)'.*/\1/p")"
 _v_l="$(grep -m1 "APP_VERSION" "$LIVE_DIR/src/Manager.php" 2>/dev/null | sed -n "s/.*'\([^']*\)'.*/\1/p")"
-if [ -n "$_v_l" ] && [ "$_v_l" = "$_v_s" ]; then
+if [ "$TPL_ONLY" -eq 1 ]; then
+  # کدِ ربات‌ساز تغییری نکرده؛ ناهمخوانی نسخه انتظار می‌رود و خطا نیست
+  info "Live version stays at ${_v_l:-?} (templates-only; app code not deployed)"
+elif [ -n "$_v_l" ] && [ "$_v_l" = "$_v_s" ]; then
   ok "Live version verified: $_v_l"
 elif [ "$DRY_RUN" -eq 1 ]; then
   info "DRY-RUN: live version '${_v_l:-?}' vs source '${_v_s:-?}'"
@@ -719,6 +768,9 @@ else
 fi
 
 # ===== ۶. تنظیم وی‌هوست (Apache/Nginx) → اشاره به LIVE_DIR =====
+# --templates-only: وی‌هوست، وبهوک، دیتابیس، مایگریشن، healthcheck و ری‌استارت هیچ‌کدام
+# لازم نیستند؛ چون کدِ ربات‌ساز تغییری نمی‌کند و فقط قالب‌ها عوض می‌شوند.
+if [ "$TPL_ONLY" -eq 0 ]; then
 step "Step 6: Configure web server vhost (point to live path)"
 if [ "$DRY_RUN" -eq 0 ] && [ "$(id -u)" -eq 0 ] && [ "$LIVE_DIR" != "$SRC_DIR" ]; then
   LIVE_ABS="$LIVE_DIR"
@@ -958,6 +1010,9 @@ else
   done
   [ "$_restarted" -eq 0 ] && info "No web service was restarted"
 fi
+else
+  info "--templates-only: vhost / webhook / migrations / healthcheck / restarts skipped"
+fi  # end of: not --templates-only
 
 # ===== ۱۰. پاک‌سازی فایل‌های حساس در /root برای امنیت بیشتر =====
 step "Step 10: Security cleanup in source (remove secrets only)"
@@ -985,7 +1040,13 @@ fi
 find /tmp -maxdepth 1 -name "botsaz-config-backup-*" -mtime +7 -exec rm -rf {} + 2>/dev/null || true
 
 # ===== ۱۰ب. ثبت وضعیت برای --rollback =====
-if [ "$DRY_RUN" -eq 0 ]; then
+if [ "$DRY_RUN" -eq 1 ]; then
+  : # dry-run هرگز وضعیت را عوض نمی‌کند
+elif [ "$TPL_ONLY" -eq 1 ]; then
+  # فقط قالب‌ها مستقر شدند؛ این فایل مخصوص استقرارِ «کامل» است و نباید عوض شود
+  # (وگرنه بعداً فایل‌های حذف‌شدهٔ کدِ ربات‌ساز از زنده پاک نمی‌شوند)
+  info "Rollback state untouched (templates-only deploy)"
+else
   cat > "$STATE_FILE" 2>/dev/null <<STATE
 PREV=${LAST_DEPLOYED:-$CUR_COMMIT}
 NEW=$NEW_COMMIT
@@ -994,6 +1055,17 @@ BACKUP=$BACKUP_DIR
 TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 STATE
   [ -f "$STATE_FILE" ] && info "Rollback state saved: $STATE_FILE (undo with --rollback)"
+fi
+
+# ===== ۱۰ج. فایلِ اشاره‌گر: زنده باید سورسِ گیت را پیدا کند =====
+# دکمهٔ «🔄 دریافت سورس بروز» داخل ربات، از درونِ پوشهٔ زنده اجرا می‌شود و باید بداند
+# tools/update.sh در کجا است (حالت دوپوشه: /root/botsaz-faxima).
+if [ "$DRY_RUN" -eq 0 ] && [ "$LIVE_DIR" != "$SRC_DIR" ] && [ -d "$SRC_DIR/.git" ]; then
+  if mkdir -p "$LIVE_DIR/data" 2>/dev/null && printf '%s\n' "$SRC_DIR" > "$LIVE_DIR/data/source_dir.txt" 2>/dev/null; then
+    ok "Source pointer written: $LIVE_DIR/data/source_dir.txt → $SRC_DIR"
+  else
+    warn "Could not write source pointer ($LIVE_DIR/data/source_dir.txt) – in-bot update will need 'source_dir' in config.php"
+  fi
 fi
 
 # ===== ۱۱. جمع‌بندی =====
@@ -1005,6 +1077,7 @@ else
 fi
 info "Source  : $SRC_DIR"
 info "Live    : $LIVE_DIR"
+[ "$TPL_ONLY" -eq 1 ] && info "Mode    : templates-only (templates/ deployed; app code, DB, webhook and vhosts untouched)"
 [ -n "$APP_VER_SRC" ] && info "Version : ${_v_l:-$APP_VER_SRC}"
 info "Branch  : $CUR_BRANCH ($NEW_COMMIT)"
 [ "$DRY_RUN" -eq 0 ] && info "Configs preserved: YES (only git-tracked files were touched)"
@@ -1014,8 +1087,13 @@ if [ "$RESET_OCCURRED" -eq 1 ] && [ -s "$BACKUP_DIR/local_changes.patch" ]; then
 fi
 if [ "$CUR_COMMIT" != "$NEW_COMMIT" ] && [ "$DRY_RUN" -eq 0 ] && [ "$ROLLBACK" -eq 0 ]; then
   info "Changes:"
-  git --no-pager diff --stat "$CUR_COMMIT" "$NEW_COMMIT" 2>/dev/null | tail -5 | sed 's/^/   /'
-  info "Undo with: bash tools/update.sh --rollback"
+  if [ "$TPL_ONLY" -eq 1 ]; then
+    git --no-pager diff --stat "$CUR_COMMIT" "$NEW_COMMIT" -- templates/ 2>/dev/null | tail -8 | sed 's/^/   /'
+    info "Only templates/ was deployed; the app code stays at its previous version until a full update."
+  else
+    git --no-pager diff --stat "$CUR_COMMIT" "$NEW_COMMIT" 2>/dev/null | tail -5 | sed 's/^/   /'
+    info "Undo with: bash tools/update.sh --rollback"
+  fi
 fi
 echo
 if [ "$ERRORS" -gt 0 ]; then
