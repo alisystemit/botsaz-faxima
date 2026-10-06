@@ -447,17 +447,23 @@ class SelfUpdate
                 $out['results'][$key] = ['ok' => true, 'skipped' => true, 'applied' => 0, 'files' => []];
                 continue;
             }
-            // استخراجِ کامیتِ تازه به پوشهٔ موقت (بدون .git)
+            // استخراجِ کامیتِ تازه به پوشهٔ موقت (بدون .git، بدون نیاز به tar سیستم‌عامل)
             $work = self::tplCacheDir() . '/.work_' . self::rsafeKey($key);
             try { Manager::removeDir($work); } catch (Throwable $e) { /* بی‌اهمیت */ }
             @mkdir($work, 0755, true);
             $cmd = 'git --git-dir=' . escapeshellarg(self::templateCloneDir($key))
-                . ' --no-pager archive --format=tar ' . escapeshellarg($r['sha'])
-                . ' | tar -x 2>&1';
-            $res = self::runCmd($cmd, $work, $timeoutSec, self::tplEnv());
-            if (!$res['ok']) {
+                . ' --no-pager archive --format=tar ' . escapeshellarg($r['sha']);
+            $res = self::runCmdBinary($cmd, self::rootDir(), $timeoutSec, self::tplEnv());
+            if (!$res['ok'] || $res['out'] === '') {
                 $out['ok'] = false;
-                $out['results'][$key] = ['ok' => false, 'applied' => 0, 'error' => 'استخراج سورس ناموفق: ' . mb_substr((string)$res['out'], -300)];
+                $out['results'][$key] = ['ok' => false, 'applied' => 0, 'error' => 'استخراج سورس ناموفق: ' . mb_substr((string)$res['err'], -300)];
+                try { Manager::removeDir($work); } catch (Throwable $e) { /* بی‌اهمیت */ }
+                continue;
+            }
+            $untarN = SourceUpdate::untar($res['out'], $work);
+            if ($untarN === 0) {
+                $out['ok'] = false;
+                $out['results'][$key] = ['ok' => false, 'applied' => 0, 'error' => 'بازکردن آرشیو سورس ممکن نشد'];
                 try { Manager::removeDir($work); } catch (Throwable $e) { /* بی‌اهمیت */ }
                 continue;
             }
@@ -524,6 +530,53 @@ class SelfUpdate
         $res = self::runCmd($cmd, $src, $timeoutSec, $env);
         $res['problems'] = [];
         return $res;
+    }
+
+    /**
+     * اجرای یک دستور و گرفتن خروجیِ باینریِ کامل (مثل stdoutِ git archive).
+     * stderr جدا نگه داشته می‌شود تا آرشیو خراب نشود.
+     *
+     * @return array{ok:bool, rc:int, out:string, err:string}
+     */
+    private static function runCmdBinary(string $cmd, string $cwd, int $timeoutSec, ?array $env = null): array
+    {
+        // stream_select روی لوله‌ها در ویندوز قابل اتکا نیست؛ پس خروجی مستقیم
+        // روی فایل موقت ریدایرکت می‌شود و فایلِ تمام‌شدهٔ بعد از خروجِ پروسه خوانده می‌شود.
+        $tmpOut = self::rootDir() . '/data/logs/tpl_git_' . getmypid() . '_' . substr(md5(uniqid('', true)), 0, 8) . '.out';
+        $tmpErr = $tmpOut . '.err';
+        @mkdir(dirname($tmpOut), 0755, true);
+        $cmdF = $cmd . ' > ' . escapeshellarg($tmpOut) . ' 2> ' . escapeshellarg($tmpErr);
+        $desc = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
+        $proc = @proc_open($cmdF, $desc, $pipes, $cwd, $env);
+        if (!is_resource($proc)) { @unlink($tmpOut); @unlink($tmpErr); return ['ok' => false, 'rc' => -1, 'out' => '', 'err' => 'proc_open failed']; }
+        @fclose($pipes[0]);
+        @fclose($pipes[1]);
+        @fclose($pipes[2]);
+        $deadline = microtime(true) + max(5, $timeoutSec);
+        $rc = -1;
+        while (true) {
+            $st = @proc_get_status($proc);
+            if (is_array($st) && !$st['running']) {
+                $rc = isset($st['exitcode']) && (int)$st['exitcode'] !== -1 ? (int)$st['exitcode'] : $rc;
+                break;
+            }
+            if (microtime(true) > $deadline) {
+                @proc_terminate($proc, 9);
+                break;
+            }
+            usleep(100000);
+        }
+        if ($rc === -1) {
+            $c = @proc_close($proc);
+            $rc = is_int($c) && $c !== -1 ? $c : -1;
+        } else {
+            @proc_close($proc);
+        }
+        $out = (string)@file_get_contents($tmpOut);
+        $err = (string)@file_get_contents($tmpErr);
+        @unlink($tmpOut);
+        @unlink($tmpErr);
+        return ['ok' => $rc === 0, 'rc' => $rc, 'out' => $out, 'err' => trim($err)];
     }
 
     /**

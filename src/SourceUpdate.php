@@ -684,6 +684,32 @@ class SourceUpdate
     }
 
     /**
+     * استخراجِ آرشیوِ tar خام (خروجیِ `git archive --format=tar`) به یک پوشه.
+     * چرا PHP خالص: بعضی هاست‌ها tar سیستم‌عامل ندارند یا روی آرشیو خراب
+     * می‌کند («Cannot open: Function not implemented»)، پس نباید به آن تکیه کرد.
+     *
+     * @return int تعداد فایل نوشته‌شده
+     */
+    public static function untar(string $raw, string $dest): int
+    {
+        $n = 0;
+        foreach (self::tarRead($raw) as $e) {
+            $rel = ltrim(str_replace('\\', '/', $e['name']), '/');
+            if ($rel === '' || $rel === 'pax_global_header' || basename($rel) === 'pax_global_header') continue;
+            // مهار مسیر: هیچ فایلی بیرون از مقصد نوشته نشود
+            if (str_contains($rel, "\0") || str_starts_with($rel, '/') || preg_match('#(^|/)\.\.(/|$)#', $rel)) continue;
+            $abs = rtrim(str_replace('\\', '/', $dest), '/') . '/' . $rel;
+            $dir = dirname($abs);
+            if (!is_dir($dir) && !@mkdir($dir, 0755, true) && !is_dir($dir)) continue;
+            if (@file_put_contents($abs, $e['body']) !== false) {
+                @chmod($abs, 0644);
+                $n++;
+            }
+        }
+        return $n;
+    }
+
+    /**
      * هدر استاندارد ustar (۵۱۲ بایت) — همان چیزی که `tar` روی لینوکس و
      * Windows می‌خواند. جمعِ بخش‌ها دقیقاً ۵۱۲ است وگرنه آرشیو در ابزارهای
      * واقعی باز نمی‌شود (و فقط خوانندهٔ خودمان آن را «درست» می‌دید).

@@ -263,6 +263,8 @@ class BotApi
         $post = [
             'chat_id' => (string)$chatId,
             'caption' => mb_substr($caption, 0, 900),
+            // کپشن‌ها با تگ‌های HTML ساخته می‌شوند؛ بدون parse_mode خام دیده می‌شدند
+            'parse_mode' => 'HTML',
             'document' => new CURLFile($filePath),
         ];
         for ($attempt = 0; $attempt < 2; $attempt++) {
