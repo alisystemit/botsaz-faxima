@@ -957,6 +957,49 @@ function showUsersPanel(string $TOKEN, $chatId, int $msgId = 0): void
 }
 
 /**
+ * پنل «📋 همه ربات‌ها» — زیبا و پویا:
+ * برای هر ربات دو دکمه: یکی باز کردنِ پنل، یکی حذف.
+ * در بالا خلاصهٔ کل/فعال/غیرفعال نمایش داده می‌شود.
+ */
+function showAllBotsPanel(Store $store, string $TOKEN, $chatId, int $msgId = 0): void
+{
+    $bots = $store->allBots();
+    if (!$bots) {
+        $t = "هنوز رباتی ثبت نشده.\nبرای ساخت، «🤖 ساخت ربات جدید» را بزنید.";
+        if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, $t);
+        else BotApi::send($TOKEN, $chatId, $t);
+        return;
+    }
+    $total = count($bots);
+    $active = 0;
+    $disabled = 0;
+    foreach ($bots as $b) { if (($b['status'] ?? '') === 'active') $active++; else $disabled++; }
+
+    $t = "📋 <b>همه ربات‌ها</b>\n\n"
+        . "🔢 مجموع: <b>{$total}</b> | 🟢 فعال: <b>{$active}</b> | 🔴 غیرفعال: <b>{$disabled}</b>\n\n"
+        . "از دکمه‌های زیر می‌توانید پنل هر ربات را باز کنید یا حذفش کنید.";
+
+    $rows = [];
+    $limit = 15;
+    foreach (array_slice($bots, 0, $limit) as $b) {
+        $st = ($b['status'] ?? '') === 'active' ? '🟢' : '🔴';
+        $label = "{$st} #{$b['id']} {$b['folder']} ({$b['type']})";
+        $rows[] = [
+            ['text' => $label, 'callback_data' => "mybot:{$b['id']}"],
+            ['text' => '🗑', 'callback_data' => "act:delask:{$b['id']}"],
+        ];
+    }
+    if ($total > $limit) {
+        $t .= "\n\n… و " . ($total - $limit) . " ربات دیگر؛ برای دیدنِ همه، دکمهٔ بازگشت را بعد از دیدنِ یکی فشار دهید تا لیست به‌روز شود.";
+    }
+    $rows[] = [['text' => '🔄 تازه‌سازی', 'callback_data' => 'allbots:refresh']];
+    $rows[] = [['text' => Nav::BACK, 'callback_data' => Nav::CB_BACK_MAIN]];
+    $kb = BotApi::ikb($rows);
+    if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, $t, ['reply_markup' => $kb]);
+    else BotApi::send($TOKEN, $chatId, $t, ['reply_markup' => $kb]);
+}
+
+/**
  * متن دیتابیس یک ربات فرزند برای نمایش — قالب SQLite دیتابیس جدا ندارد
  * و نام خالی («<code></code>») بد به نظر می‌رسید.
  */
@@ -1449,14 +1492,7 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
                 return;
 
             case '📋 همه ربات‌ها':
-                $bots = $store->allBots();
-                if (!$bots) { BotApi::send($TOKEN, $chatId, "رباتی ثبت نشده."); return; }
-                $t = "📋 <b>همه ربات‌ها</b>\n\n";
-                foreach (array_slice($bots, 0, 30) as $b) {
-                    $st = $b['status'] === 'active' ? '🟢' : '🔴';
-                    $t .= "{$st} #{$b['id']} <b>{$b['folder']}</b> ({$b['type']}) — مالک: <code>{$b['owner_id']}</code> — @{$b['bot_username']}\n";
-                }
-                BotApi::send($TOKEN, $chatId, $t);
+                showAllBotsPanel($store, $TOKEN, $chatId, (int)($msg['message_id'] ?? 0));
                 return;
         }
     }
@@ -2449,6 +2485,12 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
         $store->approveRequest($requestId);
         BotApi::send($TOKEN, $chatId, "✅ درخواست تأیید شد!");
         BotApi::send($TOKEN, (int)$req['user_id'], Texts::get($store, 'request_approved'));
+        return;
+    }
+
+    if ($data === 'allbots:refresh') {
+        if (!$admin) { BotApi::send($TOKEN, $chatId, "⛔️ فقط ادمین."); return; }
+        showAllBotsPanel($store, $TOKEN, $chatId, $msgId);
         return;
     }
 
