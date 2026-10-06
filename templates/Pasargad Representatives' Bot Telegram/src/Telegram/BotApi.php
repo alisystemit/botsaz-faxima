@@ -20,6 +20,7 @@ class BotApi
     private const API_BASE = 'https://api.telegram.org/bot';
 
     private string $token;
+    private string $apiBase;
     private int $timeout;
     private ?int $lastUpdateId = null;
 
@@ -30,6 +31,18 @@ class BotApi
     {
         $this->token   = $token ?? Config::str('bot_token', '');
         $this->timeout = Config::int('http_timeout', 30);
+
+        // پایهٔ سفارشی فقط وقتی تنظیم شده باشد. برای سرور Bot API خودی یا
+        // تست بدون اینترنت. آدرس نهایی مثل تلگرام است:
+        //   {پایه}/bot{توکن}/{متد}
+        // لازم نیست کاربر خودش «/bot» را بنویسد؛ هر دو حالت پذیرفته می‌شود:
+        //   http://127.0.0.1:8100    ← خودکار «/bot» اضافه می‌شود
+        //   http://127.0.0.1:8100/bot
+        $custom = rtrim(trim(Config::str('telegram_api_base', '')), '/');
+        if ($custom !== '' && !str_ends_with($custom, '/bot')) {
+            $custom .= '/bot';
+        }
+        $this->apiBase = $custom !== '' ? $custom : self::API_BASE;
 
         if ($this->token === '' || $this->token === 'PUT_BOT_TOKEN_HERE') {
             throw new \RuntimeException('توکن ربات در تنظیمات (bot_token) تعریف نشده است.');
@@ -44,7 +57,7 @@ class BotApi
      */
     public function call(string $method, array $params = []): array
     {
-        $url      = self::API_BASE . $this->token . '/' . $method;
+        $url      = $this->apiBase . $this->token . '/' . $method;
         $attempts = 3;
 
         for ($i = 1; $i <= $attempts; $i++) {
@@ -151,9 +164,6 @@ class BotApi
      */
     private function deliver(int $chatId, string $text, array $options, bool $isFollowUp): array
     {
-        // هیچ‌وقت بدون text به تلگرام نفرست؛ همیشه خودتِ متن را بنشان
-        $options['text'] = $text;
-
         // تضمین نهایی: اگر متن هنوز از سقف رد شده بود، دوباره شکسته و **همهٔ**
         // بخش‌ها فرستاده می‌شوند. فرستادن فقط بخش اول یعنی حذف بی‌صدای بقیهٔ
         // پیام — دقیقاً همان چیزی که این کد باید جلویش را بگیرد.
@@ -182,6 +192,18 @@ class BotApi
             }
 
             return $last;
+        }
+
+        // هیچ‌وقت بدون text به تلگرام نفرست؛ همیشه خودتِ متن را بنشان
+        $options['text'] = $text;
+
+        // اگر خودِ متن خالی باشد، تلگرام همان خطای message text is empty می‌دهد
+        if (trim($text) === '') {
+            Logger::warning('sendMessage primary skipped: empty text', [
+                'chat_id' => $chatId,
+            ]);
+
+            return ['ok' => false, 'error_code' => 0, 'description' => 'متن پیام خالی است.'];
         }
 
         $result = $this->call('sendMessage', $options);
@@ -222,6 +244,7 @@ class BotApi
         Logger::warning('sendMessage failed', [
             'chat_id' => $chatId,
             'error'   => $description,
+            'text_len' => mb_strlen($text),
         ]);
 
         return $result;
@@ -685,6 +708,61 @@ class BotApi
         }
 
         return $result;
+    }
+
+    /**
+     * ارسال فایل (سند) با آپلود multipart — برای بکاپ دیتابیس.
+     *
+     * BotApi::call فقط urlencoded می‌فرستد و برای آپلود فایل مناسب نیست،
+     * پس اینجا مستقیم با cURL ارسال می‌شود.
+     *
+     * @param  array<int, array<int, array<string, mixed>>> $keyboard
+     * @return array<string, mixed>
+     */
+    public function sendDocument(int $chatId, string $filePath, string $caption = '', array $keyboard = []): array
+    {
+        if (!is_file($filePath) || !function_exists('curl_init')) {
+            return ['ok' => false, 'description' => 'فایل یا cURL در دسترس نیست.'];
+        }
+
+        $url = self::API_BASE . $this->token . '/sendDocument';
+
+        $params = [
+            'chat_id' => (string) $chatId,
+            'caption' => Str::truncate($caption, self::MAX_CAPTION_LENGTH),
+            'parse_mode' => 'HTML',
+            'document' => new \CURLFile($filePath, 'application/x-sqlite3', basename($filePath)),
+        ];
+
+        $markup = $this->buildMarkup($keyboard);
+        if ($markup !== null) {
+            $params['reply_markup'] = json_encode($markup, JSON_UNESCAPED_UNICODE);
+        }
+
+        $curl = curl_init();
+        if ($curl === false) {
+            return ['ok' => false, 'description' => 'راه‌اندازی cURL ناموفق بود.'];
+        }
+
+        curl_setopt_array($curl, [
+            CURLOPT_URL            => $url,
+            CURLOPT_POST           => true,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT        => $this->timeout,
+            CURLOPT_POSTFIELDS     => $params,
+        ]);
+
+        $raw = curl_exec($curl);
+        $err = curl_error($curl);
+        curl_close($curl);
+
+        if (!is_string($raw) || $raw === '') {
+            return ['ok' => false, 'description' => $err !== '' ? $err : 'ارسال فایل ناموفق بود.'];
+        }
+
+        $decoded = json_decode($raw, true);
+
+        return is_array($decoded) ? $decoded : ['ok' => false, 'description' => 'پاسخ نامعتبر از تلگرام.'];
     }
 
     /**

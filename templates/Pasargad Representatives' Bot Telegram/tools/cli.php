@@ -7,6 +7,7 @@ declare(strict_types=1);
  *
  * استفاده:
  *   php tools/cli.php migrate
+ *   php tools/cli.php get-me
  *   php tools/cli.php set-webhook
  *   php tools/cli.php health
  *   php tools/cli.php selftest
@@ -47,17 +48,49 @@ try {
             out($ran === [] ? 'دیتابیس به‌روز است (مایگریشن جدیدی نبود).' : 'مایگریشن‌های اجراشده: ' . implode(', ', $ran), 'ok');
             break;
 
+        case 'get-me':
+            // تأیید توکن نزد تلگرام.
+            //
+            // کدهای خروج بخشی از قرارداد با tools/install.sh هستند:
+            //   0 → توکن درست است؛ فقط نام ربات (بدون @) روی stdout
+            //   1 → توکن نامعتبر است
+            //   2 → به تلگرام دسترسی نیست (خطای شبکه، نه توکن)
+            $token = trim(Config::str('bot_token', ''));
+            if ($token === '' || $token === 'PUT_BOT_TOKEN_HERE') {
+                fwrite(STDERR, "bot_token در config.php تنظیم نشده است.\n");
+                exit(1);
+            }
+
+            $me = (new \Pasargad\Telegram\BotApi($token))->call('getMe');
+
+            if ($me['ok'] ?? false) {
+                echo (string) ($me['result']['username'] ?? '');
+                exit(0);
+            }
+
+            $code = (int) ($me['error_code'] ?? 0);
+            $desc = (string) ($me['description'] ?? 'خطای نامشخص');
+
+            if ($code === 0) {
+                // error_code صفر یعنی اصلاً پاسخی نگرفتیم → مشکل شبکه است، نه توکن.
+                fwrite(STDERR, "دسترسی به تلگرام برقرار نشد: {$desc}\n");
+                exit(2);
+            }
+
+            fwrite(STDERR, "توکن ربات نامعتبر است: {$desc}\n");
+            exit(1);
+
         case 'set-webhook':
             if (!class_exists(\Pasargad\Telegram\BotApi::class)) {
-                out('کلاس BotApi هنوز ساخته نشده است.', 'warn');
-                break;
+                out('کلاس BotApi هنوز ساخته نشده است.', 'err');
+                exit(1);
             }
             $url = rtrim(Config::str('base_url'), '/') . '/bot.php';
             $bot = new \Pasargad\Telegram\BotApi(Config::str('bot_token'));
             $secret = $options['secret'] ?? Config::str('webhook_secret', '');
             if ($secret === '' || $secret === 'CHANGE-THIS-RANDOM-SECRET') {
-                out('ابتدا webhook_secret را در config.php مقداردهی کنید.', 'warn');
-                break;
+                out('ابتدا webhook_secret را در config.php مقداردهی کنید.', 'err');
+                exit(1);
             }
             $result = $bot->call('setWebhook', [
                 'url'             => $url,
@@ -70,12 +103,64 @@ try {
                 out('وبهوک تنظیم شد: ' . $url, 'ok');
             } else {
                 out('خطا در تنظیم وبهوک: ' . json_encode($result, JSON_UNESCAPED_UNICODE), 'err');
+                // بدون exit(1) این خطا هرگز به نصب‌کننده نمی‌رسید و او با
+                // «نصب کامل شد» تمام می‌کرد در حالی که ربات هیچ پیامی نمی‌گرفت.
+                exit(1);
+            }
+            break;
+
+        case 'set-webhook-admin':
+            // وبهوک دوم برای ربات مدیریتی (اختیاری)
+            $adminToken = trim(Config::str('admin_bot_token', ''));
+
+            if ($adminToken === '') {
+                out('admin_bot_token در config.php تنظیم نشده است — وبهوک مدیریتی غیرفعال است.', 'warn');
+                out('برای فعال‌سازی: یک ربات دوم از @BotFather بسازید و توکنش را بگذارید.', 'info');
+                exit(1);
+            }
+
+            $adminSecret = trim(Config::str('admin_webhook_secret', ''));
+
+            if ($adminSecret === '' || $adminSecret === 'CHANGE-THIS-RANDOM-SECRET') {
+                out('ابتدا admin_webhook_secret را در config.php مقداردهی کنید (یک رشتهٔ تصادفی).', 'err');
+                out('پیشنهاد: php -r "echo bin2hex(random_bytes(32)), PHP_EOL;"', 'info');
+                exit(1);
+            }
+
+            $adminUrl  = rtrim(Config::str('base_url'), '/') . '/admin.php';
+            $adminBot  = new \Pasargad\Telegram\BotApi($adminToken);
+            $result    = $adminBot->call('setWebhook', [
+                'url'                 => $adminUrl,
+                'secret_token'        => $adminSecret,
+                'allowed_updates'     => json_encode(['message', 'callback_query']),
+                'drop_pending_updates' => 'true',
+                'max_connections'     => '10',
+            ]);
+
+            if ($result['ok'] ?? false) {
+                out('وبهوک مدیریتی تنظیم شد: ' . $adminUrl, 'ok');
+                out('فقط پیام‌های سوپرادمین‌ها به این وبهوک می‌رسند.', 'info');
+            } else {
+                out('خطا: ' . json_encode($result, JSON_UNESCAPED_UNICODE), 'err');
+                exit(1);
             }
             break;
 
         case 'webhook-info':
             $bot = new \Pasargad\Telegram\BotApi(Config::str('bot_token'));
             out(json_encode($bot->call('getWebhookInfo'), JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE), 'info');
+            break;
+
+        case 'webhook-info-admin':
+            $adminToken = trim(Config::str('admin_bot_token', ''));
+
+            if ($adminToken === '') {
+                out('admin_bot_token تنظیم نشده است.', 'warn');
+                break;
+            }
+
+            $adminBot = new \Pasargad\Telegram\BotApi($adminToken);
+            out(json_encode($adminBot->call('getWebhookInfo'), JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE), 'info');
             break;
 
         case 'health':
@@ -91,9 +176,43 @@ try {
             require __DIR__ . '/selftest.php';
             break;
 
+        case 'backup':
+            // قبل از هر تغییر پرریسک (مایگریشن جدید، تغییر کد) این را اجرا کنید:
+            //   php tools/cli.php backup
+            if (isset($options['keep'])) {
+                $keep = max(2, min(200, (int) $options['keep']));
+                (new \Pasargad\Store\Settings())->set(\Pasargad\Store\Settings::BACKUP_KEEP, (string) $keep);
+                out('سقف نگهداری بکاپ روی ' . $keep . ' نسخه تنظیم شد.', 'ok');
+            }
+
+            if (isset($options['prune'])) {
+                $pruned = \Pasargad\Support\Backup::pruneOld();
+                out('پاک‌سازی: ' . $pruned['removed'] . ' فایل حذف شد، ' . $pruned['kept'] . ' فایل باقی است.', 'ok');
+                break;
+            }
+
+            $backup = \Pasargad\Support\Backup::run();
+            if ($backup['ok'] ?? false) {
+                out('بکاپ ساخته شد: ' . ($backup['path'] ?? '') . ' (' . ($backup['size'] ?? 0) . ' بایت)', 'ok');
+                out('سقف نگهداری: ' . \Pasargad\Support\Backup::keepCount() . ' نسخه', 'info');
+            } else {
+                out('خطا: ' . ($backup['message'] ?? ''), 'err');
+                exit(1);
+            }
+            break;
+
         case 'help':
         default:
-            out("دستورهای موجود:\n  migrate\n  set-webhook\n  webhook-info\n  health\n  selftest");
+            out("دستورهای موجود:\n"
+                . "  migrate\n"
+                . "  get-me                  تأیید توکن (۰=درست، ۱=نامعتبر، ۲=بدون شبکه)\n"
+                . "  set-webhook\n"
+                . "  set-webhook-admin      وبهوک ربات مدیریتی (اختیاری)\n"
+                . "  webhook-info\n"
+                . "  webhook-info-admin\n"
+                . "  health\n"
+                . "  selftest\n"
+                . "  backup [--keep=N] [--prune]");
             break;
     }
 } catch (Throwable $e) {
