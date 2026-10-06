@@ -126,6 +126,54 @@ class SelfUpdate
         return DIRECTORY_SEPARATOR === '\\';
     }
 
+    /** پوشهٔ pending برای exec هایی که کاربر وب نمی‌تواند مستقیم بزند */
+    private static function pendingDir(): string
+    {
+        $d = self::rootDir() . '/data/pending_update';
+        if (!is_dir($d)) @mkdir($d, 0755, true);
+        return $d;
+    }
+
+    /** تستِ اینکه کاربر فعلی واقعاً می‌تواند داخل یک پوشهٔ داده‌شده فایل بسازد */
+    private static function canWriteInto(string $dir): bool
+    {
+        if (!is_dir($dir)) return false;
+        $probe = @fopen(rtrim($dir, '/\\') . '/.botsaz_probe', 'c');
+        if (is_resource($probe)) { @fclose($probe); @unlink(rtrim($dir, '/\\') . '/.botsaz_probe'); return true; }
+        return false;
+    }
+
+    /**
+     * اگر کاربرِ فعلی (معمولاً وب‌کاربر) روی پوشهٔ سورس حقِ نوشتن ندارد،
+     * اجرای واقعی را به کرون_دیسپچر واگذار می‌کند که با مالک/کلونِ صحیح
+     * `bash tools/update.sh` اجرا می‌کند. از داخلِ وب این تنها راهِ
+     * بی‌خطاست — وگرنه git reset با «Permission denied» می‌شکند.
+     */
+    public static function enqueueUpdate(string $kind, int $byUid = 0): array
+    {
+        $kind = ($kind === 'templates') ? 'templates' : 'full';
+        $payload = ['kind' => $kind, 'by' => $byUid, 'at' => date('Y-m-d H:i:s'), 'ts' => time()];
+        $f = self::pendingDir() . '/' . $kind . '.json';
+        @file_put_contents($f, json_encode($payload, JSON_UNESCAPED_UNICODE), LOCK_EX);
+        return is_file($f)
+            ? ['ok' => true, 'note' => "درخواست ثبت شد ({$kind})؛ در نوبتِ بعدی کرون اجرا می‌شود. نتیجه را در data/logs/selfupdate.log ببینید."]
+            : ['ok' => false, 'note' => 'ثبتِ درخواست ممکن نشد (مجوزِ نوشتنِ data/؟)'];
+    }
+
+    /** اعلام می‌کند آیا الان یک درخواستِ معلق برای اجرا وجود دارد */
+    public static function hasPendingUpdate(string $kind): bool
+    {
+        $kind = ($kind === 'templates') ? 'templates' : 'full';
+        return is_file(self::pendingDir() . '/' . $kind . '.json');
+    }
+
+    /** حذفِ نشانهٔ pending پس از مصرف */
+    public static function clearPendingUpdate(string $kind): void
+    {
+        $kind = ($kind === 'templates') ? 'templates' : 'full';
+        @unlink(self::pendingDir() . '/' . $kind . '.json');
+    }
+
     /**
      * اگر اجرای فعلی با مالکِ پوشهٔ سورس برابر است، '' برمی‌گرداند؛
      * وگرنه پیشوندِ `sudo -n -u <owner>` تا از داخل وب دقیقاً همان
@@ -449,6 +497,12 @@ class SelfUpdate
     public static function updateTemplates(int $timeoutSec = 600): array
     {
         $out = ['ok' => true, 'results' => [], 'out' => ''];
+        // اگر کاربرِ وب نمی‌تواند روی templates/ بنویسد، همان update.sh --templates-only
+        // را به کرون واگذار کن که با مالکِ صحیح اجرا می‌شود.
+        if (!self::canWriteInto(self::rootDir() . '/templates')) {
+            $en = self::enqueueUpdate('templates', 0);
+            return ['ok' => true, 'results' => [], 'out' => $en['note'], 'queued' => true];
+        }
         $state = self::templateSourceState();
         foreach (Manager::templates() as $key => $spec) {
             $repo = (string)($spec['repo'] ?? '');
@@ -668,12 +722,21 @@ class SelfUpdate
         $probs = self::problems();
         if ($probs !== []) return "⛔️ امکان اجرا نیست:\n• " . implode("\n• ", $probs);
 
+        $src = self::repoDir();   // حالت دوپوشه: گیت/اِسکریپت در سورس است نه در زنده
+
+        // اگر کاربرِ فعلی (معمولاً وب‌کاربر) روی درخت حق‌نوشتن ندارد، اجرای
+        // مستقیم با «Permission denied» متوقف می‌شود؛ پس در اینجا کار را به
+        // نشانهٔ pending واگذار می‌کنیم تا cron_dispatcher آن را اجرا کند.
+        if (!self::canWriteInto($src)) {
+            $en = self::enqueueUpdate('full', 0);
+            return ($en['ok'] ? '✅ ' : '⚠️ ') . $en['note'];
+        }
+
         $log = self::logPath();
         // باقی ماندن لاگ قبلی کمک می‌کند بفهمیم اجرا اصلاً شروع شده یا نه
         $marker = "\n========== SelfUpdate " . date('Y-m-d H:i:s') . " ==========\n";
         @file_put_contents($log, $marker, FILE_APPEND | LOCK_EX);
 
-        $src = self::repoDir();   // حالت دوپوشه: گیت/اِسکریپت در سورس است نه در زنده
         $live = self::rootDir();
         $gitEnv = 'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=' . escapeshellarg($src);
         $bash = is_executable('/usr/bin/bash') ? '/usr/bin/bash' : (is_executable('/bin/bash') ? '/bin/bash' : 'bash');

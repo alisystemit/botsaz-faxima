@@ -99,6 +99,28 @@ $log->info('cron', 'Cron dispatcher started');
 // برای دکمهٔ «وضعیت کرون» داخل ربات — در پایان در data/cron_state.json می‌نویسیم
 $__cronStart = microtime(true);
 
+// ===== اجرای pending_update از دیسپچر کرون =====
+// دکمهٔ «آپدیت ربات‌ساز» یا «دریافت سورس بروز» وقتی وب‌کاربر روی پوشهٔ سورس
+// دسترسیِ نوشتن ندارد، فقط یک نشانه در data/pending_update می‌گذارد. اینجا
+// آن نشانه مصرف می‌شود و همان `bash tools/update.sh` اجرا می‌شود — دقیقاً مثل
+// اجرای دستی، ولی با مالکِ فایلِ کرون (معمولاً ادمینِ واقعیِ درخت).
+foreach (['full' => '', 'templates' => '--templates-only'] as $_pendingKind => $_pendingArg) {
+    $_flag = __DIR__ . '/../data/pending_update/' . $_pendingKind . '.json';
+    if (!is_file($_flag)) continue;
+    @unlink($_flag);
+    $log->info('cron', "running pending '{$_pendingKind}' update");
+    $_root = dirname(__DIR__);
+    $_bash = is_executable('/usr/bin/bash') ? '/usr/bin/bash' : (is_executable('/bin/bash') ? '/bin/bash' : 'bash');
+    $_env = 'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=' . escapeshellarg($_root);
+    $_cmd = 'cd ' . escapeshellarg($_root) . ' && ' . $_env . ' ' . $_bash . ' tools/update.sh ' . $_pendingArg . ' 2>&1';
+    $_out = [];
+    $_rc = 1;
+    @exec($_cmd, $_out, $_rc);
+    $_tail = implode("\n", array_slice($_out, -30));
+    $log->info('cron', "pending '{$_pendingKind}' update finished rc={$_rc}");
+    @file_put_contents(__DIR__ . '/../data/logs/selfupdate.log', "\n========== pending {$_pendingKind} " . date('Y-m-d H:i:s') . " ==========\nrc={$_rc}\n" . $_tail . "\n", FILE_APPEND | LOCK_EX);
+}
+
 // ===== بررسی تمام ربات‌های فعال =====
 $bots = $store->allBots();
 $activeBots = array_filter($bots, fn($b) => $b['status'] === 'active');

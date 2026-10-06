@@ -3905,6 +3905,11 @@ function runTemplatesUpdate(string $TOKEN, $chatId): void
     $run = SelfUpdate::updateTemplates(600);
     $ms = (int)round((microtime(true) - $t0) * 1000);
 
+    if (!empty($run['queued'])) {
+        $report("ℹ️ بروزرسانی مستقیم ممکن نبود؛ درخواست به کرون واگذار شد:\n\n" . htmlspecialchars((string)($run['out'] ?? ''), ENT_QUOTES, 'UTF-8'));
+        return;
+    }
+
     $failedTpl = [];
     $doneTpl = [];
     foreach ((array)$run['results'] as $key => $res) {
