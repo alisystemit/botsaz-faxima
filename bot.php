@@ -395,10 +395,10 @@ function mainMenu(array $u, array $supers, Store $store = null): string {
         $rows = [
             [['text' => '🤖 ساخت ربات جدید'], ['text' => '📦 ربات‌های من']],
             [['text' => '📊 آمار'], ['text' => '⏰ کرون']],
-            [['text' => '👥 کاربران مجاز'], ['text' => "📋 درخواست‌های جدید{$pendingText}"]],
+            [['text' => '👥 کاربران مجاز'], ['text' => '📣 همگانی']],
             [['text' => "💳 پرداخت‌ها{$payText}"], ['text' => '💾 بکاپ دیتابیس']],
             [['text' => 'ℹ️ راهنما'], ['text' => '🔍 دیاگنوز']],
-            [['text' => '📋 همه ربات‌ها']],
+            [['text' => '📋 همه ربات‌ها'], ['text' => "📋 درخواست‌های جدید{$pendingText}"]],
         ];
         // بروزرسانی (سورس یا خودِ ربات‌ساز) فقط در دسترسِ «سوپرادمین» است، نه هر ادمینی
         if (isSuper($supers, (int)($u['user_id'] ?? 0))) {
@@ -983,10 +983,12 @@ function showAllBotsPanel(Store $store, string $TOKEN, $chatId, int $msgId = 0):
     $limit = 15;
     foreach (array_slice($bots, 0, $limit) as $b) {
         $st = ($b['status'] ?? '') === 'active' ? '🟢' : '🔴';
-        $label = "{$st} #{$b['id']} {$b['folder']} ({$b['type']})";
+        $owner = (int)($b['owner_id'] ?? 0);
+        $label = "{$st} #{$b['id']} {$b['folder']} ({$b['type']}) | مالک: {$owner}";
+        $rows[] = [['text' => $label, 'callback_data' => "mybot:{$b['id']}"]];
         $rows[] = [
-            ['text' => $label, 'callback_data' => "mybot:{$b['id']}"],
-            ['text' => '🗑', 'callback_data' => "act:delask:{$b['id']}"],
+            ['text' => '📣 پیام فقط به کاربران همین ربات', 'callback_data' => "act:broadcast:{$b['id']}"],
+            ['text' => '🗑 حذف', 'callback_data' => "act:delask:{$b['id']}"],
         ];
     }
     if ($total > $limit) {
@@ -1474,7 +1476,7 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
                     $t = (string)($b['type'] ?? '?');
                     $byType[$t] = ($byType[$t] ?? 0) + 1;
                     $oid = (int)($b['owner_id'] ?? 0);
-                    if ($oid > 0) $ownerIds[$oid] = true;
+                    if ($oid > 0) $ownerIds[$oid] = ($ownerIds[$oid] ?? 0) + 1;
                     if (($b['status'] ?? '') !== 'active') continue;
                     // فقط قالب‌هایی که جدول کاربر تلگرامی دارند شمرده می‌شوند
                     if (!botHasUserTable($b)) continue;
@@ -1499,14 +1501,18 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
                     foreach ($byType as $k => $n) $parts[] = htmlspecialchars((string)$k, ENT_QUOTES, 'UTF-8') . ": {$n}";
                     $msg .= "🧩 بر حسب قالب: " . implode('، ', $parts) . "\n";
                 }
-                if (isSuper($SUPERS, $uid)) {
-                    $msg .= "👑 صاحبانِ ربات‌ها: <code>" . htmlspecialchars(implode(', ', array_map('strval', array_keys($ownerIds))), ENT_QUOTES, 'UTF-8') . "</code>\n";
+                if (isSuper($SUPERS, $uid) && $ownerIds !== []) {
+                    $msg .= "👑 صاحبانِ ربات‌ها:\n";
+                    foreach ($ownerIds as $oid => $cnt) {
+                        $msg .= "• <code>" . htmlspecialchars((string)$oid, ENT_QUOTES, 'UTF-8') . "</code> — {$cnt} ربات\n";
+                    }
                 }
                 BotApi::send($TOKEN, $chatId, $msg);
                 return;
 
             case '📣 همگانی':
-                BotApi::send($TOKEN, $chatId, "ℹ️ دکمهٔ همگانی حذف شده است.");
+                $store->setStep($uid, 'await_broadcast');
+                BotApi::send($TOKEN, $chatId, Texts::get($store, 'broadcast_prompt'), ['reply_markup' => Nav::stepKb()]);
                 return;
 
             case '👥 کاربران مجاز':
