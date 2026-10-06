@@ -48,7 +48,12 @@ require_once __DIR__ . '/src/Manager.php';
 require_once __DIR__ . '/src/Logger.php';
 require_once __DIR__ . '/src/DbBackup.php';
 require_once __DIR__ . '/src/Nav.php';
+require_once __DIR__ . '/src/Ui.php';
+require_once __DIR__ . '/src/BuildSettings.php';
+require_once __DIR__ . '/src/FxRate.php';
 require_once __DIR__ . '/src/SourceUpdate.php';
+// SelfUpdate هنوز برای «🔄 دریافت سورس بروز» لازم است (git fetch + تازه‌کردنِ templates/).
+// پنل «⬆️ آپدیت ربات‌ساز» حذف شده ولی همین کلاس پشتِ بخش سورس است.
 require_once __DIR__ . '/src/SelfUpdate.php';
 require_once __DIR__ . '/src/Payment/Payments.php';
 require_once __DIR__ . '/src/Payment/Gateways.php';
@@ -56,6 +61,8 @@ require_once __DIR__ . '/src/Payment/Limits.php';
 require_once __DIR__ . '/src/Payment/Pricing.php';
 require_once __DIR__ . '/src/Payment/CardToCard.php';
 require_once __DIR__ . '/src/Payment/NowPayments.php';
+require_once __DIR__ . '/src/Payment/ZarinPal.php';
+require_once __DIR__ . '/src/Payment/AqaPay.php';
 require_once __DIR__ . '/src/Payment/AdminPanel.php';
 require_once __DIR__ . '/src/Texts.php';
 
@@ -64,6 +71,8 @@ if (!file_exists($cfgFile)) { http_response_code(500); webhookDone(['ok' => fals
 $cfg  = require $cfgFile;
 $TOKEN = $cfg['main_token'];
 $SUPERS = $cfg['super_admins'] ?? [];
+// پیکربندی برای توابعِ کمکیِ سراسری (مثل خلاصهٔ آمارِ «ربات‌های من») لازم است
+$GLOBALS['__cfg'] = $cfg;
 
 // ===== گاردهای پیکربندی (فقط لاگ — هیچ رفتاری را عوض نمی‌کنند) =====
 // هدف: به‌جای سکوت، دلیل «کار نکردن ربات» واضح در data/logs/ نوشته شود.
@@ -317,8 +326,14 @@ function stepLabel(string $step): string
         'await_pay_card_owner'=> 'نام صاحب کارت',
         'await_pay_nowpay_key'   => 'کلید API نوب‌پیمنت',
         'await_pay_nowpay_secret'=> 'IPN Secret نوب‌پیمنت',
+        'await_pay_zarin_merchant' => 'کد پذیرندهٔ زرین‌پال',
+        'await_pay_aqaye_pin'  => 'کد پین آقای پرداخت',
         'await_pay_setlimit'  => 'لیمیت کاربر',
         'await_text_edit'     => 'ویرایش متن پویا',
+        'await_edit_bot_token'=> 'ویرایش توکن ربات',
+        'await_edit_admin_id' => 'ویرایش آیدی ادمین ربات',
+        'await_maintenance_text' => 'متن پیام تعمیرات',
+        'await_maintenance_eta'  => 'زمان تقریبی بازگشت',
     ];
     return $map[$step] ?? $step;
 }
@@ -370,11 +385,13 @@ function reportHandlerError(string $TOKEN, $chatId, string $stage, string $input
     } catch (Throwable $ignored) { /* لاگر هم خراب باشد، پیام کاربر نباید گم شود */ }
 
     $text = "⚠️ <b>خطای داخلی ربات — عملیات متوقف شد</b>\n\n"
-        . "بخش: <code>" . htmlspecialchars($stage, ENT_QUOTES, 'UTF-8') . "</code>\n"
-        . "ورودی شما: <code>" . htmlspecialchars(mb_substr($input, 0, 120), ENT_QUOTES, 'UTF-8') . "</code>\n"
-        . "علت: " . htmlspecialchars($msg, ENT_QUOTES, 'UTF-8') . "\n"
-        . "محل دقیق خطا: <code>{$file}:{$line}</code>\n\n"
-        . "وضعیت: آپدیت علامت‌گذاری شد، پس تکرار بی‌جهت نمی‌شود؛ دوباره تلاش کنید یا «🏠 منو» را بزنید.";
+        . "🧩 بخش: " . Ui::code($stage) . "\n"
+        . "⌨️ ورودی شما: " . Ui::code(mb_substr($input, 0, 120)) . "\n"
+        . "❗️ علت: " . Ui::e($msg) . "\n"
+        . "📍 محل دقیق خطا: " . Ui::code("{$file}:{$line}") . "\n\n"
+        . Ui::sep() . "\n"
+        . "🛡 آپدیت علامت‌گذاری شد، پس تکرار بی‌جهت نمی‌شود.\n"
+        . "دوباره تلاش کنید یا «🏠 منو» را بزنید.";
     try {
         $extra = ($kb !== null) ? ['reply_markup' => $kb] : [];
         $r = BotApi::send($TOKEN, $chatId, $text, $extra);
@@ -397,15 +414,16 @@ function mainMenu(array $u, array $supers, Store $store = null): string {
             [['text' => '📊 آمار'], ['text' => '⏰ کرون']],
             [['text' => '👥 کاربران مجاز'], ['text' => '📣 همگانی']],
             [['text' => "💳 پرداخت‌ها{$payText}"], ['text' => '💾 بکاپ دیتابیس']],
+            [['text' => '⚙️ تنظیمات'], ['text' => '📝 متن‌ها']],
             [['text' => 'ℹ️ راهنما'], ['text' => '🔍 دیاگنوز']],
             [['text' => '📋 همه ربات‌ها'], ['text' => "📋 درخواست‌های جدید{$pendingText}"]],
         ];
-        // بروزرسانی (سورس یا خودِ ربات‌ساز) فقط در دسترسِ «سوپرادمین» است، نه هر ادمینی
+        // بروزرسانیِ قالب‌ها فقط در دسترسِ «سوپرادمین» است، نه هر ادمینی.
+        // (پنل «⬆️ آپدیت ربات‌ساز» حذف شد؛ فقط تازه‌کردنِ templates/ باقی مانده.)
         if (isSuper($supers, (int)($u['user_id'] ?? 0))) {
             $rows[] = [['text' => '🔄 دریافت سورس بروز']];
-            $rows[] = [['text' => '⬆️ آپدیت ربات‌ساز']];
         }
-        $rows[] = [['text' => '📝 متن‌ها'], ['text' => '💳 افزایش لیمیت']];
+        $rows[] = [['text' => '💳 افزایش لیمیت']];
         return BotApi::kb($rows);
     }
     // وقتی ادمین هر دو درگاه «لیمیت» و «قالب» را خاموش کرده، دکمهٔ خرید اصلاً نمایش داده نمی‌شود
@@ -433,10 +451,11 @@ function showLimitShop(Store $store, string $TOKEN, $chatId, array $user, array 
 }
 
 /** پنل پرداخت ادمین — مشترک بین پیام و کال‌بک */
-function showPaymentsAdmin(Store $store, string $TOKEN, $chatId, int $msgId = 0): void
+function showPaymentsAdmin(Store $store, string $TOKEN, $chatId, int $msgId = 0, string $note = ''): void
 {
     try { Payments::ensureSchema($store); } catch (Throwable $e) {}
     $t = PaymentPanel::adminText($store);
+    if ($note !== '') $t = $note . "\n\n" . Ui::sep() . "\n\n" . $t;
     $kb = PaymentPanel::adminKb($store);
     if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, $t, ['reply_markup' => $kb]);
     else BotApi::send($TOKEN, $chatId, $t, ['reply_markup' => $kb]);
@@ -852,8 +871,10 @@ function gateBuildPayment(array $cfg, Store $store, string $TOKEN, array $SUPERS
         'limit' => PaymentLimits::formatLimit(PaymentLimits::getLimit($store, $user, $SUPERS)),
         'type' => $type,
     ];
-    if (!empty($req['need_limit'])) $parts[] = 'سقف تعداد ربات پر است';
-    if (!empty($req['need_template'])) $parts[] = 'قالب «' . $type . '»: ' . PaymentPricing::formatToman(PaymentPricing::templatePrice($store, $type));
+    if (!empty($req['need_limit'])) $parts[] = '🎯 سقف تعداد ربات پر است';
+    if (!empty($req['need_template'])) {
+        $parts[] = '🧩 قالب «' . Ui::e($type) . '»: ' . PaymentPricing::formatToman(PaymentPricing::templatePrice($store, $type));
+    }
 
     // متن دلخواه ادمین (اگر برای قالب یا لیمیت ثبت شده باشد)
     $note = '';
@@ -879,26 +900,28 @@ function gateBuildPayment(array $cfg, Store $store, string $TOKEN, array $SUPERS
         if ($existing !== null) {
             $exStatus = (string)$existing['status'];
             if ($exStatus === Payments::ST_AWAIT_PAY) {
-                // فاکتور کریپتویی صادر شده و هنوز پرداخت نشده ⇒ همان را ادامه بده
+                // فاکتور آنلاین صادر شده و هنوز پرداخت نشده ⇒ همان را ادامه بده
+                $exUrl = (string)($existing['pay_url'] ?? '');
                 BotApi::send($TOKEN, $chatId,
-                    "🪙 شما هم‌اکنون یک فاکتور کریپتوییِ باز دارید؛ ابتدا همان را پرداخت کنید:\n"
-                    . Payments::describe($existing)
-                    . (trim((string)($existing['pay_url'] ?? '')) !== '' ? "\nلینک: " . htmlspecialchars((string)$existing['pay_url'], ENT_QUOTES, 'UTF-8') : ''),
-                    ['reply_markup' => PaymentPanel::invoiceKb((int)$existing['id'], (string)($existing['pay_url'] ?? ''))]);
+                    "🔗 <b>شما یک فاکتورِ بازِ پرداخت آنلاین دارید.</b>\n\n"
+                    . "لطفاً اول همان را پرداخت کنید:\n" . Payments::describe($existing)
+                    . ($exUrl !== '' ? "\n\n🔗 " . Ui::link($exUrl) : ''),
+                    ['reply_markup' => PaymentPanel::invoiceKb((int)$existing['id'], $exUrl)]);
                 return true;
             }
             if (in_array($exStatus, [Payments::ST_AWAIT_RECEIPT, Payments::ST_AWAIT_ADMIN], true)) {
                 // رسید فرستاده و منتظر ادمین است؛ دوباره فاکتور نساز
                 BotApi::send($TOKEN, $chatId,
-                    "🧾 شما یک پرداخت در انتظار رسید/بررسی دارید؛ اول همان را تمام کنید (یا لغو کنید):\n"
-                    . Payments::describe($existing),
+                    "🧾 <b>پرداختِ در انتظارِ بررسی دارید.</b>\n\n"
+                    . "اول همان را تمام کنید (یا لغو کنید):\n" . Payments::describe($existing),
                     ['reply_markup' => PaymentPanel::myPaymentsKb($store, $uidP)]);
                 return true;
             }
             $pid = (int)$existing['id']; // pending ⇒ همان فاکتور، روش پرداخت را دوباره انتخاب کن
         } elseif (Payments::openPaymentCount($store, $uidP) >= Payments::MAX_OPEN_PAYMENTS) {
             BotApi::send($TOKEN, $chatId,
-                "⛔️ شما " . Payments::MAX_OPEN_PAYMENTS . " فاکتور باز دارید و فاکتور تازه ساخته نمی‌شود.\n"
+                "⛔️ <b>سقفِ فاکتورِ باز پر شده است.</b>\n\n"
+                . "شما " . Payments::MAX_OPEN_PAYMENTS . " فاکتور باز دارید و فاکتور تازه ساخته نمی‌شود.\n"
                 . "از «🧾 پرداخت‌های من» هر کدام را پرداخت یا لغو کنید، بعد دوباره تلاش کنید.",
                 ['reply_markup' => PaymentPanel::myPaymentsKb($store, $uidP)]);
             return true;
@@ -906,54 +929,139 @@ function gateBuildPayment(array $cfg, Store $store, string $TOKEN, array $SUPERS
             $pid = Payments::createBuildPayment($store, $uidP, $type, $req, '');
         }
     }
-    $t = "💰 <b>برای ساخت این ربات پرداخت لازم است</b>\n\n" . implode(' + ', $parts)
-        . "\nمبلغ قابل پرداخت: <b>" . number_format($amount) . " تومان</b>";
+    $t = "💰 <b>برای ساخت این ربات پرداخت لازم است</b>\n" . Ui::sep() . "\n\n"
+        . implode("\n", array_map(static fn(string $p): string => Ui::bullet('•', $p), $parts))
+        . "\n" . Ui::kv('💵', 'مبلغ قابل پرداخت', Ui::toman($amount));
     if ($note !== '') $t .= "\n\n" . $note;
     if (!$hasMethods) {
         $t .= "\n\n" . PaymentPanel::noMethodText($store);
-        BotApi::send($TOKEN, $chatId, $t, ['reply_markup' => PaymentPanel::limitShopKb($store, $user, $SUPERS)]);
+        BotApi::send($TOKEN, $chatId, Ui::out($t), ['reply_markup' => PaymentPanel::limitShopKb($store, $user, $SUPERS)]);
         return true;
     }
-    $t .= "\n\nروش پرداخت را انتخاب کن:";
-    BotApi::send($TOKEN, $chatId, $t, ['reply_markup' => PaymentPanel::methodKb($store, (int)$pid, $cfg)]);
+    $t .= "\n\n" . Ui::sep() . "\n" . "👇 <b>روش پرداخت را انتخاب کن:</b>";
+    BotApi::send($TOKEN, $chatId, Ui::out($t), ['reply_markup' => PaymentPanel::methodKb($store, (int)$pid, $cfg)]);
     return true;
 }
 
 // ===== helpers ناوبری (ماژولار — همه از Nav تغذیه می‌شوند) =====
 
 /** لیست «ربات‌های من» + دکمه برگشت — مشترک بین پیام و کال‌بک */
+/**
+ * «📦 ربات‌های من» — لیست ربات‌ها + یک خلاصهٔ آمارِ کامل بالای آن.
+ *
+ * قبلاً فقط یک لیست خشکِ نام ربات بود و کاربر هیچ آماری نمی‌دید؛ حالا
+ * تعداد ربات، چندتا فعال است، مجموع کاربران ربات‌ها، و وضعیت سقف/پرداخت
+ * همه در یک نگاه معلوم است.
+ */
 function sendMyBotsList(Store $store, string $TOKEN, $chatId, int $uid, int $msgId = 0): void
 {
     if (!$store->hasBot($uid)) {
         $t = $store->hasPendingRequest($uid)
-            ? "⏳ هنوز رباتی ندارید. درخواست شما در انتظار تأیید ادمین است."
-            : "هنوز رباتی نساخته‌ای.\nبرای شروع، «🤖 ساخت ربات جدید» را بزنید.";
-        if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, $t);
-        else BotApi::send($TOKEN, $chatId, $t);
+            ? "⏳ <b>هنوز رباتی ندارید</b>\n\nدرخواست شما ثبت شده و در انتظار تأیید ادمین است.\n"
+                . "به‌محض تأیید، همین‌جا خبردار می‌شوید ✅"
+            : "🤖 <b>هنوز رباتی نساخته‌اید</b>\n\n"
+                . "با یک کلیک می‌توانید اولین رباتتان را بسازید؛ کمتر از یک دقیقه طول می‌کشد. 🚀\n"
+                . "دکمهٔ «🤖 ساخت ربات جدید» را بزنید.";
+        $kb = BotApi::kb([
+            [['text' => '🤖 ساخت ربات جدید']],
+            [['text' => Nav::BACK, 'callback_data' => Nav::CB_BACK_MAIN]],
+        ]);
+        if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, $t, ['reply_markup' => $kb]);
+        else BotApi::send($TOKEN, $chatId, $t, ['reply_markup' => $kb]);
         return;
     }
     $bots = $store->myBots($uid);
     if (!$bots) {
-        if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, "هنوز رباتی نساخته‌ای.");
-        else BotApi::send($TOKEN, $chatId, "هنوز رباتی نساخته‌ای.");
+        $t = "🤖 <b>هنوز رباتی نساخته‌اید</b>\n\nدکمهٔ «🤖 ساخت ربات جدید» را بزنید تا شروع کنیم. 🚀";
+        $kb = BotApi::kb([
+            [['text' => '🤖 ساخت ربات جدید']],
+            [['text' => Nav::BACK, 'callback_data' => Nav::CB_BACK_MAIN]],
+        ]);
+        if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, $t, ['reply_markup' => $kb]);
+        else BotApi::send($TOKEN, $chatId, $t, ['reply_markup' => $kb]);
         return;
     }
+
+    $t = myBotsSummaryText($bots, $uid, $store);
     $rows = [];
     foreach ($bots as $b) {
         $st = ($b['status'] ?? '') === 'active' ? '🟢' : '🔴';
-        $rows[] = [['text' => "{$st} {$b['folder']} (@{$b['bot_username']})", 'callback_data' => "mybot:{$b['id']}"]];
+        $un = trim((string)($b['bot_username'] ?? ''));
+        $rows[] = [['text' => "{$st} " . $b['folder'] . ($un !== '' ? " (@{$un})" : ''), 'callback_data' => "mybot:{$b['id']}"]];
     }
+    $rows[] = [['text' => '➕ ساخت ربات جدید', 'callback_data' => Nav::CB_BACK_TYPE]];
     $kb = Nav::myBotsKb($rows);
-    if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, "📦 ربات‌های شما:", ['reply_markup' => $kb]);
-    else BotApi::send($TOKEN, $chatId, "📦 ربات‌های شما:", ['reply_markup' => $kb]);
+    if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, $t, ['reply_markup' => $kb]);
+    else BotApi::send($TOKEN, $chatId, $t, ['reply_markup' => $kb]);
+}
+
+/**
+ * خلاصهٔ آمارِ «ربات‌های من» — مشترک بین لیست و پنلِ آمارِ کلی.
+ * دیتابیسِ هر ربات جدا باز می‌شود و بعد بسته می‌شود تا اتصال‌ها انباشت نکنند.
+ */
+function myBotsSummaryText(array $bots, int $uid, Store $store): string
+{
+    $total = count($bots);
+    $active = 0; $disabled = 0; $withUsers = 0; $usersTotal = 0; $best = null;
+    $types = [];
+    $dbSqlite = 0; $dbMysql = 0;
+    $cfg = $GLOBALS['__cfg'] ?? [];
+
+    foreach ($bots as $b) {
+        if (($b['status'] ?? '') === 'active') $active++; else $disabled++;
+        $t = (string)($b['type'] ?? '?');
+        $types[$t] = ($types[$t] ?? 0) + 1;
+        if (trim((string)($b['db_name'] ?? '')) !== '') $dbMysql++; else $dbSqlite++;
+        if (!botHasUserTable($b)) continue;
+        $withUsers++;
+        try {
+            $pdo = childPdo((array)$cfg, $b);
+            if (!$pdo) continue;
+            $c = childCount($pdo, $b);
+            if ($c > 0) $usersTotal += $c;
+            if ($best === null || $c > $best['n']) {
+                $best = ['n' => $c, 'name' => (string)($b['folder'] ?? '?')];
+            }
+            $pdo = null;   // آزادسازی اتصال قبل از ربات بعدی
+        } catch (Throwable $e) { /* دیتابیس یک ربات خراب است ⇒ بقیه را نشان بده */ }
+    }
+
+    $limitTxt = '—';
+    $payOpen = 0;
+    try { Payments::ensureSchema($store); $payOpen = Payments::openPaymentCount($store, $uid); } catch (Throwable $e) {}
+
+    $t = "📦 <b>ربات‌های من</b>\n" . Ui::sep() . "\n\n";
+    $t .= Ui::kv('🤖', 'تعداد کل ربات‌ها', (string)$total);
+    $t .= "\n" . Ui::kv('🟢', 'فعال', (string)$active) . "  |  " . Ui::kv('🔴', 'غیرفعال', (string)$disabled);
+    if ($withUsers > 0) {
+        $t .= "\n" . Ui::kv('👥', 'مجموع کاربران ربات‌ها', number_format($usersTotal));
+        if ($best !== null && $best['n'] > 0) {
+            $t .= "\n" . Ui::kv('🏆', 'پرکاربرترین', $best['name'] . ' — ' . number_format((int)$best['n']) . ' کاربر');
+        }
+    }
+    if ($types !== []) {
+        $parts = [];
+        foreach ($types as $k => $n) $parts[] = Ui::e(Manager::templateLabel((string)$k)) . " (×{$n})";
+        $t .= "\n" . Ui::kv('🧩', 'بر حسب قالب', implode(' • ', $parts));
+    }
+    $t .= "\n" . Ui::kv('🗄', 'دیتابیس', "MySQL: {$dbMysql} | SQLite: {$dbSqlite}");
+    if ($payOpen > 0) {
+        $t .= "\n" . Ui::kv('🧾', 'پرداخت‌های باز', (string)$payOpen) . " — از «🧾 پرداخت‌های من» ببینید";
+    }
+    $t .= "\n\n👇 <b>روی هر ربات بزنید</b> تا پنل مدیریتش (آمار، وبهوک، ویرایش توکن…) باز شود.";
+    return Ui::out($t);
 }
 
 /** پنل مدیریت کاربران مجاز — مشترک بین پیام و کال‌بک (edit یا send) */
 function showUsersPanel(string $TOKEN, $chatId, int $msgId = 0): void
 {
     $kb = Nav::usersPanelKb();
-    if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, "مدیریت کاربران مجاز 👇", ['reply_markup' => $kb]);
-    else BotApi::send($TOKEN, $chatId, "مدیریت کاربران مجاز 👇", ['reply_markup' => $kb]);
+    $t = "👥 <b>مدیریت کاربران مجاز</b>\n" . Ui::sep() . "\n\n"
+        . "با «➕ افزودن کاربر» آیدی عددی بدهید تا بدون درخواست بتواند ربات بسازد.\n"
+        . "با «📃 لیست» همهٔ کاربرانِ مجاز را می‌بینید.\n"
+        . "با «📋 درخواست‌های جدید» در انتظارِ تأیید را می‌بینید. 👇";
+    if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, $t, ['reply_markup' => $kb]);
+    else BotApi::send($TOKEN, $chatId, $t, ['reply_markup' => $kb]);
 }
 
 /**
@@ -965,8 +1073,9 @@ function showAllBotsPanel(Store $store, string $TOKEN, $chatId, int $msgId = 0):
 {
     $bots = $store->allBots();
     if (!$bots) {
-        $t = "هنوز رباتی ثبت نشده.\nبرای ساخت، «🤖 ساخت ربات جدید» را بزنید.";
-        if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, $t);
+        $t = "🤖 <b>هنوز هیچ رباتی ثبت نشده است</b>\n\n"
+            . "برای شروع، «🤖 ساخت ربات جدید» را بزنید.";
+        if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, $t, ['reply_markup' => Nav::botPanelKb(['id' => 0])]);
         else BotApi::send($TOKEN, $chatId, $t);
         return;
     }
@@ -975,16 +1084,18 @@ function showAllBotsPanel(Store $store, string $TOKEN, $chatId, int $msgId = 0):
     $disabled = 0;
     foreach ($bots as $b) { if (($b['status'] ?? '') === 'active') $active++; else $disabled++; }
 
-    $t = "📋 <b>همه ربات‌ها</b>\n\n"
-        . "🔢 مجموع: <b>{$total}</b> | 🟢 فعال: <b>{$active}</b> | 🔴 غیرفعال: <b>{$disabled}</b>\n\n"
-        . "از دکمه‌های زیر می‌توانید پنل هر ربات را باز کنید یا حذفش کنید.";
+    $t = "📋 <b>همه ربات‌ها</b>\n" . Ui::sep() . "\n\n"
+        . Ui::kv('🤖', 'مجموع', (string)$total)
+        . "  |  " . Ui::kv('🟢', 'فعال', (string)$active)
+        . "  |  " . Ui::kv('🔴', 'غیرفعال', (string)$disabled)
+        . "\n\n👇 <b>از دکمه‌های زیر</b> پنل هر ربات را باز کنید، پیام همگانی بفرستید یا حذفش کنید.";
 
     $rows = [];
     $limit = 15;
     foreach (array_slice($bots, 0, $limit) as $b) {
         $st = ($b['status'] ?? '') === 'active' ? '🟢' : '🔴';
         $owner = (int)($b['owner_id'] ?? 0);
-        $label = "{$st} #{$b['id']} {$b['folder']} ({$b['type']}) | مالک: {$owner}";
+        $label = "{$st} #{$b['id']} " . $b['folder'] . " — " . Manager::templateLabel((string)($b['type'] ?? '')) . " | مالک: {$owner}";
         $rows[] = [['text' => $label, 'callback_data' => "mybot:{$b['id']}"]];
         $rows[] = [
             ['text' => '📣 پیام فقط به کاربران همین ربات', 'callback_data' => "act:broadcast:{$b['id']}"],
@@ -992,7 +1103,8 @@ function showAllBotsPanel(Store $store, string $TOKEN, $chatId, int $msgId = 0):
         ];
     }
     if ($total > $limit) {
-        $t .= "\n\n… و " . ($total - $limit) . " ربات دیگر؛ برای دیدنِ همه، دکمهٔ بازگشت را بعد از دیدنِ یکی فشار دهید تا لیست به‌روز شود.";
+        $t .= "\n\nℹ️ " . ($total - $limit) . " ربات دیگر در این صفحه نیست؛ "
+            . "با «🔄 تازه‌سازی» صفحهٔ بعدی را ببینید.";
     }
     $rows[] = [['text' => '🔄 تازه‌سازی', 'callback_data' => 'allbots:refresh']];
     $rows[] = [['text' => Nav::BACK, 'callback_data' => Nav::CB_BACK_MAIN]];
@@ -1032,25 +1144,35 @@ function botPanelText(array $cfg, array $bot): string
     $pdo = childPdo($cfg, $bot);
     $hasUsers = botHasUserTable($bot);
     $count = ($pdo && $hasUsers) ? childCount($pdo, $bot) : -1;
-    $countTxt = $count >= 0 ? (string)$count : '—';
-    $st = (string)($bot['status'] ?? '') === 'active' ? '🟢 فعال' : '🔴 غیرفعال';
+    $countTxt = $count >= 0 ? number_format($count) . ' کاربر' : 'قالبِ بدون فهرست کاربر';
+    $pdo = null;
+    $st = (string)($bot['status'] ?? '') === 'active'
+        ? '🟢 <b>فعال</b>' : '🔴 <b>غیرفعال</b>';
     $name = htmlspecialchars((string)($bot['bot_username'] ?? ''), ENT_QUOTES, 'UTF-8');
     $folder = htmlspecialchars((string)($bot['folder'] ?? ''), ENT_QUOTES, 'UTF-8');
     $label = Manager::templateLabel((string)($bot['type'] ?? ''));
     $dbLabel = htmlspecialchars(botDbLabel($bot), ENT_QUOTES, 'UTF-8');
 
-    $t = "🤖 <b>{$folder}</b> ({$label})\n\n";
-    $t .= "🔹 یوزرنیم: " . ($name !== '' ? "@{$name}" : '<i>تنظیم نشده</i>') . "\n";
-    $t .= "🔹 وضعیت: {$st}\n";
-    $t .= "🔹 ادمین: <code>" . htmlspecialchars((string)($bot['admin_id'] ?? ''), ENT_QUOTES, 'UTF-8') . "</code>\n";
-    $t .= "🔹 صاحب ربات (در ربات‌ساز): <code>" . (int)($bot['owner_id'] ?? 0) . "</code>\n";
-    $t .= "🔹 دیتابیس: <code>{$dbLabel}</code>\n";
-    $t .= "👥 کاربران: {$countTxt}\n";
+    $t = "🤖 <b>{$folder}</b>\n";
+    $t .= "<i>قالب: " . Ui::e($label) . "</i>\n\n" . Ui::sep() . "\n\n";
+
+    if ($name !== '') {
+        $t .= Ui::bullet('🔹', "<b>یوزرنیم:</b> " . Ui::link('https://t.me/' . ltrim($name, '@'), '@' . $name));
+    } else {
+        $t .= Ui::bullet('🔹', "<b>یوزرنیم:</b> <i>تنظیم نشده</i>");
+    }
+    $t .= "\n" . Ui::bullet('🔹', "<b>وضعیت:</b> {$st}");
+    $t .= "\n" . Ui::bullet('🔹', '<b>آیدی ادمین:</b> ' . Ui::code((string)($bot['admin_id'] ?? '')));
+    $t .= "\n" . Ui::bullet('🔹', '<b>صاحب ربات (در ربات‌ساز):</b> ' . Ui::code((string)(int)($bot['owner_id'] ?? 0)));
+    $t .= "\n" . Ui::bullet('🔹', '<b>دیتابیس:</b> ' . Ui::code($dbLabel));
+    $t .= "\n" . Ui::bullet('🔹', '<b>کاربران ربات:</b> ' . Ui::e($countTxt));
 
     // تاریخ ساخت (ستون ممکن است در اسکیمای قدیمی نباشد ⇒ بدون هشدار چک می‌شود)
     if (isset($bot['created_at']) && trim((string)$bot['created_at']) !== '') {
         $ts = strtotime((string)$bot['created_at']);
-        $t .= "📅 تاریخ ساخت: " . ($ts ? date('Y-m-d H:i', $ts) : htmlspecialchars((string)$bot['created_at'], ENT_QUOTES, 'UTF-8')) . "\n";
+        $t .= "\n" . Ui::bullet('📅', '<b>تاریخ ساخت:</b> ' . Ui::e(
+            $ts ? date('Y-m-d H:i', $ts) : (string)$bot['created_at']
+        ));
     }
 
     // وبهوک: آدرس واقعی ثبت‌شده (اگر ستون خالی بود از استراتژی استاندارد محاسبه می‌شود)
@@ -1058,11 +1180,20 @@ function botPanelText(array $cfg, array $bot): string
     if ($wh === '') {
         try { $wh = trim((string)Manager::webhookUrlForBot($cfg, $bot)); } catch (Throwable $e) { $wh = ''; }
     }
-    $t .= "🔗 وبهوک: " . ($wh !== '' ? '<code>' . htmlspecialchars($wh, ENT_QUOTES, 'UTF-8') . '</code>' : '<i>ست نشده</i>') . "\n";
-    if (isset($bot['webhook_secret']) && trim((string)$bot['webhook_secret']) !== '') {
-        $t .= "🔒 رمز وبهوک (X-Telegram-Bot-Api-Secret-Token): ✅ فعال\n";
+    if ($wh !== '') {
+        // آدرس به‌صورت لینکِ کلیک‌پذیر نمایش داده می‌شود (و نسخهٔ کامل هم در <code>)
+        $t .= "\n\n" . Ui::bullet('🔗', '<b>وبهوک:</b> ' . Ui::link($wh));
+        $t .= "\n" . Ui::bullet('📋', '<i>کپی کامل:</i> ' . Ui::code($wh));
+    } else {
+        $t .= "\n\n" . Ui::bullet('🔗', '<b>وبهوک:</b> <i>ست نشده</i>');
     }
-    return $t;
+    if (isset($bot['webhook_secret']) && trim((string)$bot['webhook_secret']) !== '') {
+        $t .= "\n" . Ui::bullet('🔒', '<b>رمز وبهوک</b> ‎(X-Telegram-Bot-Api-Secret-Token): <b>فعال</b> ✅');
+    }
+    $t .= "\n\n" . Ui::sep() . "\n";
+    $t .= "✏️ <b>تغییر توکن یا ادمین؟</b> از دکمهٔ «✏️ ویرایش توکن» / «✏️ ویرایش آیدی ادمین»\n"
+        . "استفاده کنید؛ ربات و کاربرانش حذف نمی‌شوند.";
+    return Ui::out($t);
 }
 
 /**
@@ -1087,6 +1218,127 @@ function cancelOpenPayment(Store $store, int $uid, array $temp): void
     } catch (Throwable $e) {
         Logger::getInstance()->warning('payment', "cancelOpenPayment failed ({$pid}): " . $e->getMessage());
     }
+}
+
+/**
+ * آیا این کاربر اجازهٔ ویرایش هویتِ (توکن/ادمینِ) این ربات را دارد؟
+ * صاحب ربات یا هر ادمین — دقیقاً همان قانونِ بقیهٔ پنلِ ربات.
+ */
+function botEditableBy(array $bot, array $user, array $supers): bool
+{
+    if (isAdmin($user, $supers)) return true;
+    return (int)($bot['owner_id'] ?? 0) === (int)($user['user_id'] ?? 0);
+}
+
+/**
+ * اعمال توکنِ تازه روی یک رباتِ ساخته‌شده.
+ *
+ * ترتیب کارها و دلیلش:
+ *  ۱) config.php ربات فرزند با توکن جدید پچ می‌شود (وگرنه ربات آپدیت می‌گیرد
+ *     ولی توکنِ خودش را رد می‌کند و هیچ پیامی نمی‌کند).
+ *  ۲) رکورد دیتابیس به‌روز می‌شود (توکن رمزنگاری‌شده + یوزرنیم + bot_id).
+ *  ۳) وبهوک دوباره ست می‌شود — چون فرمول secret و آدرس وبهوک به توکن وابسته‌اند
+ *     و با توکنِ کهنه، تلگرام هر درخواستی را دور می‌ریخت.
+ *
+ * اگر مرحلهٔ ۱ یا ۲ شکست بخورد، استثنا بالا می‌رود و caller پیام خطای دقیق
+ * می‌دهد؛ چون توکن در DB هنوز عوض نشده، ربات در وضعیت سالمِ قبلی می‌ماند.
+ */
+function applyBotTokenChange(array $cfg, Store $store, string $TOKEN, array $bot, string $newToken, string $newUsername, int $newBotId): void
+{
+    $botDir = Manager::childBotsDir() . '/' . $bot['folder'];
+    if (!is_dir($botDir)) {
+        throw new Exception("پوشهٔ این ربات پیدا نشد: <code>bots/" . Ui::e((string)$bot['folder']) . "</code>");
+    }
+    // توکنِ کهنه لازم است تا ادمینِ فعلی و یوزرنیمِ قبلی داخل config عوض شوند
+    $oldToken = childToken($bot);
+    $res = Manager::updateChildIdentity(
+        (string)($bot['type'] ?? ''),
+        $botDir,
+        $newToken,
+        (int)($bot['admin_id'] ?? 0),
+        $newUsername !== '' ? $newUsername : (string)($bot['bot_username'] ?? '')
+    );
+    if ($res['changed'] < 2) {
+        throw new Exception("پچ کانفیگ ناقص بود (فقط {$res['changed']} فیلد عوض شد).");
+    }
+    $enc = encryptToken($newToken, $GLOBALS['secretKey'] ?? Manager::DEFAULT_SECRET_KEY);
+    $store->updateBot((int)$bot['id'], [
+        'token'         => $enc,
+        'bot_username'  => $newUsername !== '' ? $newUsername : (string)($bot['bot_username'] ?? ''),
+        'bot_id'        => $newBotId > 0 ? $newBotId : (int)($bot['bot_id'] ?? 0),
+    ]);
+    // وبهوک را روی توکن تازه دوباره ست می‌کنیم
+    $botFresh = $store->botById((int)$bot['id']);
+    $secret = Manager::webhookSecret((string)($bot['type'] ?? ''), $newToken);
+    $url = Manager::webhookUrl($cfg, (string)$bot['folder'], (string)($bot['type'] ?? ''), $secret);
+    $setR = BotApi::setWebhook($newToken, $url, $secret);
+    if (!is_array($setR) || empty($setR['ok'])) {
+        Logger::getInstance()->warning('botedit', "setWebhook after token change failed: " . (($setR['description'] ?? '') ?: 'no response'));
+    }
+    if ($botFresh) $store->updateBot((int)$bot['id'], ['webhook_url' => $url]);
+    unset($oldToken);
+}
+
+/**
+ * اعمال آیدی ادمینِ تازه روی یک رباتِ ساخته‌شده.
+ * هم دیتابیسِ ربات‌ساز و هم config.php خودِ ربات به‌روز می‌شوند؛ وگرنه ربات
+ * هنوز به ادمینِ قبلی پیام می‌دهد و به ادمینِ جدید هیچ.
+ */
+function applyBotAdminChange(array $cfg, Store $store, array $bot, int $newAdmin): void
+{
+    $botDir = Manager::childBotsDir() . '/' . $bot['folder'];
+    if (!is_dir($botDir)) {
+        throw new Exception("پوشهٔ این ربات پیدا نشد: <code>bots/" . Ui::e((string)$bot['folder']) . "</code>");
+    }
+    $res = Manager::updateChildIdentity(
+        (string)($bot['type'] ?? ''),
+        $botDir,
+        childToken($bot),
+        $newAdmin,
+        (string)($bot['bot_username'] ?? '')
+    );
+    if ($res['changed'] < 1) {
+        throw new Exception("پچ کانفیگ ناقص بود (هیچ فیلدی عوض نشد).");
+    }
+    $store->updateBot((int)$bot['id'], ['admin_id' => $newAdmin]);
+}
+
+/**
+ * پنل «⚙️ تنظیمات» — همهٔ کلیدهای روشن/خاموش و وضعیت نرخ دلار یک‌جا.
+ * (ساخت بدون درخواست، حالت تعمیرات، متن تعمیرات، زمان بازگشت، نرخ دلار، درگاه‌ها)
+ */
+function showSettingsPanel(Store $store, string $TOKEN, $chatId, int $msgId = 0, string $note = ''): void
+{
+    $maint = BuildSettings::maintenanceOn($store);
+    $approval = BuildSettings::approvalRequired($store);
+    $eta = BuildSettings::maintenanceEta($store);
+
+    $t = "⚙️ <b>تنظیمات ربات‌ساز</b>\n" . Ui::sep() . "\n\n";
+
+    $t .= BuildSettings::statusLine($store, $maint, 'حالت تعمیرات',
+            $maint
+                ? 'ساخت ربات برای همه (حتی ادمین) بسته است و پیام «در حال تعمیر» نشان داده می‌شود.'
+                : 'ساخت ربات باز است.'
+        ) . "\n\n";
+
+    $t .= BuildSettings::statusLine($store, $approval, 'نیاز به تأیید ادمین (ساخت بدون درخواست)',
+            $approval
+                ? 'کاربر باید درخواست بدهد و منتظر تأیید شما بماند.'
+                : 'کاربر مستقیم وارد انتخاب قالب می‌شود؛ درخواستی ثبت نمی‌شود.'
+        ) . "\n\n";
+
+    $t .= "⏳ <b>زمان تقریبی بازگشت:</b> " . ($eta !== '' ? Ui::e($eta) : '<i>تعیین نشده</i>') . "\n";
+    $t .= Ui::kv('📝', 'متن تعمیرات', Texts::hasCustom($store, 'maintenance') ? 'دلخواه (✍️)' : 'پیش‌فرض (📌)') . "\n\n";
+
+    $t .= Ui::sep() . "\n";
+    $t .= "💵 <b>نرخ دلار</b>\n" . implode("\n", FxRate::statusLines($store)) . "\n";
+
+    if ($note !== '') $t = $note . "\n\n" . $t;
+
+    $t = Ui::out($t);
+    $kb = Nav::settingsPanelKb($store);
+    if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, $t, ['reply_markup' => $kb]);
+    else BotApi::send($TOKEN, $chatId, $t, ['reply_markup' => $kb]);
 }
 
 function handleBack(array $cfg, Store $store, string $TOKEN, array $SUPERS, array $user, $chatId, string $step, array $temp): void
@@ -1154,6 +1406,14 @@ function handleBack(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
                     return;
                 }
                 showTextsGroups($store, $TOKEN, $chatId);
+                return;
+            case 'settings':
+                $store->clearStep($uid);
+                if (!isAdmin($user, $SUPERS)) {
+                    BotApi::send($TOKEN, $chatId, "⛔️ فقط ادمین.", ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
+                    return;
+                }
+                showSettingsPanel($store, $TOKEN, $chatId);
                 return;
             case 'bot': {
                 $botId = (int)($temp['bot_id'] ?? 0);
@@ -1298,12 +1558,16 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
         ]);
         $role = $admin ? "مدیر 👑" : "کاربر مجاز ✅";
         $deepNote = $deepLink !== null
-            ? "🔗 لینک شما: <code>" . htmlspecialchars($deepLink, ENT_QUOTES, 'UTF-8') . "</code>\n\n"
+            ? "🔗 <b>لینک شما:</b> " . Ui::code($deepLink) . "\n\n"
             : '';
         $types = implode('، ', array_values(Manager::availableTypes()));
         if ($types === '') $types = 'هیچ قالبی روی سرور نصب نیست';
-        BotApi::send($TOKEN, $chatId,
-            $deepNote . Texts::get($store, 'welcome', ['role' => $role, 'types' => $types]),
+        $welcome = Texts::get($store, 'welcome', ['role' => $role, 'types' => $types]);
+        // اگر حالت تعمیرات روشن است، بالای پیام خوش‌آمد همان هشدارِ روشن می‌آید
+        if (BuildSettings::maintenanceOn($store)) {
+            $welcome .= "\n\n" . Ui::sep() . "\n" . BuildSettings::maintenanceNotice($store);
+        }
+        BotApi::send($TOKEN, $chatId, $deepNote . $welcome,
             ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
         return;
     }
@@ -1317,7 +1581,7 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
         case '/diagnose': $text = $admin ? '🔍 دیاگنوز' : 'ℹ️ راهنما'; break;
         case '/source': $text = '🔄 دریافت سورس بروز'; break;
         case '/texts':    $text = $admin ? '📝 متن‌ها' : 'ℹ️ راهنما'; break;
-        case '/update':   $text = '⬆️ آپدیت ربات‌ساز'; break;
+        case '/settings': $text = $admin ? '⚙️ تنظیمات' : 'ℹ️ راهنما'; break;
     }
 
     // دکمه «📋 درخواست‌های جدید» شمارنده پویا دارد: «📋 درخواست‌های جدید (N)»
@@ -1340,14 +1604,31 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
         return;
     }
 
-    if ($text === '⬆️ آپدیت ربات‌ساز') {
-        if (!isSuper($SUPERS, $uid)) { BotApi::send($TOKEN, $chatId, "⛔️ فقط سوپرادمین اجازهٔ بروزرسانی را دارد."); return; }
-        showSelfUpdatePanel($cfg, $store, $TOKEN, $chatId);
+    if ($text === '⬆️ آپدیت ربات‌ساز' || $text === '/update') {
+        // پنل «⬆️ آپدیت ربات‌ساز» حذف شد؛ فقط تازه‌کردنِ templates/ باقی مانده است.
+        // کیبوردهای قدیمیِ کاربران نباید «دستور نامعتبر» بگیرند.
+        BotApi::send($TOKEN, $chatId,
+            "ℹ️ <b>پنل «آپدیت ربات‌ساز» حذف شد.</b>\n\n"
+            . "برای به‌روزرسانی، از «🔄 دریافت سورس بروز» استفاده کنید\n"
+            . "(همان پنل فقط پوشهٔ ‎<code>templates/</code> را تازه می‌کند).",
+            ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
         return;
     }
 
     switch ($text) {
         case '🤖 ساخت ربات جدید':
+            // ===== حالت تعمیرات: هیچ‌کس ربات تازه نمی‌سازد (حتی ادمین) =====
+            // پیامِ تعمیرات عمداً واضح و کامل است: کاربر باید بداند مشکلی هست
+            // و کارهای قبلی‌اش (ربات‌های موجود) سالم‌اند.
+            if (BuildSettings::maintenanceOn($store)) {
+                $store->clearStep($uid);
+                BotApi::send($TOKEN, $chatId, BuildSettings::maintenanceNotice($store),
+                    ['reply_markup' => BotApi::kb([
+                        [['text' => '📦 ربات‌های من']],
+                        [['text' => 'ℹ️ راهنما']],
+                    ])]);
+                return;
+            }
             // گیت لیمیت ماژولار: ادمین نامحدود؛ بقیه طبق bot_limit
             try { Payments::ensureSchema($store); } catch (Throwable $e) {}
             // مسدودی صریح ادمین: فروشگاه نشان داده نمی‌شود چون خرید اسلات مسدودی را دور می‌زند
@@ -1358,6 +1639,13 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
             }
             if (!PaymentLimits::canBuild($store, $user, $SUPERS) && !$admin) {
                 showLimitShop($store, $TOKEN, $chatId, $user, $SUPERS);
+                return;
+            }
+            // ===== «ساخت بدون درخواست» =====
+            // کلید «نیاز به تأیید» خاموش ⇒ کاربر مستقیم وارد انتخاب قالب می‌شود
+            // و اصلاً ردیف درخواست ساخته نمی‌شود (همان چیزی که ادمین خواسته).
+            if (!$admin && BuildSettings::skipApproval($store)) {
+                BotApi::send($TOKEN, $chatId, Texts::get($store, 'type_prompt'), ['reply_markup' => Nav::typeMenu()]);
                 return;
             }
             if ($store->hasPendingRequest($uid)) {
@@ -1409,14 +1697,21 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
             $helpPay = '';
             try {
                 if (PaymentGateways::isAnythingEnabled($store)) {
-                    $helpPay = "\n\n💳 <b>پرداخت</b>\nسقف ساخت ربات و بعضی قالب‌ها پولی است.\n"
-                        . "از «💳 افزایش لیمیت» اسلات یا مجوز قالب بخر و با «🧾 پرداخت‌های من» پیگیری کن.\n"
-                        . "کارت‌به‌کارت: عکس فیش یا شماره پیگیری بفرست تا ادمین بررسی کند.\n"
-                        . "کریپتو: بعد از پرداخت خودکار تأیید می‌شود؛ اگر نشد «🔄 بررسی وضعیت» را بزن.";
+                    $methods = PaymentGateways::availableMethods($store, $cfg);
+                    $names = [];
+                    foreach ($methods as $m) $names[] = Ui::e(Payments::methodLabel($m));
+                    $helpPay = "\n\n" . Ui::sep() . "\n"
+                        . "💳 <b>پرداخت</b>\n"
+                        . "سقف ساخت ربات و بعضی قالب‌ها پولی است.\n\n"
+                        . "• 🛒 خرید اسلات/مجوز: «💳 افزایش لیمیت»\n"
+                        . "• 🧾 پیگیری: «🧾 پرداخت‌های من»\n"
+                        . "• 🟣🌐 روش‌های آنلاین: " . ($names !== [] ? implode(' • ', $names) : 'فعلاً هیچ‌کدام فعال نیست') . "\n"
+                        . "• 💳 کارت‌به‌کارت: عکس فیش یا شمارهٔ پیگیری بفرستید تا ادمین بررسی کند.\n"
+                        . "• 🔄 اگر تأیید خودکار انجام نشد، «🔄 بررسی وضعیت» را بزنید.";
                 }
             } catch (Throwable $e) {}
             $helpContact = trim(Texts::get($store, 'contact'));
-            $helpContact = $helpContact !== '' ? "\n\n📞 <b>ارتباط با ادمین</b>\n" . $helpContact : '';
+            $helpContact = $helpContact !== '' ? "\n\n" . Ui::sep() . "\n📞 <b>ارتباط با ادمین</b>\n" . $helpContact : '';
             $help = Texts::get($store, 'help', [
                 'payment' => $helpPay,
                 'diag'    => $admin ? "لاگ کامل هم در <code>data/logs/</code> و «🔍 دیاگنوز» است." : '',
@@ -1441,6 +1736,13 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
         case '💾 بکاپ دیتابیس':
             if (!$admin) { BotApi::send($TOKEN, $chatId, "⛔️ فقط ادمین."); return; }
             showBackupPanel($cfg, $store, $TOKEN, $chatId);
+            return;
+
+        // ===== ⚙️ تنظیمات: کلیدهای روشن/خاموش + متن تعمیرات + نرخ دلار =====
+        case '/settings':
+        case '⚙️ تنظیمات':
+            if (!$admin) { BotApi::send($TOKEN, $chatId, "⛔️ فقط ادمین.", ['reply_markup' => mainMenu($user, $SUPERS, $store)]); return; }
+            showSettingsPanel($store, $TOKEN, $chatId);
             return;
     }
 
@@ -1490,24 +1792,36 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
                 }
                 try { $pendingReqs = $store->countPendingRequests(); } catch (Throwable $e) { $pendingReqs = 0; }
                 try { $payPending = Payments::pendingAdminCount($store); } catch (Throwable $e) { $payPending = 0; }
-                $msg = "📊 <b>آمار ربات‌ساز</b>\n\n"
-                    . "👥 کاربران: {$store->countUsers()}\n"
-                    . "🤖 ربات‌ها: " . count($bots) . " (🟢 فعال: {$active} | 🔴 غیرفعال: {$disabled})\n"
-                    . "👤 مجموع کاربران ربات‌ها: {$totalChildUsers}\n"
-                    . "⏳ درخواست‌های در انتظار: {$pendingReqs}\n"
-                    . "💳 پرداخت‌های در انتظار: {$payPending}\n";
+
+                $msg = "📊 <b>آمار ربات‌ساز</b>\n" . Ui::sep() . "\n\n"
+                    . Ui::kv('👥', 'کاربران ثبت‌شده', number_format($store->countUsers()))
+                    . "\n" . Ui::kv('🤖', 'ربات‌ها', number_format(count($bots)))
+                        . " — 🟢 فعال: <b>{$active}</b> | 🔴 غیرفعال: <b>{$disabled}</b>"
+                    . "\n" . Ui::kv('👤', 'مجموع کاربرانِ ربات‌ها', number_format($totalChildUsers))
+                    . "\n" . Ui::kv('⏳', 'درخواست‌های در انتظار', (string)$pendingReqs)
+                    . "\n" . Ui::kv('🧾', 'پرداخت‌های در انتظار', (string)$payPending)
+                    . "\n\n" . Ui::sep() . "\n";
                 if ($byType !== []) {
                     $parts = [];
-                    foreach ($byType as $k => $n) $parts[] = htmlspecialchars((string)$k, ENT_QUOTES, 'UTF-8') . ": {$n}";
-                    $msg .= "🧩 بر حسب قالب: " . implode('، ', $parts) . "\n";
+                    foreach ($byType as $k => $n) {
+                        $parts[] = Ui::bullet('🧩', Ui::e(Manager::templateLabel((string)$k)) . ": <b>{$n}</b>");
+                    }
+                    $msg .= "🧩 <b>بر حسب قالب</b>\n" . implode("\n", $parts) . "\n";
                 }
+                $msg .= "\n" . Ui::sep() . "\n";
+                $msg .= "⚙️ <b>وضعیت کلیدها</b>\n";
+                $msg .= Ui::bullet(BuildSettings::maintenanceOn($store) ? '🔧' : '🟢',
+                        'حالت تعمیرات: ' . (BuildSettings::maintenanceOn($store) ? '🔴 روشن' : 'خاموش')) . "\n";
+                $msg .= Ui::bullet('📝', 'نیاز به تأیید ادمین: ' . (BuildSettings::approvalRequired($store) ? '🟢 روشن' : '🔴 خاموش (ساخت بدون درخواست)')) . "\n";
+                $msg .= Ui::bullet('💵', 'نرخ دلار: ' . FxRate::format(FxRate::stored($store)) . ' — ' . Ui::e(FxRate::source($store) ?: 'ثبت‌نشده'));
                 if (isSuper($SUPERS, $uid) && $ownerIds !== []) {
-                    $msg .= "👑 صاحبانِ ربات‌ها:\n";
+                    $msg .= "\n\n" . Ui::sep() . "\n👑 <b>صاحبانِ ربات‌ها</b>\n";
                     foreach ($ownerIds as $oid => $cnt) {
-                        $msg .= "• <code>" . htmlspecialchars((string)$oid, ENT_QUOTES, 'UTF-8') . "</code> — {$cnt} ربات\n";
+                        $label = $oid === $uid ? 'شما' : Ui::code((string)$oid);
+                        $msg .= Ui::bullet('👤', $label . " — <b>{$cnt}</b> ربات") . "\n";
                     }
                 }
-                BotApi::send($TOKEN, $chatId, $msg);
+                BotApi::send($TOKEN, $chatId, Ui::out(rtrim($msg, "\n")));
                 return;
 
             case '📣 همگانی':
@@ -1737,12 +2051,19 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
             $digits = Payments::digitsOnly($text);
             // سقف ۱۲ رقم: نرخ غیرواقعی فقط ضرر می‌کند و جلوی اشتباه تایپی را می‌گیرد
             if ($digits === '' || strlen($digits) > 12) {
-                BotApi::send($TOKEN, $chatId, "⛔️ فقط عدد را بفرستید (مثلاً 100000).\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
+                BotApi::send($TOKEN, $chatId, "⛔️ <b>فقط عدد را بفرستید.</b>\n\n"
+                    . "مثال: ‎<code>100000</code> یعنی هر دلار = ۱۰۰٬۰۰۰ تومان.\n"
+                    . "برای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
                 return;
             }
-            PaymentPricing::setTomanPerUsd($store, (float)$digits);
+            $rate = (float)$digits;
+            PaymentPricing::setTomanPerUsd($store, $rate);
             $store->clearStep($uid);
-            BotApi::send($TOKEN, $chatId, "✅ نرخ هر دلار = " . number_format((float)$digits) . " تومان");
+            BotApi::send($TOKEN, $chatId,
+                "✅ <b>نرخ دلار دستی ثبت و قفل شد.</b>\n\n"
+                . Ui::kv('💵', 'هر دلار', FxRate::format($rate))
+                . "\n" . Ui::bullet('🔒', 'حالت: دستی (دکمهٔ «🔄 نرخ خودکار» آن را برمی‌گرداند)')
+                . "\n\n💡 اگر می‌خواهید نرخ زندهٔ بازار استفاده شود، «🔄 نرخ خودکار (API)» را بزنید.");
             showPaymentsAdmin($store, $TOKEN, $chatId);
             return;
         }
@@ -1836,6 +2157,186 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
             showPaymentsAdmin($store, $TOKEN, $chatId);
             return;
         }
+
+        // ===== درگاه زرین‌پال: کد پذیرنده =====
+        case 'await_pay_zarin_merchant': {
+            if (!$admin) { $store->clearStep($uid); return; }
+            $mid = trim($text);
+            // کد پذیرندهٔ زرین‌پال یک UUID است؛ حداقل طول ۲۰ جلوی «ی» یا «reset» را می‌گیرد
+            if (mb_strlen($mid) < 20 || mb_strlen($mid) > 50) {
+                BotApi::send($TOKEN, $chatId,
+                    "⛔️ کد پذیرنده نامعتبر است.\n"
+                    . "در پنل زرین‌پال بخش «درگاه‌ها» کد ۳۶ کاراکتری را کپی کنید.\n\n"
+                    . "برای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL,
+                    ['reply_markup' => Nav::stepKb()]);
+                return;
+            }
+            $sandbox = PaymentZarin::isSandbox($store);
+            PaymentZarin::setCredentials($store, $mid, $sandbox);
+            $cb = rtrim((string)($cfg['base_url'] ?? ''), '/') . PaymentZarin::callbackPath();
+            $store->clearStep($uid);
+            BotApi::send($TOKEN, $chatId,
+                "✅ <b>درگاه زرین‌پال ثبت شد.</b>\n\n"
+                . Ui::kv('🟣', 'کد پذیرنده', mb_substr($mid, 0, 8) . '…' . mb_substr($mid, -4), true)
+                . "\n" . Ui::kv('🌐', 'حالت', $sandbox ? '🧪 تست (sandbox)' : 'واقعی')
+                . "\n\n⚠️ این آدرس را در پنل زرین‌پال به‌عنوان «آدرس بازگشت» ثبت کنید:\n"
+                . "   " . Ui::link($cb) . "\n"
+                . "   " . Ui::code($cb) . "\n\n"
+                . "برای فعال‌شدن، درگاه زرین‌پال را از پنل پرداخت‌ها روشن کنید. 🟢");
+            showPaymentsAdmin($store, $TOKEN, $chatId);
+            return;
+        }
+
+        // ===== درگاه آقای پرداخت: کد پین =====
+        case 'await_pay_aqaye_pin': {
+            if (!$admin) { $store->clearStep($uid); return; }
+            $pin = trim($text);
+            if (mb_strlen($pin) < 6 || mb_strlen($pin) > 80) {
+                BotApi::send($TOKEN, $chatId,
+                    "⛔️ کد پین نامعتبر است.\n"
+                    . "کد پین درگاه را از پنل آقای پرداخت کپی کنید.\n\n"
+                    . "برای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL,
+                    ['reply_markup' => Nav::stepKb()]);
+                return;
+            }
+            PaymentAqaye::setPin($store, $pin);
+            $cb = rtrim((string)($cfg['base_url'] ?? ''), '/') . PaymentAqaye::callbackPath();
+            $store->clearStep($uid);
+            BotApi::send($TOKEN, $chatId,
+                "✅ <b>درگاه آقای پرداخت ثبت شد.</b>\n\n"
+                . "⚠️ این آدرس باید با دامنهٔ تأییدشدهٔ درگاه شما یکی باشد:\n"
+                . "   " . Ui::link($cb) . "\n"
+                . "   " . Ui::code($cb) . "\n\n"
+                . "برای فعال‌شدن، درگاه را از پنل پرداخت‌ها روشن کنید. 🟢");
+            showPaymentsAdmin($store, $TOKEN, $chatId);
+            return;
+        }
+
+        // ===== ⚙️ متن پیام تعمیرات =====
+        case 'await_maintenance_text': {
+            if (!$admin) { $store->clearStep($uid); return; }
+            if (strtolower(trim($text)) === 'reset') {
+                Texts::reset($store, 'maintenance');
+                $store->clearStep($uid);
+                BotApi::send($TOKEN, $chatId, "✅ متن تعمیرات به حالت پیش‌فرض برگشت.\n\n" . Ui::quote(Texts::defaultText('maintenance')));
+                showSettingsPanel($store, $TOKEN, $chatId);
+                return;
+            }
+            if (trim($text) === '') {
+                BotApi::send($TOKEN, $chatId, "⛔️ متن خالی است. یا متن تازه بفرستید، یا کلمهٔ <code>reset</code> را برای برگشت به پیش‌فرض.\nبرای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
+                return;
+            }
+            $unknown = Texts::unknownVars('maintenance', $text);
+            if ($unknown !== []) {
+                BotApi::send($TOKEN, $chatId, "⚠️ این جای‌نگهدارها در متن تعمیرات شناخته نمی‌شوند و موقع نمایش حذف می‌شوند:\n"
+                    . Ui::code(implode(' ', $unknown)) . "\n\nدوباره بفرستید یا برای انصراف " . Nav::CANCEL . " را بزنید.", ['reply_markup' => Nav::stepKb()]);
+                return;
+            }
+            Texts::set($store, 'maintenance', $text);
+            $store->clearStep($uid);
+            BotApi::send($TOKEN, $chatId, "✅ متن پیام تعمیرات ذخیره شد.\n\n" . Ui::quote(Texts::get($store, 'maintenance', ['eta' => BuildSettings::maintenanceEta($store) ?: 'به‌زودی'])));
+            showSettingsPanel($store, $TOKEN, $chatId);
+            return;
+        }
+
+        // ===== ⏳ زمان تقریبی بازگشت =====
+        case 'await_maintenance_eta': {
+            if (!$admin) { $store->clearStep($uid); return; }
+            $eta = trim($text);
+            if (strtolower($eta) === 'reset' || $eta === '0') $eta = '';
+            BuildSettings::setMaintenanceEta($store, $eta);
+            $store->clearStep($uid);
+            BotApi::send($TOKEN, $chatId, $eta === ''
+                ? "✅ زمان تقریبی پاک شد؛ در متن تعمیرات «به‌زودی» نمایش داده می‌شود."
+                : "✅ زمان تقریبی بازگشت = <b>" . Ui::e($eta) . "</b>");
+            showSettingsPanel($store, $TOKEN, $chatId);
+            return;
+        }
+
+        // ===== ✏️ ویرایش توکنِ یک رباتِ ساخته‌شده =====
+        case 'await_edit_bot_token': {
+            $botId = (int)($temp['bot_id'] ?? 0);
+            $bot = $botId > 0 ? $store->botById($botId) : null;
+            if (!$bot || !botEditableBy($bot, $user, $SUPERS)) {
+                $store->clearStep($uid);
+                BotApi::send($TOKEN, $chatId, "⛔️ این ربات در دسترس شما نیست.", ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
+                return;
+            }
+            $token = trim($text);
+            if (!preg_match('/^\d+:[\w\-]{20,}$/', $token)) {
+                BotApi::send($TOKEN, $chatId, "⛔️ <b>فرمت توکن اشتباه است.</b>\n\n"
+                    . "توکن باید شبیه ‎<code>1234567890:AAH…</code> باشد.\n"
+                    . "برای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
+                return;
+            }
+            $me = BotApi::getMe($token);
+            if (empty($me['ok'])) {
+                BotApi::send($TOKEN, $chatId, "⛔️ <b>توکن نامعتبر است.</b>\n\n"
+                    . "تلگرام این توکن را نپذیرفت: " . Ui::code(mb_substr((string)($me['description'] ?? 'پاسخی نرسید'), 0, 120)) . "\n\n"
+                    . "توکن را دوباره بررسی کنید. اگر ربات را از @BotFather حذف کرده‌اید،\n"
+                    . "باید ربات تازه‌ای بسازید و توکنِ همان را بفرستید.\n\n"
+                    . "برای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
+                return;
+            }
+            try {
+                applyBotTokenChange($cfg, $store, $TOKEN, $bot, $token, (string)($me['result']['username'] ?? ''), (int)($me['result']['id'] ?? 0));
+            } catch (Throwable $e) {
+                Logger::getInstance()->error('botedit', "token change failed for #{$botId}: " . $e->getMessage());
+                BotApi::send($TOKEN, $chatId, "⚠️ <b>توکن معتبر است ولی اعمال نشد:</b>\n" . Ui::quote(Ui::e(Manager::sanitizeDbError($e->getMessage())))
+                    . "\n\nهیچ تغییری ذخیره نشد. برای برگشت: " . Nav::BACK, ['reply_markup' => Nav::stepKb()]);
+                return;
+            }
+            $store->clearStep($uid);
+            $fresh = $store->botById($botId) ?: $bot;
+            BotApi::send($TOKEN, $chatId,
+                "✅ <b>توکن با موفقیت عوض شد!</b>\n\n"
+                . Ui::kv('🤖', 'ربات جدید', '@' . (string)($fresh['bot_username'] ?? '-'), true) . "\n"
+                . "🔄 وبهوک هم روی توکن تازه ست شد.\n\n"
+                . "⚠️ ربات قبلی دیگر به این ربات‌ساز وصل نیست.",
+                ['reply_markup' => Nav::botPanelKb($fresh, $admin)]);
+            return;
+        }
+
+        // ===== ✏️ ویرایش آیدی ادمینِ یک رباتِ ساخته‌شده =====
+        case 'await_edit_admin_id': {
+            $botId = (int)($temp['bot_id'] ?? 0);
+            $bot = $botId > 0 ? $store->botById($botId) : null;
+            if (!$bot || !botEditableBy($bot, $user, $SUPERS)) {
+                $store->clearStep($uid);
+                BotApi::send($TOKEN, $chatId, "⛔️ این ربات در دسترس شما نیست.", ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
+                return;
+            }
+            $newAdmin = Payments::parseIntLoose(trim($text));
+            if ($newAdmin === null || $newAdmin <= 0) {
+                BotApi::send($TOKEN, $chatId, "⛔️ <b>آیدی عددی معتبر بفرستید.</b>\n\n"
+                    . "مثال: ‎<code>123456789</code> — از ‎<code>@userinfobot</code> بگیرید.\n"
+                    . "برای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
+                return;
+            }
+            if ($newAdmin === (int)($bot['admin_id'] ?? 0)) {
+                $store->clearStep($uid);
+                BotApi::send($TOKEN, $chatId, "ℹ️ همین آیدی از قبل ثبت شده بود؛ تغییری لازم نیست.",
+                    ['reply_markup' => Nav::botPanelKb($bot, $admin)]);
+                return;
+            }
+            try {
+                applyBotAdminChange($cfg, $store, $bot, $newAdmin);
+            } catch (Throwable $e) {
+                Logger::getInstance()->error('botedit', "admin change failed for #{$botId}: " . $e->getMessage());
+                BotApi::send($TOKEN, $chatId, "⚠️ <b>آیدی معتبر است ولی اعمال نشد:</b>\n" . Ui::quote(Ui::e(Manager::sanitizeDbError($e->getMessage())))
+                    . "\n\nهیچ تغییری ذخیره نشد. برای برگشت: " . Nav::BACK, ['reply_markup' => Nav::stepKb()]);
+                return;
+            }
+            $store->clearStep($uid);
+            $fresh = $store->botById($botId) ?: $bot;
+            BotApi::send($TOKEN, $chatId,
+                "✅ <b>آیدی ادمین عوض شد!</b>\n\n"
+                . Ui::kv('🆔', 'آیدی قبلی', (string)(int)($bot['admin_id'] ?? 0), true)
+                . "\n" . Ui::kv('🆕', 'آیدی جدید', (string)$newAdmin, true)
+                . "\n" . Ui::kv('📁', 'فایل کانفیگ', 'bots/' . $fresh['folder'] . '/config.php', true),
+                ['reply_markup' => Nav::botPanelKb($fresh, $admin)]);
+            return;
+        }
     case 'await_backup_times': {
             if (!$admin) { $store->clearStep($uid); return; }
             $parsed = DbBackup::parseTimes($text);
@@ -1885,6 +2386,17 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
         }
 
         case 'await_folder': {
+            // گیتِ حالت تعمیرات، اینجا هم لازم است: ممکن است ادمین کلید را
+            // وقتی روزنامه‌ای کاربر در میانهٔ ساخت است روشن کند.
+            if (BuildSettings::maintenanceOn($store)) {
+                $store->clearStep($uid);
+                BotApi::send($TOKEN, $chatId, BuildSettings::maintenanceNotice($store),
+                    ['reply_markup' => BotApi::kb([
+                        [['text' => '📦 ربات‌های من']],
+                        [['text' => 'ℹ️ راهنما']],
+                    ])]);
+                return;
+            }
             if ($text === '') {
                 BotApi::send($TOKEN, $chatId, "⛔️ لطفاً یک نام انگلیسی بفرستید.\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
                 return;
@@ -2340,7 +2852,14 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
     // ===== canUse چک =====
     // کاربری که درخواستش توسط ادمین تأیید شده باید بتواند ادامه دهد (newbot:…)
     // و انصراف/برگشت/منو همیشه باید کار کنند تا کاربر در مرحله گیر نکند.
-    if (!canUse($user, $SUPERS) && !$store->hasApprovedRequest($uid)) {
+    if (!canUse($user, $SUPERS)
+        && !$store->hasApprovedRequest($uid)
+        // صاحبِ یک ربات همیشه به پنلِ رباتِ خودش دسترسی دارد. بدون این، بعد از
+        // «مصرف شدن»ِ درخواستِ تأییدشده کاربر دیگر حتی پنلِ رباتی که خودش
+        // ساخته بود را نمی‌دیدست — یعنی «📊 آمار»، «✏️ ویرایش توکن» و
+        // «✏️ ویرایش آیدی ادمین» عملاً برای هیچ‌کس قابل استفاده نبودند.
+        && !$store->hasBot($uid)
+        && !BuildSettings::skipApproval($store)) {
         // باز بودنِ همیشگی: انصراف/برگشت/منو + همهٔ مسیرهای پرداخت + انتخاب نوع
         // (که خودش مجوز می‌سازد). قبلاً «pay:» هم داخل همین لیست بود ولی بعداً
         // به‌اشتباه مثل «انصراف» رفتار می‌شد؛ یعنی کاربر دکمهٔ «فروشگاه/پرداخت‌های من»
@@ -2445,6 +2964,17 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
 
     if (str_starts_with($data, 'newbot:')) {
         $type = substr($data, 7);
+        // ===== حالت تعمیرات: حتی اگر کاربر از یک کیبوردِ قدیمی «انتخاب قالب» را
+        // بزند، نباید رباتی ساخته شود. گیت اینجا حیاتی است.
+        if (BuildSettings::maintenanceOn($store)) {
+            $store->clearStep($uid);
+            BotApi::send($TOKEN, $chatId, BuildSettings::maintenanceNotice($store),
+                ['reply_markup' => BotApi::kb([
+                    [['text' => '📦 ربات‌های من']],
+                    [['text' => 'ℹ️ راهنما']],
+                ])]);
+            return;
+        }
         // availableTypes نه validTypes: دکمه‌های منوی قبلی ممکن است «مرده» باشند
         // (مثلاً پس از deploy قالبی حذف شده، یا vendor ناقص روی سرور است).
         // کاربر نباید بتواند قالبی را انتخاب کند که نصب نمی‌شود و وسط کار خطا بگیرد.
@@ -2468,7 +2998,8 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
         // ===== مجوز ساخت، قبل از پرداخت =====
         // ترتیب مهم است: قبلاً گیت پرداخت قبل از این بررسی بود و کاربری که
         // مجوز نداشت پول می‌داد بی‌آنکه بتواند بسازد. اول مجوز، بعد پول.
-        if (!$admin && !$store->hasApprovedRequest($uid)) {
+        // «ساخت بدون درخواست» روشن ⇒ همین گیت کلاً رد می‌شود.
+        if (!$admin && !BuildSettings::skipApproval($store) && !$store->hasApprovedRequest($uid)) {
             if ($store->hasPendingRequest($uid)) {
                 BotApi::send($TOKEN, $chatId, Texts::get($store, 'request_pending_again'));
             } else {
@@ -2550,77 +3081,109 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
     if ($data === 'users:add') {
         if (!$admin) { BotApi::send($TOKEN, $chatId, "⛔️ فقط ادمین."); return; }
         $store->setStep($uid, 'await_user_add');
-        BotApi::send($TOKEN, $chatId, "آیدی عددی کاربر جدید را بفرست:\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
+        BotApi::send($TOKEN, $chatId,
+            "➕ <b>افزودن کاربر مجاز</b>\n\n"
+            . "🆔 آیدی عددی کاربر را بفرستید (از ‎<code>@userinfobot</code>).\n"
+            . "او بلافاصله می‌تواند بدون درخواست ربات بسازد.\n\n"
+            . "برای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL,
+            ['reply_markup' => Nav::stepKb()]);
         return;
     }
     if ($data === 'users:remove') {
         if (!$admin) { BotApi::send($TOKEN, $chatId, "⛔️ فقط ادمین."); return; }
         $store->setStep($uid, 'await_user_remove');
-        BotApi::send($TOKEN, $chatId, "آیدی عددی کاربر برای حذف دسترسی:\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
+        BotApi::send($TOKEN, $chatId,
+            "➖ <b>حذف دسترسی کاربر</b>\n\n"
+            . "🆔 آیدی عددی کاربری را بفرستید که می‌خواهید دسترسی‌اش برداشته شود.\n\n"
+            . "برای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL,
+            ['reply_markup' => Nav::stepKb()]);
         return;
     }
     if ($data === 'users:list') {
         if (!$admin) { BotApi::send($TOKEN, $chatId, "⛔️ فقط ادمین."); return; }
         $ids = $store->allowedIds();
-        if (!$ids) { BotApi::send($TOKEN, $chatId, "👥 کاربران مجاز (0):\n—"); return; }
+        if (!$ids) {
+            BotApi::send($TOKEN, $chatId, "📃 <b>کاربران مجاز</b>\n\nهنوز هیچ کاربری مجاز نشده است.\nبا «➕ افزودن کاربر» شروع کنید.",
+                ['reply_markup' => Nav::usersPanelKb()]);
+            return;
+        }
         // پیام تلگرام سقف ۴۰۹۶ کاراکتر دارد → چندتکه ارسال می‌شود
-        $lines = array_map(fn($i) => "<code>$i</code>", $ids);
+        $lines = array_map(fn($i) => Ui::code((string)$i), $ids);
         $chunks = array_chunk($lines, 40);
         foreach ($chunks as $i => $chunk) {
             $head = $i === 0
-                ? "👥 کاربران مجاز (" . count($ids) . "):\n"
-                : "👥 کاربران مجاز — ادامه (" . ($i * 40 + 1) . "–" . min(count($ids), ($i + 1) * 40) . "):\n";
+                ? "📃 <b>کاربران مجاز</b> (" . count($ids) . ")\n" . Ui::sep() . "\n\n"
+                : "📃 <b>کاربران مجاز — ادامه</b> (" . ($i * 40 + 1) . "–" . min(count($ids), ($i + 1) * 40) . ")\n";
             BotApi::send($TOKEN, $chatId, $head . implode("\n", $chunk));
             if (count($chunks) > 1) usleep(80000);
         }
         return;
     }
 
-    // ===== ⬆️ آپدیت خودِ ربات‌ساز (فقط سوپرادمین) =====
-    if (str_starts_with($data, 'su:')) {
-        if (!isSuper($SUPERS, $uid)) { BotApi::send($TOKEN, $chatId, "⛔️ فقط سوپرادمین اجازهٔ بروزرسانی را دارد."); return; }
-        $action = substr($data, 3);
+    // ===== ⚙️ تنظیمات: کلیدهای روشن/خاموش (فقط ادمین) =====
+    if (str_starts_with($data, 'set:')) {
+        if (!$admin) { BotApi::send($TOKEN, $chatId, "⛔️ فقط ادمین.", ['reply_markup' => mainMenu($user, $SUPERS, $store)]); return; }
+        $action = substr($data, 4);
 
-        if ($action === 'refresh') {
-            showSelfUpdatePanel($cfg, $store, $TOKEN, $chatId, $msgId);
+        if ($action === 'maintenance') {
+            $now = BuildSettings::toggleMaintenance($store);
+            Logger::getInstance()->info('settings', "Admin {$uid} " . ($now ? 'ENABLED' : 'DISABLED') . ' maintenance mode');
+            BotApi::edit($TOKEN, $chatId, $msgId, ($now
+                    ? "🔧 <b>حالت تعمیرات روشن شد.</b>\n\n"
+                        . "از این لحظه هیچ‌کس نمی‌تواند ربات تازه بسازد و کاربرها\n"
+                        . "پیام «قسمت ربات در حال تعمیر است» را می‌بینند.\n"
+                        . "ربات‌های موجود دست‌نخورده کار می‌کنند ✅"
+                    : "🟢 <b>حالت تعمیرات خاموش شد.</b>\n\nساخت ربات دوباره برای همه باز شد. 🚀"),
+                ['reply_markup' => Nav::settingsPanelKb($store)]);
             return;
         }
-        if ($action === 'log') {
-            $tail = SelfUpdate::logTail(25);
-            $t = $tail !== '' ? htmlspecialchars($tail, ENT_QUOTES, 'UTF-8') : '(هنوز لاگی نیست)';
-            BotApi::edit($TOKEN, $chatId, $msgId, "📜 <b>آخرین لاگ آپدیت</b>\n\n<pre>" . mb_substr($t, -3500) . "</pre>",
-                ['reply_markup' => BotApi::ikb([[['text' => '↩️ بازگشت', 'callback_data' => 'su:refresh']]])]);
+
+        if ($action === 'approval') {
+            $need = BuildSettings::toggleApproval($store);
+            Logger::getInstance()->info('settings', "Admin {$uid} " . ($need ? 'REQUIRED' : 'SKIPPED') . ' approval for new bots');
+            BotApi::edit($TOKEN, $chatId, $msgId, ($need
+                    ? "📝 <b>نیاز به تأیید ادمین روشن شد.</b>\n\n"
+                        . "کاربر باید «🤖 ساخت ربات جدید» را بزند تا درخواستش ثبت شود،\n"
+                        . "و تا تأیید شما نمی‌تواند وارد ساخت شود."
+                    : "🚀 <b>ساخت بدون درخواست روشن شد.</b>\n\n"
+                        . "هر کاربرِ مجاز مستقیم وارد انتخاب قالب می‌شود و\n"
+                        . "دیگر هیچ درخواستی ثبت نمی‌شود.\n"
+                        . "سقفِ ساخت و پرداخت‌ها همچنان برقرار است ✅"),
+                ['reply_markup' => Nav::settingsPanelKb($store)]);
             return;
         }
-        if ($action === 'check') {
-            SelfUpdate::refreshRemote();
-            showSelfUpdatePanel($cfg, $store, $TOKEN, $chatId, $msgId, '🔄 وضعیت از گیت‌هاب تازه شد.');
+
+        if ($action === 'mainttext') {
+            $store->setStep($uid, 'await_maintenance_text');
+            $cur = Texts::text($store, 'maintenance');
+            BotApi::send($TOKEN, $chatId,
+                "📝 <b>متن پیام تعمیرات</b>\n\n"
+                . "این متن وقتی «حالت تعمیرات» روشن است به کاربر نشان داده می‌شود.\n\n"
+                . "📌 <b>متن فعلی:</b>\n" . Ui::quote($cur)
+                . "\n\n<b>متن تازه را بفرستید.</b>\n"
+                . "جای‌نگهدارِ مجاز: " . Ui::code('‹eta›') . " (زمان تقریبی بازگشت)\n"
+                . "برای برگشت به پیش‌فرض کلمهٔ " . Ui::code('reset') . " را بفرستید.\n"
+                . "برای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL,
+                ['reply_markup' => Nav::stepKb()]);
             return;
         }
-        if ($action === 'ask') {
-            $st = SelfUpdate::status();
-            $txt = "⚠️ <b>اجرای آپدیت ربات‌ساز</b>\n\n"
-                . "شاخه: <code>{$st['branch']}</code> | کامیت: <code>{$st['commit']}</code>\n"
-                . ($st['dirty'] ? "⚠️ <b>درخت کثیف است</b>: فایل tracked روی سرور دستی عوض شده — تغییراتش اول بکاپ گرفته می‌شود و بعد درخت با origin هم‌تراز می‌شود (توقف نمی‌آید).\n" : "درخت کاری تمیز ✓\n")
-                . "\nچه اتفاقی می‌افتد:\n"
-                . "• بکاپ <code>config.php</code> و <code>bots/*/config.php</code>\n"
-                . "• <code>git fetch</code> و هم‌ترازسازی با <code>origin</code>\n"
-                . "• برگرداندن <code>config.php</code> و <code>.htaccess</code> در صورت نیاز\n"
-                . "• اجرای مایگریشن‌ها\n"
-                . "• <b>دیتابیس و دیتاها دست‌نخورده</b>\n"
-                . "• <b>بدون ری‌استارت سرویس</b> (کارِ کرون هفتگی است)\n\nشروع؟";
-            BotApi::edit($TOKEN, $chatId, $msgId, $txt, ['reply_markup' => BotApi::ikb([
-                [['text' => '✅ بله، آپدیت کن', 'callback_data' => 'su:go']],
-                [['text' => '❌ انصراف', 'callback_data' => 'su:refresh']],
-            ])]);
+
+        if ($action === 'maintaineta') {
+            $store->setStep($uid, 'await_maintenance_eta');
+            $eta = BuildSettings::maintenanceEta($store);
+            BotApi::send($TOKEN, $chatId,
+                "⏳ <b>زمان تقریبی بازگشت</b>\n\n"
+                . "یک متن کوتاه بنویسید؛ داخل پیام تعمیرات نشان داده می‌شود.\n"
+                . "مثال: ‎<code>تا پایان امروز</code> یا ‎<code>فردا صبح</code>\n\n"
+                . "زمان فعلی: " . ($eta !== '' ? '<b>' . Ui::e($eta) . '</b>' : '<i>تعیین نشده</i>') . "\n"
+                . "برای پاک‌کردن، کلمهٔ " . Ui::code('reset') . " را بفرستید.\n"
+                . "برای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL,
+                ['reply_markup' => Nav::stepKb()]);
             return;
         }
-        if ($action === 'go') {
-            BotApi::edit($TOKEN, $chatId, $msgId, "⏳ در حال راه‌اندازی آپدیت…");
-            BotApi::send($TOKEN, $chatId, SelfUpdate::startWeb() . "\n\nبرای دیدن نتیجه: «📜 آخرین لاگ آپدیت» از پنل همین دکمه.",
-                ['reply_markup' => BotApi::ikb([[['text' => '🔄 پنل آپدیت', 'callback_data' => 'su:refresh']]])]);
-            return;
-        }
+
+        if ($action === 'panel') { showSettingsPanel($store, $TOKEN, $chatId, $msgId); return; }
+        showSettingsPanel($store, $TOKEN, $chatId, $msgId);
         return;
     }
 
@@ -2805,6 +3368,69 @@ function notifySupers(string $TOKEN, array $SUPERS, string $text, array $extra =
  * همهٔ کال‌بک‌های سمت کاربر (پیشوند pay:).
  * فقط منطق «نمایش و ساخت فاکتور» اینجاست؛ دیتابیس در Payments و متن/کیبورد در PaymentPanel.
  */
+/**
+ * استعلام وضعیت واقعیِ یک فاکتور «تأیید خودکار» از هر درگاهِ پشتیبانی‌شده.
+ *
+ * یک تابع به‌جای سه شاخهٔ تکراری؛ خروجیِ یکسان برای همه:
+ *   ['ok'=>bool پاسخ رسید؟, 'paid'=>bool پرداخت شده؟, 'status'=>string, 'error'=>string, 'payment_id'=>string]
+ *
+ * چه چیزی «paid» را تعیین می‌کند (و نه چیز دیگری):
+ *   • NOWPayments → payment_status ∈ {finished, confirmed}
+ *   • زرین‌پال      → کد verify ∈ {100, 101}
+ *   • آقای پرداخت  → code ∈ {1, 2}
+ * مبلغ همیشه از رکوردِ خودمان خوانده می‌شود، نه از پارامترِ آدرس.
+ */
+function verifyAutoPayment(array $cfg, Store $store, array $p): array
+{
+    $ext = trim((string)($p['ext_id'] ?? ''));
+    $amount = (int)($p['amount'] ?? 0);
+    $fail = static fn(string $why, string $status = ''): array => [
+        'ok' => false, 'paid' => false, 'status' => $status, 'error' => $why, 'payment_id' => '',
+    ];
+    if ($amount <= 0) return $fail('مبلغ فاکتور نامعتبر است');
+    if ($ext === '')  return $fail('شناسهٔ فاکتور در سرویس ثبت نشده است');
+
+    switch ((string)($p['method'] ?? '')) {
+        case Payments::METHOD_NOWPAY: {
+            $apiKey = PaymentNowPay::apiKey($store, $cfg);
+            if ($apiKey === '') return $fail('کلید API نوب‌پیمنت تنظیم نشده است');
+            $st = PaymentNowPay::fetchStatus($apiKey, $ext);
+            if (empty($st['ok'])) return $fail((string)($st['error'] ?? 'خطای نامشخص'));
+            $status = PaymentNowPay::extractStatus((array)($st['data'] ?? []));
+            return [
+                'ok' => true, 'paid' => PaymentNowPay::isPaidStatus($status),
+                'status' => $status, 'error' => '',
+                'payment_id' => (string)($st['payment_id'] ?? ''),
+            ];
+        }
+        case Payments::METHOD_ZARIN: {
+            $mid = PaymentZarin::merchantId($store, $cfg);
+            if ($mid === '') return $fail('کد پذیرندهٔ زرین‌پال تنظیم نشده است');
+            $v = PaymentZarin::verify($mid, $amount, $ext, PaymentZarin::isSandbox($store));
+            if (empty($v['ok'])) return $fail((string)($v['error'] ?? 'خطای نامشخص'));
+            return [
+                'ok' => true, 'paid' => (bool)$v['paid'],
+                'status' => $v['message'] !== '' ? (string)$v['message'] : ('کد ' . (int)$v['code']),
+                'error' => '',
+                'payment_id' => (int)($v['ref_id'] ?? 0) > 0 ? (string)(int)$v['ref_id'] : '',
+            ];
+        }
+        case Payments::METHOD_AQAYE: {
+            $pin = PaymentAqaye::pin($store, $cfg);
+            if ($pin === '') return $fail('کد پین آقای پرداخت تنظیم نشده است');
+            $v = PaymentAqaye::verify($pin, $amount, $ext);
+            if (empty($v['ok'])) return $fail((string)($v['error'] ?? 'خطای نامشخص'));
+            return [
+                'ok' => true, 'paid' => (bool)$v['paid'],
+                'status' => (string)$v['code'] !== '' ? ('کد ' . (string)$v['code']) : 'نامشخص',
+                'error' => '',
+                'payment_id' => '',
+            ];
+        }
+    }
+    return $fail('این روش پرداخت پشتیبانی نمی‌شود');
+}
+
 function handlePayCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, array $user, $chatId, int $msgId, string $data): void
 {
     $uid = (int)$user['user_id'];
@@ -2915,45 +3541,56 @@ function handlePayCallback(array $cfg, Store $store, string $TOKEN, array $SUPER
                 . "\n🎁 این پرداخت قبلاً تأیید و اعمال شده است.", ['reply_markup' => PaymentPanel::limitShopKb($store, $user, $SUPERS)]);
             return;
         }
-        if ($p['method'] !== Payments::METHOD_NOWPAY || $p['status'] !== Payments::ST_AWAIT_PAY) {
-            BotApi::edit($TOKEN, $chatId, $msgId, "ℹ️ این فاکتور در انتظار پرداخت کریپتویی نیست:\n"
+        if ($p['method'] !== Payments::METHOD_NOWPAY && $p['method'] !== Payments::METHOD_ZARIN
+            && $p['method'] !== Payments::METHOD_AQAYE) {
+            BotApi::edit($TOKEN, $chatId, $msgId, "ℹ️ <b>این فاکتور «در انتظار پرداخت آنلاین» نیست.</b>\n"
+                . Payments::describe($p) . "\n\n"
+                . "اگر کارت‌به‌کارت پرداخت کرده‌اید، فیش را بفرستید تا ادمین بررسی کند.",
+                ['reply_markup' => PaymentPanel::limitShopKb($store, $user, $SUPERS)]);
+            return;
+        }
+        if ($p['status'] !== Payments::ST_AWAIT_PAY) {
+            BotApi::edit($TOKEN, $chatId, $msgId, "ℹ️ این فاکتور در انتظار پرداخت آنلاین نیست:\n"
                 . Payments::describe($p), ['reply_markup' => PaymentPanel::limitShopKb($store, $user, $SUPERS)]);
             return;
         }
-        $apiKey = PaymentNowPay::apiKey($store, $cfg);
-        if ($apiKey === '') { $fail("کلید API ثبت نشده است."); return; }
         if (trim((string)($p['ext_id'] ?? '')) === '') {
-            BotApi::edit($TOKEN, $chatId, $msgId, "⚠️ فاکتور کریپتویی برای این پرداخت ساخته نشده است.\n"
+            BotApi::edit($TOKEN, $chatId, $msgId, "⚠️ <b>فاکتوری برای این پرداخت ساخته نشده است.</b>\n\n"
                 . "از «🧾 پرداخت‌های من» دوباره روش پرداخت را انتخاب کنید.",
                 ['reply_markup' => PaymentPanel::myPaymentsKb($store, $uid)]);
             return;
         }
-        $st = PaymentNowPay::fetchStatus($apiKey, (string)$p['ext_id']);
-        if (empty($st['ok'])) {
-            BotApi::edit($TOKEN, $chatId, $msgId, "⚠️ استعلام از سرویس ناموفق بود:\n<code>"
-                . htmlspecialchars((string)($st['error'] ?? '')) . "</code>", ['reply_markup' => PaymentPanel::invoiceKb($pid, (string)($p['pay_url'] ?? ''))]);
-            return;
-        }
-        $d = (array)($st['data'] ?? []);
-        $status = PaymentNowPay::extractStatus($d);
-        // payment_id واقعی را نگه دار تا دفعهٔ بعد مستقیم استعلام شود
-        $pidReal = (string)($st['payment_id'] ?? '');
-        if ($pidReal !== '' && $pidReal !== (string)($p['ext_id'] ?? '')) {
-            try { Payments::setExtId($store, $pid, $pidReal); } catch (Throwable $e) {}
-        }
-        if (!PaymentNowPay::isPaidStatus($status)) {
-            BotApi::edit($TOKEN, $chatId, $msgId, "🕐 هنوز پرداخت نشده (وضعیت سرویس: <code>"
-                . htmlspecialchars($status !== '' ? $status : 'نامشخص') . "</code>).\n"
-                . "چند دقیقهٔ بعد دوباره بزن یا از لینک پرداخت استفاده کن.",
+
+        // استعلام یکپارچه: هر سه درگاهِ «تأیید خودکار» از یک مسیر بررسی می‌شوند
+        $chk = verifyAutoPayment($cfg, $store, $p);
+        if (!$chk['ok']) {
+            BotApi::edit($TOKEN, $chatId, $msgId, "⚠️ <b>استعلام از سرویس ناموفق بود:</b>\n"
+                . Ui::quote(Ui::e((string)$chk['error'])),
                 ['reply_markup' => PaymentPanel::invoiceKb($pid, (string)($p['pay_url'] ?? ''))]);
             return;
         }
-        $done = Payments::markCryptoPaid($store, $pid);
+        $status = (string)$chk['status'];
+        // شناسهٔ واقعی (payment_id / ref_id) نگه داشته شود تا دفعهٔ بعد مستقیم بپرسیم
+        $extReal = (string)($chk['payment_id'] ?? '');
+        if ($extReal !== '' && $extReal !== (string)($p['ext_id'] ?? '')) {
+            try { Payments::setExtId($store, $pid, $extReal); } catch (Throwable $e) {}
+        }
+        if (!$chk['paid']) {
+            BotApi::edit($TOKEN, $chatId, $msgId, "🕐 <b>هنوز پرداخت نشده است.</b>\n\n"
+                . "وضعیت در سرویس: " . Ui::code($status !== '' ? $status : 'نامشخص') . "\n"
+                . "چند دقیقهٔ بعد دوباره بزنید یا از لینک پرداخت استفاده کنید.",
+                ['reply_markup' => PaymentPanel::invoiceKb($pid, (string)($p['pay_url'] ?? ''))]);
+            return;
+        }
+        $done = Payments::markAutoPaid($store, $pid);
         if (!$done) { $fail("پرداخت قابل اعمال نبود."); return; }
         $note = (string)($done['grant_note'] ?? '');
-        BotApi::edit($TOKEN, $chatId, $msgId, "✅ <b>پرداخت کریپتویی تأیید شد!</b>\n" . Payments::describe($done)
-            . ($note !== '' ? "\n🎁 {$note}" : "")
-            . "\n\nحالا «🤖 ساخت ربات جدید» را بزنید.", ['reply_markup' => PaymentPanel::limitShopKb($store, $user, $SUPERS)]);
+        BotApi::edit($TOKEN, $chatId, $msgId,
+            "✅ <b>پرداخت شما تأیید شد!</b>\n\n"
+            . Payments::describe($done)
+            . ($note !== '' ? "\n🎁 " . Ui::e($note) : "")
+            . "\n\n🚀 حالا «🤖 ساخت ربات جدید» را بزنید.",
+            ['reply_markup' => PaymentPanel::limitShopKb($store, $user, $SUPERS)]);
         return;
     }
 
@@ -3013,7 +3650,9 @@ function handlePayCallback(array $cfg, Store $store, string $TOKEN, array $SUPER
             }
             $apiKey = PaymentNowPay::apiKey($store, $cfg);
             if ($apiKey === '') { $fail("کلید API ثبت نشده است؛ با ادمین تماس بگیرید."); return; }
-            $usd = PaymentPricing::tomanToUsd($amount, PaymentPricing::tomanPerUsd($store));
+            // نرخِ مؤثر: اول نرخ تازهٔ API (قابل تازه‌سازی خودکار)، وگرنه نرخ دستی
+            $rate = PaymentPricing::effectiveUsdRate($store);
+            $usd = PaymentPricing::tomanToUsd($amount, $rate);
             if ($usd <= 0) { $fail("مبلغ پرداخت معتبر نیست."); return; }
             $base = rtrim((string)($cfg['base_url'] ?? ''), '/');
             $ipnUrl = $base !== '' ? $base . '/nowpayments_ipn.php' : '';
@@ -3029,16 +3668,97 @@ function handlePayCallback(array $cfg, Store $store, string $TOKEN, array $SUPER
                 'amount' => number_format($amount) . ' تومان (~' . $usd . ' USD)',
             ]);
             $payUrl = (string)($res['pay_url'] ?? '');
-            $t = "🪙 <b>پرداخت کریپتویی</b>\n\nمبلغ: <b>" . number_format($amount) . " تومان</b> (تقریبی {$usd} دلار)\n";
-            $t .= "شماره فاکتور: <code>PAY-{$pid}</code>\n";
+            $t = "🪙 <b>پرداخت کریپتویی (NOWPayments)</b>\n\n"
+                . Ui::kv('💰', 'مبلغ', Ui::toman($amount)) . "\n"
+                . Ui::kv('💱', 'معادل', '≈ ' . $usd . ' USD')
+                . "\n" . Ui::kv('📈', 'نرخ استفاده‌شده', number_format($rate) . ' تومان برای هر دلار')
+                . "\n" . Ui::kv('🔢', 'شمارهٔ فاکتور', 'PAY-' . $pid, true);
             if ($payUrl !== '') {
-                $t .= "لینک پرداخت:\n" . htmlspecialchars($payUrl) . "\n";
+                $t .= "\n\n🔗 " . Ui::link($payUrl);
             } else {
-                $t .= "⚠️ لینک پرداخت از سرویس دریافت نشد؛ با «🔄 بررسی وضعیت» دوباره چک کن.\n";
+                $t .= "\n\n⚠️ لینک پرداخت از سرویس دریافت نشد؛ با «🔄 بررسی وضعیت» دوباره چک کنید.";
             }
-            if ($note !== '') $t .= "\n" . $note . "\n";
-            $t .= "\nپس از پرداخت، خودکار تأیید می‌شود و همین‌جا خبرش را می‌دهیم.";
-            BotApi::send($TOKEN, $chatId, $t, ['reply_markup' => PaymentPanel::invoiceKb($pid, $payUrl)]);
+            if ($note !== '') $t .= "\n\n" . $note;
+            $t .= "\n\n👇 روی دکمهٔ «💳 پرداخت» بزنید تا به درگاه هدایت شوید.";
+            $t .= "\nپس از پرداخت، خودکار تأیید می‌شود و همین‌جا خبرش را می‌دهیم. ✅";
+            BotApi::send($TOKEN, $chatId, Ui::out($t), ['reply_markup' => PaymentPanel::invoiceKb($pid, $payUrl)]);
+            return;
+        }
+
+        if ($method === Payments::METHOD_ZARIN) {
+            if (!PaymentGateways::isEnabled($store, PaymentGateways::ZARIN)) { $fail("درگاه زرین‌پال غیرفعال است."); return; }
+            if (!PaymentZarin::isConfigured($store, $cfg)) {
+                $fail("درگاه زرین‌پال کامل پیکربندی نشده (کد پذیرنده ثبت نشده).");
+                return;
+            }
+            $merchant = PaymentZarin::merchantId($store, $cfg);
+            $sandbox = PaymentZarin::isSandbox($store);
+            $base = rtrim((string)($cfg['base_url'] ?? ''), '/');
+            $cb = $base . PaymentZarin::callbackPath();
+            if ($base === '') { $fail("آدرس پایهٔ پروژه (base_url) در config.php تنظیم نشده است."); return; }
+            $res = PaymentZarin::request(
+                $merchant,
+                $amount,
+                $cb,
+                'پرداخت ربات‌ساز — #' . $pid,
+                'PAY-' . $pid,
+                $sandbox
+            );
+            if (empty($res['ok'])) {
+                Logger::getInstance()->error('payment', "zarinpal request failed for #{$pid}: " . ($res['error'] ?? '?'));
+                $fail("ساخت فاکتور زرین‌پال ناموفق بود:\n" . ($res['error'] ?? '') . "\nلطفاً دوباره تلاش کنید.");
+                return;
+            }
+            $authority = (string)$res['authority'];
+            $payUrl = PaymentZarin::startPayUrl($authority, $sandbox);
+            Payments::setMethod($store, $pid, Payments::METHOD_ZARIN, Payments::ST_AWAIT_PAY, $authority, $payUrl);
+            $note = PaymentGateways::note($store, PaymentGateways::ZARIN, [
+                'amount' => number_format($amount) . ' تومان',
+            ]);
+            $t = "🟣 <b>پرداخت اینترنتی — درگاه زرین‌پال</b>\n\n"
+                . Ui::kv('💰', 'مبلغ', Ui::toman($amount)) . "\n"
+                . Ui::kv('🔢', 'شمارهٔ فاکتور', 'PAY-' . $pid, true);
+            if ($sandbox) $t .= "\n" . Ui::kv('🧪', 'حالت', 'تست (sandbox) — پول واقعی جابه‌جا نمی‌شود');
+            if ($note !== '') $t .= "\n\n" . $note;
+            $t .= "\n\n👇 روی دکمهٔ «💳 پرداخت» بزنید تا به درگاه هدایت شوید.";
+            $t .= "\n🔗 " . Ui::link($payUrl) . "\n\n"
+                . "پس از پرداخت، خودکار تأیید می‌شود و همین‌جا خبرش را می‌دهیم. ✅";
+            BotApi::send($TOKEN, $chatId, Ui::out($t), ['reply_markup' => PaymentPanel::invoiceKb($pid, $payUrl)]);
+            return;
+        }
+
+        if ($method === Payments::METHOD_AQAYE) {
+            if (!PaymentGateways::isEnabled($store, PaymentGateways::AQAYE)) { $fail("درگاه آقای پرداخت غیرفعال است."); return; }
+            if (!PaymentAqaye::isConfigured($store, $cfg)) {
+                $fail("درگاه آقای پرداخت کامل پیکربندی نشده (کد پین ثبت نشده).");
+                return;
+            }
+            $pin = PaymentAqaye::pin($store, $cfg);
+            $sandbox = PaymentAqaye::isSandbox($store);
+            $base = rtrim((string)($cfg['base_url'] ?? ''), '/');
+            if ($base === '') { $fail("آدرس پایهٔ پروژه (base_url) در config.php تنظیم نشده است."); return; }
+            $cb = $base . PaymentAqaye::callbackPath();
+            $res = PaymentAqaye::create($pin, $amount, $cb, 'پرداخت ربات‌ساز', 'PAY-' . $pid);
+            if (empty($res['ok'])) {
+                Logger::getInstance()->error('payment', "aqaye create failed for #{$pid}: " . ($res['error'] ?? '?'));
+                $fail("ساخت فاکتور آقای پرداخت ناموفق بود:\n" . ($res['error'] ?? '') . "\nلطفاً دوباره تلاش کنید.");
+                return;
+            }
+            $transid = (string)$res['transid'];
+            $payUrl = PaymentAqaye::startPayUrl($transid, $sandbox);
+            Payments::setMethod($store, $pid, Payments::METHOD_AQAYE, Payments::ST_AWAIT_PAY, $transid, $payUrl);
+            $note = PaymentGateways::note($store, PaymentGateways::AQAYE, [
+                'amount' => number_format($amount) . ' تومان',
+            ]);
+            $t = "🧿 <b>پرداخت اینترنتی — درگاه آقای پرداخت</b>\n\n"
+                . Ui::kv('💰', 'مبلغ', Ui::toman($amount)) . "\n"
+                . Ui::kv('🔢', 'کد تراکنش', $transid, true);
+            if ($sandbox) $t .= "\n" . Ui::kv('🧪', 'حالت', 'تست (sandbox) — پول واقعی جابه‌جا نمی‌شود');
+            if ($note !== '') $t .= "\n\n" . $note;
+            $t .= "\n\n👇 روی دکمهٔ «💳 پرداخت» بزنید تا به درگاه هدایت شوید.";
+            $t .= "\n🔗 " . Ui::link($payUrl) . "\n\n"
+                . "پس از پرداخت، خودکار تأیید می‌شود و همین‌جا خبرش را می‌دهیم. ✅";
+            BotApi::send($TOKEN, $chatId, Ui::out($t), ['reply_markup' => PaymentPanel::invoiceKb($pid, $payUrl)]);
             return;
         }
 
@@ -3050,33 +3770,8 @@ function handlePayCallback(array $cfg, Store $store, string $TOKEN, array $SUPER
 }
 
 // ================= پرداخت: پنل ادمین =================
-
-/**
- * استعلام وضعیت واقعی یک فاکتور کریپتویی از NOWPayments.
- * خروجی: ['ok'=>bool پاسخ سرویس رسید؟, 'paid'=>bool پرداخت شده؟, 'status'=>string, 'error'=>string]
- * قبلاً این کار داخل «رد» انجام می‌شد و نتیجه‌اش هم استفاده می‌شد هم پنهان؛
- * حالا یک تابع مستقل است تا دکمهٔ «🔄 استعلام وضعیت» هم ازش استفاده کند.
- */
-function verifyCryptoPayment(array $cfg, Store $store, array $p): array
-{
-    $fail = ['ok' => false, 'paid' => false, 'status' => '', 'error' => 'api key تنظیم نشده'];
-    $apiKey = PaymentNowPay::apiKey($store, $cfg);
-    if ($apiKey === '') return $fail;
-    $ext = (string)($p['ext_id'] ?? '');
-    if ($ext === '') return ['ok' => false, 'paid' => false, 'status' => '', 'error' => 'شناسهٔ فاکتور ثبت نشده'];
-    $res = PaymentNowPay::fetchStatus($apiKey, $ext);
-    if (empty($res['ok'])) {
-        return ['ok' => false, 'paid' => false, 'status' => '', 'error' => (string)($res['error'] ?? 'unknown')];
-    }
-    $st = PaymentNowPay::extractStatus((array)($res['data'] ?? []));
-    return [
-        'ok' => true,
-        'paid' => PaymentNowPay::isPaidStatus($st),
-        'status' => $st,
-        'error' => '',
-        'payment_id' => (string)($res['payment_id'] ?? ''),
-    ];
-}
+// استعلامِ وضعیتِ فاکتورهای «تأیید خودکار» در تابع یکپارچهٔ verifyAutoPayment
+// (بالاتر در همین فایل) انجام می‌شود؛ اینجا فقط کال‌بک‌های ادمین است.
 
 /** همهٔ کال‌بک‌های ادمین (پیشوند payadmin:) — فعال/غیرفعال درگاه، متن دلخواه، قیمت، تأیید */
 function handlePayAdminCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, array $user, $chatId, int $msgId, string $data): void
@@ -3197,17 +3892,17 @@ function handlePayAdminCallback(array $cfg, Store $store, string $TOKEN, array $
         }
         $ownerId = (int)$p['user_id'];
 
-        // ===== فاکتور کریپتویی: قبل از رد، وضعیت واقعی را از سرویس بپرس =====
+        // ===== فاکتور «تأیید خودکار»: قبل از رد، وضعیت واقعی از سرویس پرسیده شود =====
         // بدون این بررسی، «رد» روی فاکتوری که کاربر واقعاً پرداخت کرده، پولش را می‌بلعید:
-        // بعد از declined شدن ردیف، markCryptoPaid دیگر آن را نمی‌پذیرفت.
-        if ($p['method'] === Payments::METHOD_NOWPAY && $p['status'] === Payments::ST_AWAIT_PAY) {
-            $chk = verifyCryptoPayment($cfg, $store, $p);
+        // بعد از declined شدن ردیف، markAutoPaid دیگر آن را نمی‌پذیرد.
+        if (PaymentGateways::isAutoConfirmed((string)$p['method']) && $p['status'] === Payments::ST_AWAIT_PAY) {
+            $chk = verifyAutoPayment($cfg, $store, $p);
             if (!$chk['ok']) {
                 // سرویس در دسترس نیست ⇒ خطر بلعیدن پول؛ اجازهٔ رد نمی‌دهیم
                 BotApi::send($TOKEN, $chatId,
-                    "⛔️ <b>استعلام از NOWPayments ناموفق بود</b>؛ برای جلوگیری از ردِ اشتباه، عملیات متوقف شد.\n<code>"
-                    . htmlspecialchars($chk['error']) . "</code>\n\n"
-                    . "لطفاً چند دقیقه بعد دوباره تلاش کنید.",
+                    "⛔️ <b>استعلام از درگاه ناموفق بود</b>؛ برای جلوگیری از ردِ اشتباه، عملیات متوقف شد.\n"
+                    . Ui::quote(Ui::e((string)$chk['error']))
+                    . "\n\nلطفاً چند دقیقه بعد دوباره تلاش کنید.",
                     ['reply_markup' => PaymentPanel::reviewKb($pid, (string)$p['method'])]);
                 return;
             }
@@ -3216,19 +3911,19 @@ function handlePayAdminCallback(array $cfg, Store $store, string $TOKEN, array $
                 if (!empty($chk['payment_id'])) {
                     try { Payments::setExtId($store, $pid, $chk['payment_id']); } catch (Throwable $e) {}
                 }
-                $done = Payments::markCryptoPaid($store, $pid);
+                $done = Payments::markAutoPaid($store, $pid);
                 if (!$done) { BotApi::send($TOKEN, $chatId, "⛔️ وضعیت پرداخت تغییر کرد؛ دوباره بررسی کنید."); return; }
                 $note = (string)($done['grant_note'] ?? '');
                 BotApi::send($TOKEN, $chatId,
-                    "⚠️ این فاکتور کریپتویی در سرویس <b>پرداخت‌شده</b> بود، بنابراین رد نشد و تأیید شد.\n{$note}",
+                    "⚠️ این فاکتور در سرویس <b>پرداخت‌شده</b> بود، بنابراین رد نشد و تأیید شد.\n" . $note,
                     ['reply_markup' => PaymentPanel::adminKb($store)]);
                 BotApi::send($TOKEN, $ownerId,
-                    "✅ <b>پرداخت کریپتویی شما تأیید شد!</b>\n{$note}\n\nحالا می‌توانید «🤖 ساخت ربات جدید» را بزنید.",
+                    "✅ <b>پرداخت شما تأیید شد!</b>\n{$note}\n\n🚀 حالا می‌توانید «🤖 ساخت ربات جدید» را بزنید.",
                     ['reply_markup' => mainMenu($store->user($ownerId), $SUPERS, $store)]);
                 return;
             }
             BotApi::send($TOKEN, $chatId,
-                "ℹ️ وضعیت این فاکتور در سرویس: <code>" . htmlspecialchars($chk['status'] !== '' ? $chk['status'] : 'نامشخص') . "</code> (پرداخت نشده)\n"
+                "ℹ️ وضعیت این فاکتور در سرویس: " . Ui::code($chk['status'] !== '' ? $chk['status'] : 'نامشخص') . " (پرداخت نشده)\n\n"
                 . "اگر مطمئنید کاربر پول کسر نکرده، دوباره «❌ رد» را بزنید.",
                 ['reply_markup' => PaymentPanel::reviewKb($pid, (string)$p['method'])]);
             return;
@@ -3240,7 +3935,7 @@ function handlePayAdminCallback(array $cfg, Store $store, string $TOKEN, array $
         return;
     }
 
-    // ===== استعلام دستی فاکتور کریپتویی (پشتیبانِ نرسیدن IPN) =====
+    // ===== استعلام دستی فاکتور «تأیید خودکار» (پشتیبانِ نرسیدن کال‌بک) =====
     if ($sub === 'verify') {
         $pid = (int)($parts[2] ?? 0);
         $p = $pid > 0 ? Payments::getPayment($store, $pid) : null;
@@ -3250,14 +3945,14 @@ function handlePayAdminCallback(array $cfg, Store $store, string $TOKEN, array $
                 ['reply_markup' => PaymentPanel::adminKb($store)]);
             return;
         }
-        if ($p['method'] !== Payments::METHOD_NOWPAY) {
-            BotApi::send($TOKEN, $chatId, "ℹ️ این پرداخت کارت‌به‌کارت است و استعلام خودکار ندارد؛ باید دستی بررسی شود.\n"
+        if (!PaymentGateways::isAutoConfirmed((string)$p['method'])) {
+            BotApi::send($TOKEN, $chatId, "ℹ️ این پرداخت کارت‌به‌کارت است و استعلام خودکار ندارد؛ باید دستی بررسی شود.\n\n"
                 . Payments::describe($p), ['reply_markup' => PaymentPanel::reviewKb($pid, (string)$p['method'])]);
             return;
         }
-        $chk = verifyCryptoPayment($cfg, $store, $p);
+        $chk = verifyAutoPayment($cfg, $store, $p);
         if (!$chk['ok']) {
-            BotApi::send($TOKEN, $chatId, "⛔️ استعلام ناموفق بود:\n<code>" . htmlspecialchars($chk['error']) . "</code>",
+            BotApi::send($TOKEN, $chatId, "⛔️ استعلام ناموفق بود:\n" . Ui::quote(Ui::e((string)$chk['error'])),
                 ['reply_markup' => PaymentPanel::reviewKb($pid, (string)$p['method'])]);
             return;
         }
@@ -3266,19 +3961,97 @@ function handlePayAdminCallback(array $cfg, Store $store, string $TOKEN, array $
         }
         if (!$chk['paid']) {
             BotApi::send($TOKEN, $chatId,
-                "🕐 وضعیت در سرویس: <code>" . htmlspecialchars($chk['status'] !== '' ? $chk['status'] : 'نامشخص') . "</code> — هنوز پرداخت نشده.",
+                "🕐 وضعیت در سرویس: " . Ui::code($chk['status'] !== '' ? $chk['status'] : 'نامشخص') . " — هنوز پرداخت نشده.",
                 ['reply_markup' => PaymentPanel::reviewKb($pid, (string)$p['method'])]);
             return;
         }
-        $done = Payments::markCryptoPaid($store, $pid);
+        $done = Payments::markAutoPaid($store, $pid);
         if (!$done) { BotApi::send($TOKEN, $chatId, "⛔️ پرداخت قابل اعمال نبود (وضعیت تغییر کرده)."); return; }
         $note = (string)($done['grant_note'] ?? '');
         $ownerId = (int)$done['user_id'];
-        BotApi::send($TOKEN, $chatId, "✅ پرداخت #{$pid} کریپتویی تأیید شد.\n{$note}",
+        BotApi::send($TOKEN, $chatId, "✅ پرداخت #{$pid} تأیید شد.\n{$note}",
             ['reply_markup' => PaymentPanel::adminKb($store)]);
         BotApi::send($TOKEN, $ownerId,
-            "✅ <b>پرداخت کریپتویی شما تأیید شد!</b>\n{$note}\n\nحالا می‌توانید «🤖 ساخت ربات جدید» را بزنید.",
+            "✅ <b>پرداخت شما تأیید شد!</b>\n{$note}\n\n🚀 حالا می‌توانید «🤖 ساخت ربات جدید» را بزنید.",
             ['reply_markup' => mainMenu($store->user($ownerId), $SUPERS, $store)]);
+        return;
+    }
+
+    // ===== 💵 نرخ دلار: تازه‌سازی از API / بازگشت به حالت خودکار =====
+    if ($sub === 'fxrefresh') {
+        BotApi::edit($TOKEN, $chatId, $msgId, "🌍 <b>در حال گرفتن نرخ دلار…</b>\n\nلطفاً چند ثانیه صبر کنید.");
+        $res = FxRate::refresh($store, 8);
+        if (!empty($res['ok'])) {
+            Logger::getInstance()->info('fx', "rate refreshed: " . $res['rate'] . ' from ' . $res['source']);
+            $tried = '';
+            foreach ((array)($res['tried'] ?? []) as $tr) {
+                if (empty($tr['ok']) && !empty($tr['error'])) $tried .= Ui::bullet('⚠️', Ui::e((string)$tr['name']) . ' — ' . Ui::e((string)$tr['error']));
+            }
+            $note = "✅ <b>نرخ دلار به‌روز شد!</b>\n\n"
+                . Ui::kv('💵', 'هر دلار', FxRate::format((float)$res['rate']))
+                . "\n" . Ui::kv('📡', 'سرویس', (string)$res['source'])
+                . "\n" . Ui::kv('🔄', 'حالت', 'خودکار (از API)')
+                . ($tried !== '' ? "\n\n" . Ui::quote("سرویس‌های دیگر:\n" . $tried) : '');
+        } else {
+            $detail = '';
+            foreach ((array)($res['tried'] ?? []) as $tr) {
+                $detail .= Ui::bullet('⚠️', Ui::e((string)$tr['name']) . ' — ' . Ui::e((string)($tr['error'] ?: '?')));
+            }
+            $note = "⚠️ <b>نرخ دلار از هیچ سرویسی گرفته نشد.</b>\n\n"
+                . "نرخِ ذخیره‌شدهٔ فعلی همچنان استفاده می‌شود: <b>"
+                . FxRate::format(FxRate::stored($store)) . "</b>\n\n"
+                . ($detail !== '' ? Ui::quote("سرویس‌های امتحان‌شده:\n" . $detail) : '')
+                . "\n💡 می‌توانید نرخ را دستی هم بگذارید: «💵 نرخ دلار (دستی)».";
+        }
+        showPaymentsAdmin($store, $TOKEN, $chatId, $msgId, $note);
+        return;
+    }
+    if ($sub === 'fxauto') {
+        PaymentPricing::setUsdRateAuto($store);
+        $res = FxRate::refresh($store, 8);
+        $note = !empty($res['ok'])
+            ? "🔄 <b>نرخ دلار خودکار روشن شد.</b>\n\n"
+                . Ui::kv('💵', 'هر دلار', FxRate::format((float)$res['rate']))
+                . "\n" . Ui::kv('📡', 'سرویس', (string)$res['source'])
+                . "\n\nاز این به بعد نرخ هر ۶ ساعت خودکار تازه می‌شود."
+            : "🔄 <b>نرخ دلار خودکار روشن شد</b> ولی سرویسی پاسخ نداد.\n\n"
+                . "نرخ فعلی: <b>" . FxRate::format(FxRate::stored($store)) . "</b>\n"
+                . "با دکمهٔ «🔄 تازه‌سازی نرخ» دوباره تلاش کنید.";
+        showPaymentsAdmin($store, $TOKEN, $chatId, $msgId, $note);
+        return;
+    }
+
+    // ===== 🟣 تنظیم درگاه زرین‌پال =====
+    if ($sub === 'zarin') {
+        $store->setStep($uid, 'await_pay_zarin_merchant');
+        $mid = PaymentZarin::merchantId($store, $cfg);
+        $cb = rtrim((string)($cfg['base_url'] ?? ''), '/') . PaymentZarin::callbackPath();
+        BotApi::send($TOKEN, $chatId,
+            "🟣 <b>تنظیم درگاه زرین‌پال</b>\n\n"
+            . "کد ۳۶ کاراکتری پذیرنده را از پنل زرین‌پال کپی کنید و بفرستید.\n\n"
+            . "کد فعلی: " . ($mid !== '' ? Ui::code(mb_substr($mid, 0, 10) . '…' . mb_substr($mid, -6)) : '<i>ثبت نشده</i>') . "\n"
+            . "حالت: " . (PaymentZarin::isSandbox($store) ? '🧪 تست (sandbox)' : 'واقعی') . "\n\n"
+            . "📍 <b>آدرس بازگشت</b> که باید در پنل زرین‌پال ثبت کنید:\n"
+            . "   " . Ui::link($cb) . "\n   " . Ui::code($cb) . "\n\n"
+            . "برای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL,
+            ['reply_markup' => Nav::stepKb()]);
+        return;
+    }
+
+    // ===== 🧿 تنظیم درگاه آقای پرداخت =====
+    if ($sub === 'aqaye') {
+        $store->setStep($uid, 'await_pay_aqaye_pin');
+        $pin = PaymentAqaye::pin($store, $cfg);
+        $cb = rtrim((string)($cfg['base_url'] ?? ''), '/') . PaymentAqaye::callbackPath();
+        BotApi::send($TOKEN, $chatId,
+            "🧿 <b>تنظیم درگاه آقای پرداخت</b>\n\n"
+            . "کد پین درگاه را از پنل آقای پرداخت کپی کنید و بفرستید.\n\n"
+            . "کد فعلی: " . ($pin !== '' ? Ui::code(mb_substr($pin, 0, 4) . '…' . mb_substr($pin, -3)) : '<i>ثبت نشده</i>') . "\n\n"
+            . "📍 <b>دامنهٔ مجاز بازگشت</b> که باید در پنل درگاه ثبت شده باشد:\n"
+            . "   " . Ui::link($cb) . "\n   " . Ui::code($cb) . "\n\n"
+            . "ℹ️ اگر درگاه شما روی دامنهٔ دیگری تأیید شده، آدرس بالا باید همان باشد.\n\n"
+            . "برای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL,
+            ['reply_markup' => Nav::stepKb()]);
         return;
     }
 
@@ -3305,10 +4078,18 @@ function handlePayAdminCallback(array $cfg, Store $store, string $TOKEN, array $
     }
     if ($sub === 'usdrate') {
         $store->setStep($uid, 'await_pay_usdrate');
+        $rate = FxRate::stored($store);
+        $auto = FxRate::isAuto($store);
         BotApi::send($TOKEN, $chatId,
-            "💵 <b>نرخ تومان به دلار</b>\n\nعدد را بفرستید (مثلاً <code>100000</code> یعنی هر دلار = ۱۰۰٬۰۰۰ تومان).\n"
-            . "نرخ فعلی: <b>" . number_format(PaymentPricing::tomanPerUsd($store)) . "</b>\n"
-            . "برای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL,
+            "💵 <b>نرخ تومان به دلار (دستی)</b>\n\n"
+            . "عدد را بفرستید؛ یعنی هر دلار چند تومان است. مثال: <code>100000</code>\n\n"
+            . "⚠️ با ذخیرهٔ دستی، حالت خودکار <b>خاموش</b> می‌شود و همین نرخ قفل می‌ماند.\n"
+            . "برای برگشتن به نرخِ زندهٔ بازار، از «🔄 نرخ خودکار (API)» استفاده کنید.\n\n"
+            . "💵 نرخ فعلی: <b>" . number_format($rate) . "</b> تومان\n"
+            . Ui::bullet(FxRate::isAuto($store) ? '🔄' : '🔒', 'حالت: ' . ($auto ? 'خودکار (API)' : 'دستی / قفل‌شده'))
+            . "\n" . Ui::bullet('📡', 'سرویس: ' . Ui::e(FxRate::source($store) ?: '—'))
+            . "\n" . Ui::bullet('🕒', 'به‌روزرسانی: ' . Ui::e(FxRate::ageText($store)))
+            . "\n\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL,
             ['reply_markup' => Nav::stepKb()]);
         return;
     }
@@ -3602,20 +4383,33 @@ function showBackupPanel(array $cfg, Store $store, string $TOKEN, $chatId, int $
 function sendPendingRequests(Store $store, string $TOKEN, $chatId): void
 {
     $requests = $store->getPendingRequests();
-    if (!$requests) { BotApi::send($TOKEN, $chatId, "✅ هیچ درخواستی نیست."); return; }
+    if (!$requests) {
+        BotApi::send($TOKEN, $chatId,
+            "✅ <b>هیچ درخواستِ در انتظاری وجود ندارد.</b>\n\nهمه‌چیز مرتب است 🌿",
+            ['reply_markup' => BotApi::ikb([[['text' => Nav::BACK, 'callback_data' => Nav::CB_BACK_MAIN]]])]);
+        return;
+    }
     $total = count($requests);
     $slice = array_slice($requests, 0, 10);
     $note = $total > count($slice)
-        ? "\nنمایش " . count($slice) . " از {$total} — با تأیید/رد هر درخواست، بعدی‌ها نمایان می‌شوند."
+        ? "\n\nℹ️ نمایش " . count($slice) . " درخواست از {$total}؛ بعدی‌ها با تأیید/رد کردن همین‌ها ظاهر می‌شوند."
         : '';
-    BotApi::send($TOKEN, $chatId, "📋 <b>درخواست‌ها</b> ({$total}):{$note}");
+    BotApi::send($TOKEN, $chatId,
+        "📋 <b>درخواست‌های ساخت ربات</b> ({$total})\n" . Ui::sep()
+        . "\n\nبا «✅ تأیید» کاربر مستقیم می‌تواند ربات بسازد؛ با «❌ رد» درخواست بسته می‌شود." . $note);
     foreach ($slice as $r) {
-        $name = htmlspecialchars($r['first_name'] ?? 'نامشخص');
-        $username = $r['username'] ? "@" . htmlspecialchars($r['username']) : '';
-        BotApi::send($TOKEN, $chatId,
-            "👤 <b>{$name}</b> {$username} (ID: <code>{$r['user_id']}</code>)",
+        $name = htmlspecialchars((string)($r['first_name'] ?? ''), ENT_QUOTES, 'UTF-8');
+        if (trim($name) === '') $name = '<i>بدون نام</i>';
+        $username = trim((string)($r['username'] ?? '')) !== '' ? '@' . (string)$r['username'] : '';
+        $t = "👤 <b>{$name}</b>\n"
+            . Ui::kv('🆔', 'آیدی کاربر', (string)$r['user_id'], true)
+            . ($username !== '' ? "\n" . Ui::kv('📛', 'یوزرنیم', $username) : '')
+            . "\n" . Ui::kv('🤖', 'نوع درخواست', (string)($r['type'] ?? '—'))
+            . "\n" . Ui::kv('📅', 'زمان ثبت', (string)($r['created_at'] ?? '—'));
+        BotApi::send($TOKEN, $chatId, $t,
             ['reply_markup' => BotApi::ikb([
                 [['text' => '✅ تأیید', 'callback_data' => "act:approve:{$r['id']}"], ['text' => '❌ رد', 'callback_data' => "act:decline:{$r['id']}"]],
+                [['text' => '🔄 صف بعدی', 'callback_data' => 'users:requests']],
             ])]);
         usleep(100000);
     }
@@ -3639,45 +4433,6 @@ function sendPendingRequests(Store $store, string $TOKEN, $chatId): void
 //   • بدون دست‌زدن به کدِ ربات‌ساز، دیتابیس، وبهوک و وی‌هوست و بدون ری‌استارت سرویس.
 //   • config.php و دیتابیس‌های قالب‌ها هرگز بازنویسی نمی‌شوند.
 //   • ربات‌های ساخته‌شده، bots/*/config.php و دیتابیس‌ها هرگز تغییر نمی‌کنند.
-
-/** پنل «⬆️ آپدیت ربات‌ساز»: وضعیت نصب فعلی + لاگ کوتاه */
-function showSelfUpdatePanel(array $cfg, Store $store, string $TOKEN, $chatId, int $msgId = 0, string $note = ''): void
-{
-    $probs = SelfUpdate::problems();
-    $st = SelfUpdate::status();
-    // درخت کثیف «توقف» نمی‌آورد: update.sh اول diff را بکاپ می‌گیرد و بعد درخت را
-    // با origin هم‌تراز می‌کند. پیامِ قبلی («آپدیت متوقف می‌شود») با رفتار واقعی نمی‌خواند.
-    $dirty = $st['dirty']
-        ? "⚠️ <b>درخت کثیف</b> (فایل‌های tracked دستی عوض شده — قبل از آپدیت بکاپ گرفته و با origin هم‌تراز می‌شود)"
-        : '✓ درخت تمیز';
-    $behind = $st['behind'] >= 0 ? ($st['behind'] > 0 ? "🟡 {$st['behind']} کامیت عقب" : '🟢 هم‌تراز با origin') : '؟';
-    $txt = "⬆️ <b>آپدیت ربات‌ساز</b>\n\n"
-        . "شاخه: <code>{$st['branch']}</code> | آخرین کامیت: <code>{$st['commit']}</code>\n"
-        . "وضعیت: {$behind} | {$dirty}\n"
-        . ($st['last_fetch'] !== '' ? "آخرین fetch: {$st['last_fetch']}\n" : '')
-        . "\n🛡 <code>config.php</code>، <code>bots/*/config.php</code>، دیتابیس و محتوای <code>data/</code> هرگز آپدیت نمی‌شوند.\n"
-        . "⚠️ این حالت <b>بدون ری‌استارت سرویس</b> است؛ اعمال نهاییِ کد جدید با ری‌استارت وب‌سرور (یا کرون هفتگی) می‌شود.\n";
-    if ($note !== '') $txt .= "\n" . htmlspecialchars($note, ENT_QUOTES, 'UTF-8') . "\n";
-    if ($probs !== []) {
-        $txt .= "\n⛔️ مشکلات اجرا:\n• " . htmlspecialchars(implode("\n• ", $probs), ENT_QUOTES, 'UTF-8');
-    }
-    $tail = $st['log_tail'];
-    if ($tail !== '') {
-        $t = htmlspecialchars(mb_substr($tail, -1200), ENT_QUOTES, 'UTF-8');
-        $txt .= "\n\n📜 <b>آخرین خروجی:</b>\n<pre>" . $t . "</pre>";
-    }
-    $rows = [];
-    if ($probs === []) $rows[] = [['text' => '⬇️ اجرای بروزرسانی', 'callback_data' => 'su:ask']];
-    $rows[] = [['text' => '🔄 بررسی نسخهٔ تازه (git fetch)', 'callback_data' => 'su:check']];
-    $rows[] = [['text' => '📜 آخرین لاگ کامل', 'callback_data' => 'su:log']];
-    $rows[] = [['text' => '🏠 منو', 'callback_data' => Nav::CB_BACK_MAIN]];
-    $kb = BotApi::ikb($rows);
-    if ($msgId > 0) {
-        BotApi::edit($TOKEN, $chatId, $msgId, $txt, ['reply_markup' => $kb]);
-        return;
-    }
-    BotApi::send($TOKEN, $chatId, $txt, ['reply_markup' => $kb]);
-}
 
 /**
  * متنِ «چیزی برای دریافت نیست».
@@ -4033,10 +4788,79 @@ function botAction(array $cfg, Store $store, string $TOKEN, array $SUPERS, array
     $uid = (int)$user['user_id'];
     switch ($action) {
         case 'stats': {
-            $pdo = botHasUserTable($bot) ? childPdo($cfg, $bot) : null;
-            $c = $pdo ? childCount($pdo, $bot) : -1;
             $folder = htmlspecialchars((string)($bot['folder'] ?? ''), ENT_QUOTES, 'UTF-8');
-            BotApi::send($TOKEN, $chatId, "📊 آمار <b>{$folder}</b>: " . ($c >= 0 ? (string)$c : '—') . " کاربر");
+            $label  = Ui::e(Manager::templateLabel((string)($bot['type'] ?? '')));
+            $st     = ($bot['status'] ?? '') === 'active' ? '🟢 فعال' : '🔴 غیرفعال';
+
+            // آمارِ کاربران فقط برای قالب‌هایی معنا دارد که جدول کاربر تلگرامی دارند
+            $c = -1;
+            try {
+                if (botHasUserTable($bot)) {
+                    $pdo = childPdo($cfg, $bot);
+                    if ($pdo) { $c = childCount($pdo, $bot); $pdo = null; }
+                }
+            } catch (Throwable $e) {
+                Logger::getInstance()->warning('stats', "count failed for {$folder}: " . $e->getMessage());
+            }
+
+            $t = "📊 <b>آمار ربات «{$folder}»</b>\n" . Ui::sep() . "\n\n";
+            $t .= Ui::kv('🧩', 'قالب', $label);
+            $t .= "\n" . Ui::kvRaw('🔹', 'وضعیت', $st);
+            if ($c >= 0) {
+                $t .= "\n" . Ui::kv('👥', 'تعداد کاربران', number_format($c));
+            } else {
+                $t .= "\n" . Ui::kvRaw('👥', 'تعداد کاربران', '<i>این قالب فهرست کاربر تلگرامی ندارد</i>');
+            }
+            $t .= "\n" . Ui::kv('🗄', 'دیتابیس', botDbLabel($bot), true);
+            $t .= "\n" . Ui::kv('🆔', 'آیدی ادمین', (string)($bot['admin_id'] ?? ''), true);
+            $t .= "\n" . Ui::kv('👤', 'صاحب ربات (ربات‌ساز)', (string)(int)($bot['owner_id'] ?? 0), true);
+            if (isset($bot['created_at']) && trim((string)$bot['created_at']) !== '') {
+                $ts = strtotime((string)$bot['created_at']);
+                $t .= "\n" . Ui::kv('📅', 'تاریخ ساخت', $ts ? date('Y-m-d H:i', $ts) : (string)$bot['created_at']);
+            }
+            $t .= "\n\n" . Ui::sep() . "\n";
+            $t .= "💡 برای دیدن آمارِ همهٔ ربات‌های خودت، «📦 ربات‌های من» را بزن.";
+            BotApi::send($TOKEN, $chatId, Ui::out($t), ['reply_markup' => Nav::botPanelKb($bot, isAdmin($user, $SUPERS))]);
+            return;
+        }
+        case 'edittoken': {
+            if (!botEditableBy($bot, $user, $SUPERS)) {
+                BotApi::send($TOKEN, $chatId, "⛔️ فقط صاحب این ربات یا ادمین می‌تواند توکنش را عوض کند.");
+                return;
+            }
+            $store->setStep($uid, 'await_edit_bot_token', ['bot_id' => (int)$bot['id']]);
+            $old = htmlspecialchars((string)($bot['bot_username'] ?? ''), ENT_QUOTES, 'UTF-8');
+            BotApi::send($TOKEN, $chatId,
+                "🔑 <b>ویرایش توکن ربات</b>\n\n"
+                . "ربات فعلی: " . ($old !== '' ? Ui::code('@' . $old) : '<i>نامشخص</i>')
+                . "\n\n🆕 <b>توکن تازه را بفرستید</b>\n"
+                . "توکن را از ‎<code>@BotFather</code> کپی کنید. نمونه: ‎<code>1234567890:AAH…</code>\n\n"
+                . "ℹ️ با این کار:\n"
+                . "• توکن داخل ‎<code>config.php</code> ربات عوض می‌شود\n"
+                . "• وبهوک دوباره ست می‌شود\n"
+                . "• کاربران و تنظیمات ربات <b>حفظ می‌شوند</b> ✅\n\n"
+                . "⚠️ اگر توکنِ رباتِ دیگری را بفرستید، آن ربات به این پنل وصل می‌شود.\n\n"
+                . "برای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL,
+                ['reply_markup' => Nav::stepKb()]);
+            return;
+        }
+        case 'editadmin': {
+            if (!botEditableBy($bot, $user, $SUPERS)) {
+                BotApi::send($TOKEN, $chatId, "⛔️ فقط صاحب این ربات یا ادمین می‌تواند آیدی ادمین را عوض کند.");
+                return;
+            }
+            $store->setStep($uid, 'await_edit_admin_id', ['bot_id' => (int)$bot['id']]);
+            $folder = htmlspecialchars((string)($bot['folder'] ?? ''), ENT_QUOTES, 'UTF-8');
+            BotApi::send($TOKEN, $chatId,
+                "🆔 <b>ویرایش آیدی ادمین</b>\n\n"
+                . "ربات: " . Ui::code($folder) . "\n"
+                . "آیدی فعلی: " . Ui::code((string)($bot['admin_id'] ?? '')) . "\n\n"
+                . "🆕 <b>آیدی عددی تازه را بفرستید</b>\n"
+                . "از ‎<code>@userinfobot</code> بگیرید (عدد بزرگ، بدون ‎<code>@</code>).\n\n"
+                . "ℹ️ با این کار فایل ‎" . Ui::code('bots/' . $bot['folder'] . '/config.php') . " به‌روز می‌شود؛\n"
+                . "ربات از این پس به آیدی تازه پیام می‌دهد. ✅\n\n"
+                . "برای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL,
+                ['reply_markup' => Nav::stepKb()]);
             return;
         }
         case 'broadcast': {
@@ -4054,7 +4878,15 @@ function botAction(array $cfg, Store $store, string $TOKEN, array $SUPERS, array
             $tok = childToken($bot);
             $url = Manager::webhookUrlForBot($cfg, $bot);
             $r = BotApi::setWebhook($tok, $url, Manager::resolveWebhookSecret($bot));
-            BotApi::send($TOKEN, $chatId, !empty($r['ok']) ? "✅ وبهوک مجدد ست شد:\n<code>{$url}</code>" : "❌ خطا: " . htmlspecialchars($r['description'] ?? 'unknown'));
+            if (!is_array($r) || empty($r['ok'])) {
+                BotApi::send($TOKEN, $chatId, "❌ <b>ست وبهوک ناموفق بود:</b>\n"
+                    . Ui::quote(Ui::e((string)($r['description'] ?? 'پاسخی از تلگرام نرسید'))));
+                return;
+            }
+            BotApi::send($TOKEN, $chatId,
+                "✅ <b>وبهوک با موفقیت ست شد.</b>\n\n"
+                . "🔗 " . Ui::link($url) . "\n"
+                . "📋 " . Ui::code($url));
             return;
         }
         case 'toggle': {

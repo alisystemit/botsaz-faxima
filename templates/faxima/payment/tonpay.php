@@ -38,6 +38,18 @@ function tonpay_process_webhook()
         exit('Invalid body');
     }
 
+    $providedApiKey = isset($_SERVER['HTTP_X_API_KEY']) ? trim((string) $_SERVER['HTTP_X_API_KEY']) : null;
+    if ($providedApiKey !== null) {
+        $configuredApiKey = function_exists('tonpayApiKey') ? tonpayApiKey() : '';
+        if ($configuredApiKey === '' || !hash_equals($configuredApiKey, $providedApiKey)) {
+            tonpay_log_event('TONPAY_BAD_API_KEY', 'Callback X-API-Key header did not match the configured key', [
+                'remote_ip' => $_SERVER['REMOTE_ADDR'] ?? 'unknown',
+            ]);
+            http_response_code(401);
+            exit('Unauthorized');
+        }
+    }
+
     $orderId = $data['order_id'] ?? null;
     if ($orderId === null || (!is_string($orderId) && !is_numeric($orderId))) {
         tonpay_log_event('TONPAY_NO_ID', 'Callback missing order_id', [
@@ -99,6 +111,14 @@ function tonpay_process_webhook()
     }
 
     $check = function_exists('tonpayCheckInvoice') ? tonpayCheckInvoice($invoiceId) : null;
+    if (function_exists('tonpayIsRateLimited') && tonpayIsRateLimited($check)) {
+        tonpay_log_event('TONPAY_CHECK_RATE_LIMITED', 'Server-side check deferred by rate limit; payment not confirmed', [
+            'order_id' => $orderId,
+            'invoice_id' => $invoiceId,
+        ]);
+        http_response_code(503);
+        exit('Retry later');
+    }
     if (!is_array($check) || (string) ($check['order_id'] ?? '') !== $orderId) {
         tonpay_log_event('TONPAY_CHECK_MISMATCH', 'Server-side check did not confirm this order', [
             'order_id' => $orderId,
@@ -114,7 +134,16 @@ function tonpay_process_webhook()
             'invoice_id' => $invoiceId,
             'status' => $check['status'] ?? null,
         ]);
+        if (function_exists('tonpaySyncTerminalStatus')) {
+            tonpaySyncTerminalStatus($orderId, $check['status'] ?? '');
+        }
         exit('Not paid');
+    }
+
+    if (!tonpayAmountsMatch($check['request_amount'] ?? null, $Payment_report['price'] ?? null)) {
+        tonpayLogAmountMismatch('callback', $orderId, $invoiceId, $Payment_report['price'] ?? null, $check['request_amount'] ?? null);
+        http_response_code(409);
+        exit('Amount mismatch');
     }
 
     $finalAmount = isset($check['final_amount']) ? (float) $check['final_amount'] : null;
@@ -188,12 +217,12 @@ function tonpay_process_webhook()
     $cashbackEligible = !function_exists('rx_cashbackEligibleForKey')
         || rx_cashbackEligibleForKey("chashbacktonpay", $Balance_id['register'] ?? null, $Payment_report['id_invoice'] ?? null, $Balance_id['id'] ?? null, $Payment_report['id_order'] ?? null);
     if ($cashbackEligible && $pricecashback != "0") {
-        $result = round(($Payment_report['price'] * $pricecashback) / 100);
-        $Balance_confrim = intval($Balance_id['Balance']) + $result;
-        update("user", "Balance", $Balance_confrim, "id", $Balance_id['id']);
-        $pricecashback = number_format($pricecashback);
-        $text_report = "🎁 کاربر عزیز مبلغ " . rxFormatToman($result) . " تومان به عنوان هدیه واریز به حساب شما واریز گردید.";
-        sendmessage($Balance_id['id'], $text_report, null, 'HTML');
+        $result = (int) floor(($Payment_report['price'] * $pricecashback) / 100);
+        if (rx_cashback_credit_once($Payment_report['id_order'], $Balance_id['id'], $result, 'chashbacktonpay', 'هدیه بازگشت وجه تون‌پی') === 'credited') {
+            $pricecashback = number_format($pricecashback);
+            $text_report = "🎁 کاربر عزیز مبلغ " . rxFormatToman($result) . " تومان به عنوان هدیه واریز به حساب شما واریز گردید.";
+            sendmessage($Balance_id['id'], $text_report, null, 'HTML');
+        }
     }
 
     $paymentreports = select("topicid", "idreport", "report", "paymentreport", "select")['idreport'];

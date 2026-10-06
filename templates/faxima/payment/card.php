@@ -103,7 +103,6 @@ if(preg_match('/انتقال اينترنت:\D*([\d,]+)/u', $valuepost, $matches
     $amountInteger = str_replace(',', '', $matches[1])*0.1;
 }}elseif($name_bank  == "parsian"){
 if(preg_match('/مبلغ:(\d{1,3}(?:,\d{3})*)\+/', $valuepost, $matches)) {
-    file_put_contents('ss',json_encode($matches));
     $amountInteger = str_replace(',', '', $matches[1])*0.1;
 }}elseif($name_bank  == "sphe"){
 if(preg_match('/مبلغ:\s*([\d,]+)\s*ريال/', $valuepost, $matches)) {
@@ -148,8 +147,14 @@ if(isset($amountInteger) && $amountInteger !== NULL){
             'cache_time' => 5,
         ));
         return;}
+        $_claim = $connect->prepare("UPDATE Payment_report SET payment_Status = 'paid' WHERE id_order = ? AND (payment_Status = 'Unpaid' OR payment_Status = 'waiting')");
+        $_claim->bind_param("s", $order_id);
+        $_claim->execute();
+        $_claimed = $_claim->affected_rows;
+        $_claim->close();
+        if ($_claimed < 1) return;
+        if (function_exists('clearSelectCache')) clearSelectCache('Payment_report');
         DirectPayment($order_id,"../images.jpg");
-        update("Payment_report","payment_Status","paid",'id_order',$order_id);
     $_uid2 = $Payment_report['id_user'];
     $_stmt = $connect->prepare("SELECT Balance FROM user WHERE id = ? LIMIT 1");
     $_stmt->bind_param("s", $_uid2);

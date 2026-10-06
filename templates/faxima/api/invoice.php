@@ -73,7 +73,7 @@ $action = $data['actions'] ?? null;
 
 $stmt = $pdo->prepare("INSERT IGNORE INTO logs_api (header, data, time, ip, actions) VALUES (:header, :data, :time, :ip, :actions)");
 $stmt->execute([
-    ':header' => json_encode($headers),
+    ':header' => json_encode(FaoximaApiCredential::redactHeaders($headers)),
     ':data' => json_encode($data),
     ':time' => date('Y/m/d H:i:s'),
     ':ip' => $_SERVER['REMOTE_ADDR'],
@@ -227,12 +227,23 @@ switch ($action) {
             if (!isset($data['amount'])) {
                 sendJsonResponse(false, "id_invoice empty", []);
             }
-            $stmt = $pdo->prepare("UPDATE user SET Balance =  Balance + :balance WHERE id = '{$invoice['id_user']}'");
-            $stmt->execute([':balance' => $data['amount']]);
-            if (function_exists('wallet_ledger_record')) {
-                wallet_ledger_record($invoice['id_user'], 'credit', $data['amount'], 'refund', 'بازگشت وجه لغو سرویس', null, 'invoice', $data['id_invoice']);
+            if (!is_numeric($data['amount']) || (float) $data['amount'] < 0 || (float) $data['amount'] != floor((float) $data['amount'])) {
+                sendJsonResponse(false, "amount invalid", []);
             }
-            update("invoice", "Status", "removebyadmin", "id_invoice", $data["id_invoice"]);
+            $rxApiRefund = rx_refund_invoice_once(
+                (string) $data['id_invoice'],
+                "UPDATE invoice SET Status = 'removebyadmin' WHERE id_invoice = :inv AND Status NOT IN ('removebyadmin','removedbyadmin','removebyuser','refunded')",
+                [':inv' => (string) $data['id_invoice']],
+                $invoice['id_user'],
+                (int) $data['amount'],
+                'بازگشت وجه لغو سرویس'
+            );
+            if ($rxApiRefund === 'claimed') {
+                sendJsonResponse(false, "service already removed", []);
+            }
+            if ($rxApiRefund !== 'refunded') {
+                sendJsonResponse(false, "refund failed", []);
+            }
             $ManagePanel->RemoveUser($invoice['Service_location'], $invoice['username']);
         } elseif ($data['type'] == "three") {
             $stmt = $pdo->prepare("DELETE  FROM invoice WHERE id_invoice = :id_invoice");
@@ -289,7 +300,7 @@ switch ($action) {
             $DataUserOut = $ManagePanel->createUser($panel['name_panel'], $product['code_product'], $data['username'], $datac);
             if ($DataUserOut['username'] == null) {
                 sendmessage($data['chat_id'], "❌ خطایی در ساخت اشتراک رخ داده است برای رفع مشکل علت خطا را در گروه گزارش تان بررسی کنید", null, 'HTML');
-                $DataUserOut['msg'] = json_encode($DataUserOut['msg']);
+                $DataUserOut['msg'] = rx_panel_error_text($DataUserOut['msg'] ?? null, $DataUserOut['detail'] ?? null);
                 $texterros = "
 خطا در ساخت کافنیگ از پنل ادمین
 <blockquote>✍️ دلیل خطا : {$DataUserOut['msg']}</blockquote>
@@ -386,7 +397,7 @@ switch ($action) {
             sendJsonResponse(false, "Panel Not Found", [], 200);
         $extend = $ManagePanel->extend($panel['Methodextend'], $data['volume_service'], $data['time_service'], $invoice['username'], "custom_volume", $panel['code_panel']);
         if ($extend['status'] == false) {
-            $extend['msg'] = json_encode($extend['msg']);
+            $extend['msg'] = rx_panel_error_text($extend['msg'] ?? null, $extend['detail'] ?? null);
             $textreports = "
         خطای تمدید سرویس
 <blockquote>نام پنل : {$panel['name_panel']}</blockquote>

@@ -7,11 +7,13 @@
 //   template → پولی‌کردن قالب‌ها (فاکسیما/میرزا)
 //   card     → درگاه کارت‌به‌کارت (تأیید دستی ادمین)
 //   nowpay   → درگاه کریپتو NOWPayments (IPN خودکار)
+//   zarin    → درگاه زرین‌پال (IPN/کال‌بک خودکار)
+//   aqaye    → درگاه آقای پرداخت (کال‌بک خودکار)
 //
 // قاعدهٔ رفتاری:
 //   limit غیرفعال ⇒ سقف اصلاً اعمال نمی‌شود و خرید اسلات هم غیرفعال است.
 //   template غیرفعال ⇒ قالب‌ها رایگان می‌شوند و ووچر خریداری‌شده‌ی قبلی هم مصرف نمی‌شود.
-//   card/nowpay غیرفعال ⇒ آن دکمه در من انتخاب روش پرداخت نمایش داده نمی‌شود.
+//   card/nowpay/zarin/aqaye غیرفعال ⇒ آن دکمه در من انتخاب روش پرداخت نمایش داده نمی‌شود.
 //
 // مقدارها در جدول settings ذخیره می‌شوند ('1' فعال، '0' غیرفعال، خالی = پیش‌فرض فعال)
 // تا ادمین از داخل ربات بدون دسترسی به فایل/دیتابیس همه‌چیز را عوض کند.
@@ -22,6 +24,8 @@ class PaymentGateways
     public const TEMPLATE = 'template';
     public const CARD = 'card';
     public const NOWPAY = 'nowpay';
+    public const ZARIN = 'zarin';
+    public const AQAYE = 'aqaye';
 
 /** متن پیش‌فرض هر بخش؛ «‹نام›» جای‌نگهدار است و با مقدار واقعی عوض می‌شود */
     private const DEFAULT_TEXT = [
@@ -29,13 +33,15 @@ class PaymentGateways
         self::TEMPLATE => "ساخت این قالب رایگان نیست.\nقیمت: ‹amount›\nبعد از پرداخت، مجوز ساخت «‹type›» برای شما صادر می‌شود.",
         self::CARD => "بعد از واریز، فیش (عکس) یا شماره پیگیری را بفرستید تا ادمین بررسی کند.",
         self::NOWPAY => "پرداخت کریپتویی از طریق NOWPayments:\nمبلغ: ‹amount›\nپس از پرداخت، خودکار تأیید می‌شود.",
+        self::ZARIN => "پرداخت اینترنتی از طریق درگاه زرین‌پال:\nمبلغ: ‹amount›\nپس از پرداخت، خودکار تأیید می‌شود.",
+        self::AQAYE => "پرداخت اینترنتی از طریق درگاه «آقای پرداخت»:\nمبلغ: ‹amount›\nپس از پرداخت، خودکار تأیید می‌شود.",
     ];
     // ---------- کلیدها ----------
 
     /** همهٔ کلیدهای معتبر */
     public static function keys(): array
     {
-        return [self::LIMIT, self::TEMPLATE, self::CARD, self::NOWPAY];
+        return [self::LIMIT, self::TEMPLATE, self::CARD, self::NOWPAY, self::ZARIN, self::AQAYE];
     }
 
     public static function isValidKey(string $key): bool
@@ -56,6 +62,8 @@ class PaymentGateways
             self::TEMPLATE => 'پولی‌کردن قالب‌ها',
             self::CARD => 'درگاه کارت‌به‌کارت',
             self::NOWPAY => 'درگاه کریپتو (NOWPayments)',
+            self::ZARIN => 'درگاه زرین‌پال',
+            self::AQAYE => 'درگاه آقای پرداخت',
         ];
         $k = self::normalize($key);
         return $map[$k] ?? $k;
@@ -180,7 +188,7 @@ class PaymentGateways
 
     /**
      * روش‌های پرداختی که واقعاً قابل استفاده‌اند:
-     * درگاه فعال باشد و پیکربندی‌اش هم کامل باشد (کارت ست شده / API key موجود).
+     * درگاه فعال باشد و پیکربندی‌اش هم کامل باشد (کارت ست شده / کلید موجود).
      */
     public static function availableMethods(Store $store, ?array $cfg = null): array
     {
@@ -191,7 +199,24 @@ class PaymentGateways
         if (self::isEnabled($store, self::NOWPAY) && PaymentNowPay::isConfigured($store, $cfg)) {
             $out[] = Payments::METHOD_NOWPAY;
         }
+        if (self::isEnabled($store, self::ZARIN) && PaymentZarin::isConfigured($store, $cfg)) {
+            $out[] = Payments::METHOD_ZARIN;
+        }
+        if (self::isEnabled($store, self::AQAYE) && PaymentAqaye::isConfigured($store, $cfg)) {
+            $out[] = Payments::METHOD_AQAYE;
+        }
         return $out;
+    }
+
+    /**
+     * روش‌هایی که «تأیید خودکار» دارند (یعنی لازم نیست ادمین رسید را ببیند).
+     * بقیه (کارت‌به‌کارت) تأیید دستی می‌خواهند.
+     */
+    public static function isAutoConfirmed(string $method): bool
+    {
+        return in_array($method, [
+            Payments::METHOD_NOWPAY, Payments::METHOD_ZARIN, Payments::METHOD_AQAYE,
+        ], true);
     }
 
     /** آیا اصلاً چیزی برای فروش هست؟ (برای پنهان‌کردن دکمهٔ منو) */

@@ -338,6 +338,7 @@ if (!function_exists('rxNavParent')) {
                 'remna_panel_back'          => 'PanelMenu',
                 'updatetime'                => 'PanelMenu',
                 'val_usertest'              => 'PanelMenu',
+                'tset_limit'                => 'PanelMenu',
                 'getlimitnew'               => 'PanelMenu',
                 'panellimit_getnew'         => 'PanelMenu',
                 'GetusernameNew'            => 'PanelMenu',
@@ -542,6 +543,7 @@ if (!function_exists('rxNavMenuSignatures')) {
                     'blupal_name'            => 'gw_blupal',
                     'atlaspay_name'          => 'gw_atlaspay',
                     'tonpay_apikey'          => 'gw_tonpay',
+                    'tonpay_paymode'         => 'gw_tonpay',
                     'cubepay_apikey'         => 'gw_cubepay',
                     'blupal_apikey'          => 'gw_blupal',
                     'variza_name'            => 'gw_variza',
@@ -631,6 +633,25 @@ if (!function_exists('rxNavTrackKeyboard')) {
     {
         if ($keyboard === null || $keyboard === '') {
             return null;
+        }
+        if (is_string($keyboard)) {
+            static $hubKeyboards = [
+                'adminPanelsMenu'          => 'panels',
+                'adminUsersMenu'           => 'usershub',
+                'adminChannelMenu'         => 'channelhub',
+                'shopkeyboard'             => 'shop',
+                'keyboard_shop_manage'     => 'products',
+                'keyboard_Category_manage' => 'categories',
+                'setting_panel'            => 'settings',
+                'keyboardhelpadmin'        => 'help',
+                'supportcenter'            => 'support',
+            ];
+            foreach ($hubKeyboards as $var => $state) {
+                if (isset($GLOBALS[$var]) && is_string($GLOBALS[$var]) && $GLOBALS[$var] === $keyboard) {
+                    rxNavSetState($from_id, $state);
+                    return $state;
+                }
+            }
         }
         $decoded = is_array($keyboard) ? $keyboard : (is_string($keyboard) ? json_decode($keyboard, true) : null);
         if (!is_array($decoded)) {

@@ -4,6 +4,8 @@
 // همهٔ مسیرها (پیام و کال‌بک، همهٔ stepها و پنل‌ها) از همین‌جا تغذیه می‌شوند
 // تا رفتار انصراف/برگشت همه‌جا یکسان و بدون باگ باشد.
 
+require_once __DIR__ . '/BuildSettings.php';
+
 class Nav
 {
     public const CANCEL = '❌ انصراف';
@@ -82,12 +84,16 @@ class Nav
         return BotApi::ikb($rows);
     }
 
-    /** پنل مدیریت کاربران مجاز — همیشه دارای برگشت */
+    /**
+     * پنل مدیریت کاربران مجاز — همیشه دارای برگشت.
+     * دکمهٔ «📋 درخواست‌ها» اضافه شد چون با «ساخت بدون درخواست» خاموش، بیشتر
+     * وقت‌ها صفِ درخواست‌ها خالی است و ادمین باید یک راهِ دیدنِ آن داشته باشد.
+     */
     public static function usersPanelKb(): string
     {
         return BotApi::ikb([
             [['text' => '➕ افزودن کاربر', 'callback_data' => 'users:add'], ['text' => '➖ حذف کاربر', 'callback_data' => 'users:remove']],
-            [['text' => '📃 لیست', 'callback_data' => 'users:list']],
+            [['text' => '📃 لیست کاربران', 'callback_data' => 'users:list'], ['text' => '📋 درخواست‌ها', 'callback_data' => 'users:requests']],
             [['text' => self::BACK, 'callback_data' => self::CB_BACK_MAIN]],
         ]);
     }
@@ -99,19 +105,50 @@ class Nav
         return BotApi::ikb($botRows);
     }
 
-    /** کیبورد پنل یک ربات + بازگشت به لیست
-     *  (دکمهٔ «دریافت سورس بروز» حذف شد: بروزرسانی دیگر روی ربات‌های ساخته‌شده
-     *   انجام نمی‌شود و از پنل سوپرادمین روی templates/ انجام می‌گیرد) */
+    /**
+     * کیبورد پنل یک ربات + بازگشت به لیست.
+     *
+     * «✏️ ویرایش توکن» و «✏️ ویرایش آیدی ادمین» اضافه شدند چون توکن ربات‌ها
+     * مرتب عوض می‌شود (چرخش توکن در @BotFather) و قبلاً تنها راه، حذف کامل ربات
+     * و ساخت دوباره بود — یعنی از دست رفتن کاربران و تنظیمات.
+     *
+     * دکمهٔ «دریافت سورس بروز» قبلاً حذف شده بود: بروزرسانی روی ربات‌های
+     * ساخته‌شده انجام نمی‌شود و از پنل سوپرادمین روی templates/ انجام می‌گیرد.
+     */
     public static function botPanelKb(array $bot, bool $isAdmin = false): string
     {
+        $id = (int)$bot['id'];
         $toggle = ($bot['status'] ?? 'active') === 'active' ? '🔴 غیرفعال' : '🟢 فعال‌سازی';
         $rows = [
-            [['text' => '📊 آمار', 'callback_data' => "act:stats:{$bot['id']}"], ['text' => '📣 همگانی', 'callback_data' => "act:broadcast:{$bot['id']}"]],
-            [['text' => '🔗 ست مجدد وبهوک', 'callback_data' => "act:webhook:{$bot['id']}"], ['text' => $toggle, 'callback_data' => "act:toggle:{$bot['id']}"]],
+            [['text' => '📊 آمار', 'callback_data' => "act:stats:{$id}"], ['text' => '📣 همگانی', 'callback_data' => "act:broadcast:{$id}"]],
+            [['text' => '✏️ ویرایش توکن', 'callback_data' => "act:edittoken:{$id}"], ['text' => '✏️ ویرایش آیدی ادمین', 'callback_data' => "act:editadmin:{$id}"]],
+            [['text' => '🔗 ست مجدد وبهوک', 'callback_data' => "act:webhook:{$id}"], ['text' => $toggle, 'callback_data' => "act:toggle:{$id}"]],
         ];
-        $rows[] = [['text' => '🗑 حذف ربات', 'callback_data' => "act:delask:{$bot['id']}"]];
+        $rows[] = [['text' => '🗑 حذف ربات', 'callback_data' => "act:delask:{$id}"]];
         $rows[] = [['text' => '↩️ بازگشت به لیست', 'callback_data' => self::CB_MY_BOTS]];
         return BotApi::ikb($rows);
+    }
+
+    /**
+     * کیبورد پنل «⚙️ تنظیمات» — همهٔ کلیدهای روشن/خاموشِ ربات‌ساز یک‌جا.
+     * دو کلید اصلی: «حالت تعمیرات» و «ساخت بدون درخواست (نیاز به تأیید)».
+     */
+    public static function settingsPanelKb(Store $store): string
+    {
+        $approval = BuildSettings::approvalRequired($store);
+        $maint = BuildSettings::maintenanceOn($store);
+        return BotApi::ikb([
+            [
+                ['text' => ($maint ? '🟢 روشن' : '🔴 خاموش') . ' — حالت تعمیرات', 'callback_data' => 'set:maintenance'],
+                ['text' => ($approval ? '🟢 روشن' : '🔴 خاموش') . ' — نیاز به تأیید', 'callback_data' => 'set:approval'],
+            ],
+            [['text' => '📝 متن پیام تعمیرات', 'callback_data' => 'set:mainttext']],
+            [['text' => '⏳ زمان تقریبی بازگشت', 'callback_data' => 'set:maintaineta']],
+            [['text' => '🔄 بروزرسانی نرخ دلار از API', 'callback_data' => 'payadmin:fxrefresh']],
+            [['text' => '💳 مدیریت پرداخت‌ها و درگاه‌ها', 'callback_data' => 'payadmin:panel']],
+            [['text' => '📝 متن‌های ربات', 'callback_data' => 'texts:g:general']],
+            [['text' => self::BACK, 'callback_data' => self::CB_BACK_MAIN]],
+        ]);
     }
 
     /** کیبورد پنل بکاپ + برگشت */
@@ -137,6 +174,12 @@ class Nav
             case 'await_bot_token': return ['kind' => 'type'];
             case 'await_admin_id': return ['kind' => 'step', 'step' => 'await_bot_token'];
             case 'await_folder': return ['kind' => 'step', 'step' => 'await_admin_id'];
+            // ===== ویرایش هویتِ رباتِ ساخته‌شده ⇒ برگشت به پنل همان ربات =====
+            case 'await_edit_bot_token':
+            case 'await_edit_admin_id': return ['kind' => 'bot'];
+            // ===== پنل تنظیمات (کلیدهای روشن/خاموش و متن تعمیرات) =====
+            case 'await_maintenance_text':
+            case 'await_maintenance_eta': return ['kind' => 'settings'];
             case 'await_user_add':
             case 'await_user_remove': return ['kind' => 'users'];
             case 'await_backup_times': return ['kind' => 'backup'];
@@ -152,6 +195,8 @@ class Nav
             case 'await_pay_card_owner':
             case 'await_pay_nowpay_key':
             case 'await_pay_nowpay_secret':
+            case 'await_pay_zarin_merchant':
+            case 'await_pay_aqaye_pin':
             case 'await_pay_setlimit': return ['kind' => 'payments'];
             // ویرایش متن‌های پویا ⇒ برگشت به فهرست گروه‌ها
             case 'await_text_edit': return ['kind' => 'texts'];

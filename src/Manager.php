@@ -868,6 +868,112 @@ public static function validTypes(): array
     }
 
     /**
+     * به‌روزرسانی «هویت» یک رباتِ از قبل ساخته‌شده: توکن / آیدی ادمین / یوزرنیم.
+     *
+     * چرا لازم است: توکن ربات از @BotFather عوض می‌شود (چرخش توکن، رباتِ بلاک‌شده،
+     * یا مالکی که توکنِ اشتباه داده). قبلاً تنها راه، حذف کامل ربات و ساخت دوباره بود
+     * که یعنی از دست رفتن کاربران و تنظیمات.
+     *
+     * تفاوت با patchXConfig: آن‌ها روی «قالبِ خام» کار می‌کنند که جای‌گذار {…} دارد؛
+     * اینجا فایلِ از قبل پُرشده با regexِ همان متغیرها بازنویسی می‌شود.
+     *
+     * قبل از نوشتن، یک نسخهٔ پشتیبان با پسوند .bak-* ساخته می‌شود تا اگر قالب
+     * سازگار نبود و الگو نخورد، کاربر بتواند برگرداند.
+     *
+     * @return array{changed:int, missing:string[], backup:?string}
+     * @throws Exception اگر config.php پیدا نشود یا الگوها نخورند (نیمه‌ویرایش ممنوع)
+     */
+    public static function updateChildIdentity(string $type, string $botDir, string $token, int $adminId, string $botUsername): array
+    {
+        $file = $botDir . '/config.php';
+        if (!is_file($file)) throw new Exception("فایل config.php این ربات پیدا نشد.");
+        $raw = file_get_contents($file);
+        if ($raw === false) throw new Exception("خواندن config.php این ربات ناموفق بود.");
+
+        $label = self::templateLabel($type);
+
+        // نگاشت «چه چیزی» ⇒ «الگوی چه چیزی» برای هر قالب
+        $varMap = [];   // متغیرهای $var (فاکسیما/میرزا)
+        $keyMap = [];   // کلیدهای آرایه‌ای (آپ‌تایم/پاسارگاد)
+        switch ($type) {
+            case 'faxima':
+            case 'mirza':
+                $varMap = ['APIKEY' => $token, 'adminnumber' => (string)$adminId, 'usernamebot' => $botUsername];
+                break;
+            case 'uptime':
+                $keyMap = ['bot_token' => $token, 'admin_id' => (string)$adminId, 'bot_username' => $botUsername];
+                break;
+            case 'pasargad':
+                // super_admins آرایه است ⇒ جداگانه با الگوی خودش عوض می‌شود
+                $keyMap = ['bot_token' => $token, 'bot_username' => $botUsername];
+                break;
+            default:
+                throw new Exception("ویرایش هویت برای قالب «{$label}» پیاده‌سازی نشده است.");
+        }
+
+        $new = $raw;
+        $changed = 0;
+        $missing = [];
+
+        foreach ($varMap as $var => $val) {
+            $pattern = '/(\$' . preg_quote($var, '/') . '\s*=\s*)((?:\'(?:\\\\.|[^\'\\\\])*\')|(?:"(?:\\\\.|[^"\\\\])*"))(\s*;)/u';
+            $before = $new;
+            $new2 = preg_replace_callback($pattern, function ($m) use ($val, &$changed) {
+                $changed++;
+                $q = $m[2][0];
+                $v = str_replace('\\', '\\\\', (string)$val);
+                $v = $q === "'" ? str_replace("'", "\\'", $v) : str_replace('"', '\\"', $v);
+                return $m[1] . $q . $v . $q . $m[3];
+            }, $new, 1);
+            if (is_string($new2)) $new = $new2;
+            if ($new === $before) $missing[] = '$' . $var;
+        }
+
+        foreach ($keyMap as $key => $val) {
+            $before = $new;
+            $new2 = preg_replace_callback(
+                "/('" . preg_quote($key, '/') . "'\s*=>\s*)'[^']*'/",
+                function ($m) use ($val, &$changed) {
+                    $changed++;
+                    return $m[1] . "'" . addcslashes((string)$val, "'\\") . "'";
+                },
+                $new, 1
+            );
+            if (is_string($new2)) $new = $new2;
+            if ($new === $before) $missing[] = "'" . $key . "'";
+        }
+
+        if ($type === 'pasargad') {
+            $new2 = preg_replace(
+                "/('super_admins'\s*=>\s*)\[[^\]]*\]/",
+                '$1[' . (int)$adminId . ']',
+                $new, 1, $n
+            );
+            if (is_string($new2) && (int)$n === 1) { $new = $new2; $changed++; }
+            else $missing[] = "'super_admins'";
+        }
+
+        if ($changed === 0) {
+            throw new Exception("هیچ فیلدی در config.php قالب «{$label}» پیدا نشد — نسخه ناسازگار است؟");
+        }
+        if ($missing !== []) {
+            // بخشی از فیلدها نخورد ⇒ اصلاً چیزی نمی‌نویسیم تا config نیمه‌ویرایش نشود
+            throw new Exception("این فیلدها در config.php قالب «{$label}» پیدا نشدند: " . implode('، ', $missing));
+        }
+
+        $backup = null;
+        if (@is_writable($file)) {
+            $try = $file . '.bak-' . date('Ymd-His');
+            if (@copy($file, $try)) $backup = $try;
+        }
+        if (@file_put_contents($file, $new) === false) {
+            throw new Exception("نوشتن config.php این ربات ناموفق بود.");
+        }
+
+        return ['changed' => $changed, 'missing' => $missing, 'backup' => $backup];
+    }
+
+    /**
      * پچ کردن config.php قالب آپ‌تایم.
      *
      * قالبش یک فایل `return [...]` با جای‌گذارهای {…} است (نه متغیرهای $var مثل فاکسیما)،

@@ -149,9 +149,10 @@ print_help() {
     --no-restart        سرویس‌ها (apache/nginx/php-fpm) ری‌استارت نمی‌شوند
     --force, -f         ادامهٔ کار حتی اگر دسترسی به گیت‌هاب قطع باشد
     --web               حالت اجرا از داخل ربات (ری‌استارت محدود)
-    --templates-only    فقط پوشهٔ templates/ به‌روز می‌شود؛ کد ربات‌ساز،
-                        دیتابیس، وبهوک و وی‌هوست دست نمی‌خورند و ربات‌های
-                        ساخته‌شده تغییری نمی‌بینند (نصبِ بعدی نسخهٔ جدید می‌گیرد)
+    --templates-only    templates/ از ریپوی گیتهابِ هر قالب تازه می‌شود؛
+                        کد ربات‌ساز، دیتابیس، وبهوک و وی‌هوست دست نمی‌خورند
+                        و ربات‌های ساخته‌شده تغییری نمی‌بینند (نصبِ بعدی نسخهٔ
+                        جدید می‌گیرد). این حالت اصلاً وارد git نمی‌شود.
     --rollback          بازگشت کد به وضعیتِ قبل از آخرین بروزرسانی موفق
     --help, -h          نمایش همین راهنما
 
@@ -379,10 +380,11 @@ info "live (served) : $LIVE_DIR"
 [ -n "$PHP_BIN" ] && info "php binary    : $PHP_BIN"
 if [ "$TPL_ONLY" -eq 1 ]; then
   info "mode          : templates-only (only templates/ will be deployed)"
+  [ "$ROLLBACK" -eq 1 ] && die "--rollback با --templates-only معنی ندارد؛ templates/ همیشه از ریپوی خودش تازه می‌شود"
 fi
 if [ "$LIVE_DIR" = "$SRC_DIR" ]; then
   ok "Single-directory layout"
-  [ "$TPL_ONLY" -eq 1 ] && info "--templates-only in a single directory: git syncs the whole tree (only templates/ is reported)"
+  [ "$TPL_ONLY" -eq 1 ] && info "--templates-only: git sync skipped; templates/ will be synced from their repos"
 else
   ok "Split layout (source → live): $SRC_DIR → $LIVE_DIR"
   [ -f "$LIVE_DIR/config.php" ] || warn "No config.php in live dir – it will be bootstrapped from source"
@@ -438,6 +440,13 @@ if [ -n "$LAST_DEPLOYED" ]; then
 fi
 
 # ===== ۲. fetch و پاک‌سازی درخت git (جلوگیری از «Local tracked files modified») =====
+# در حالت --templates-only اصلاً وارد درخت git نمی‌شویم: git reset/clean همهٔ
+# بروزرسانی‌های سورسِ قالب‌ها را (که دکمهٔ تلگرام مستقیم روی templates/ آورده و
+# در گیت commit نشده) برمی‌گرداند — و نتیجه دقیقاً همان گزارش کاربر است:
+# «سورس دانلود شد ولی اعمال نشد». پس --templates-only یعنی فقط sync قالب‌ها.
+# بروزرسانی به TPL_ONLY=1 محدود نمی‌شود؛ هر دو حالت باید RESET_OCCURRED را ببینند
+RESET_OCCURRED=0
+if [ "$TPL_ONLY" -eq 0 ]; then
 step "Step 2: Fetching latest code (clean git tree)"
 DO_RESET=0
 RESET_OCCURRED=0
@@ -498,7 +507,7 @@ if [ "$DO_RESET" -eq 1 ]; then
     LOCAL_MOD="$(git status --porcelain --untracked-files=no 2>/dev/null | grep -c .)"
     case "$LOCAL_MOD" in ''|*[!0-9]*) LOCAL_MOD=0 ;; esac
     # برنامهٔ فایل‌های untracked را قبل از هر چیز ذخیره می‌کنیم (data/bots هرگز حذف نمی‌شوند)
-    git clean -fdn -e data -e bots > "$BACKUP_DIR/clean_plan.txt" 2>/dev/null
+    git clean -fdn -e data -e bots -e templates/ -e tools/sync_templates.php > "$BACKUP_DIR/clean_plan.txt" 2>/dev/null
     if [ "$LOCAL_MOD" -gt 0 ]; then
       warn "$LOCAL_MOD tracked file(s) modified locally – resetting to origin/$CUR_BRANCH"
       info "Locally modified tracked files:"
@@ -567,7 +576,7 @@ if [ "$DO_RESET" -eq 1 ]; then
     if [ -s "$BACKUP_DIR/clean_plan.txt" ]; then
       _clean_n="$(grep -c . "$BACKUP_DIR/clean_plan.txt" 2>/dev/null)"
       if [ "$FORCE" -eq 1 ]; then
-        git clean -fd -e data -e bots >/dev/null 2>&1 || warn "git clean failed"
+        git clean -fd -e data -e bots -e templates/ -e tools/sync_templates.php >/dev/null 2>&1 || warn "git clean failed"
         ok "Removed $_clean_n untracked file(s) (listed in $BACKUP_DIR/clean_plan.txt)"
       else
         info "$_clean_n untracked file(s) kept (use --force to remove). First few:"
@@ -585,6 +594,7 @@ if [ "$DO_RESET" -eq 1 ]; then
     fi
   fi
 fi
+fi  # end of: not --templates-only (git sync skipped in that mode)
 
 NEW_COMMIT="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 if [ "$ROLLBACK" -eq 1 ] && [ "$DRY_RUN" -eq 1 ]; then
@@ -781,9 +791,10 @@ fi  # end of: not --templates-only
 step "Step 5: Deploy code from $SRC_DIR → $LIVE_DIR"
 
 TRACKED_LIST="$BACKUP_DIR/tracked_files.list"
-# --templates-only ⇒ فقط فایل‌های ردیابی‌شدهٔ templates/ استقرار می‌یابند
+# --templates-only اصلاً فایل‌های ریپوی ربات‌ساز را به زنده کپی نمی‌کند؛
+# templates/ از ریپوی خودِ هر قالب (GitHub) تازه می‌شود (پایین‌تر).
 if [ "$TPL_ONLY" -eq 1 ]; then
-  git ls-files -z -- templates/ > "$TRACKED_LIST" 2>/dev/null
+  : > "$TRACKED_LIST"
 else
   git ls-files -z > "$TRACKED_LIST" 2>/dev/null
 fi
@@ -817,11 +828,21 @@ apply_removed_files() {
   REMOVED_COUNT="$n"
 }
 
-if [ "$LIVE_DIR" = "$SRC_DIR" ]; then
-  # تک‌پوشه: گیت خودش درختِ کاری را همگام می‌کند (فایل‌های حذف‌شده هم با reset پاک می‌شوند)
-  if [ "$TPL_ONLY" -eq 1 ]; then
-    info "--templates-only: single directory – git already synced the tree above (no copy step)"
+# --templates-only: هیچ استقرارِ فایلی از ریپوی ربات‌ساز انجام نمی‌شود؛ فقط
+# templates/ از ریپوی خودِ هر قالب sync می‌شود. (قبلاً در این حالت git reset
+# اجرا می‌شد که بروزرسانی‌های آمده از GitHub را نابود می‌کرد.)
+if [ "$TPL_ONLY" -eq 1 ]; then
+  if [ "$DRY_RUN" -eq 1 ]; then
+    info "DRY-RUN: would run php tools/sync_templates.php in $LIVE_DIR"
+  else
+    _sync_php="${PHP_BIN:-php}"
+    if ( cd "$LIVE_DIR" && set -o pipefail && "$_sync_php" tools/sync_templates.php 2>&1 | tail -20 ); then
+      ok "templates/ synced from their repos"
+    else
+      fail "templates sync failed"
+    fi
   fi
+elif [ "$LIVE_DIR" = "$SRC_DIR" ]; then
   if [ "$DRY_RUN" -eq 1 ]; then
     info "DRY-RUN: source == live – would sync the working tree with git (no file copy)"
     plan_removed_files "${LAST_DEPLOYED:-$CUR_COMMIT}" "$NEW_COMMIT"
@@ -886,19 +907,8 @@ else
 
   # بررسی صحت استقرار
   if [ "$TPL_ONLY" -eq 1 ]; then
-    # فقط templates/ مستقر شده و عمداً کدِ ربات‌ساز به‌روز نشده ⇒ باید همان قالب‌ها
-    # یکی‌یکی با سورس یکی باشند (کپیِ ناقص یا نیمه‌کاره همین‌جا لو می‌رود)
-    _m=0; _n=0
-    while IFS= read -r -d '' _p; do
-      [ -n "$_p" ] || continue
-      _n=$((_n + 1))
-      cmp -s "$SRC_DIR/$_p" "$LIVE_DIR/$_p" || _m=$((_m + 1))
-    done < "$TRACKED_LIST"
-    if [ "$_m" -eq 0 ] && [ "$_n" -gt 0 ]; then
-      ok "Verified: $_n template file(s) identical to source"
-    else
-      fail "$_m of $_n template file(s) differ from source after deploy"
-    fi
+    : # templates/ از GitHub sync شده؛ مقایسه با سورسِ ریپوی ربات‌ساز معنی ندارد
+    info "templates-only: live code untouched; templates/ synced from their repos"
   elif [ -f "$SRC_DIR/bot.php" ] && [ -f "$LIVE_DIR/bot.php" ]; then
     if cmp -s "$SRC_DIR/bot.php" "$LIVE_DIR/bot.php"; then
       ok "Verified: live/bot.php is identical to source"
@@ -920,6 +930,21 @@ elif [ "$DRY_RUN" -eq 1 ]; then
   info "DRY-RUN: live version '${_v_l:-?}' vs source '${_v_s:-?}'"
 else
   warn "Version mismatch: live='${_v_l:-?}' source='${_v_s:-?}'"
+fi
+
+# ===== ۵-ب. هم‌ترازسازی templates/ با GitHub (مهم: بعد از git reset) =====
+# git reset --hard در بالا، بروزرسانی‌های templates/ را (که از دکمهٔ تلگرام آمده و
+# commit نشده) برگردانده است. پس بلافاصله از ریپوی هر قالب دوباره sync می‌کنیم —
+# وگرنه رباتِ جدید باز «همان سورسِ قدیمی» می‌دهد. در --templates-only همین کار
+# در Step 5 انجام شد و اینجا رد می‌شود.
+if [ "$TPL_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
+  step "Step 5b: Sync templates from their repos"
+  _sync_php="${PHP_BIN:-php}"
+  if ( cd "$LIVE_DIR" && set -o pipefail && "$_sync_php" tools/sync_templates.php 2>&1 | tail -20 ); then
+    ok "templates/ synced from their repos"
+  else
+    warn "templates sync failed – live keeps the previous templates"
+  fi
 fi
 
 # ===== ۶. تنظیم وی‌هوست (Apache/Nginx) → اشاره به LIVE_DIR =====

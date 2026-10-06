@@ -1,5 +1,4 @@
 <?php
-require_once __DIR__ . '/_guard.php';
 ini_set('error_log', 'error_log');
 date_default_timezone_set('Asia/Tehran');
 require_once '../config.php';
@@ -39,7 +38,9 @@ $stmt->execute();
             update("invoice","Status","end_of_time", "username",$resultss['username']);
                 }
             }
-            // این بلوک غیرقابل‌دسترس بود: وضعیت در اینجا همیشه active یا on_hold است
+            if($get_username_Check && !in_array($get_username_Check['status'],['active','on_hold'])){
+            update("invoice","status","disabled", "username",$resultss['username']);
+            }
         }
         }
     }

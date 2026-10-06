@@ -53,16 +53,45 @@ class PaymentPricing
         return number_format($toman) . ' تومان';
     }
 
-    /** نرخ تبدیل تومان به دلار برای فاکتور NOWPayments */
+    /**
+     * نرخ تبدیل تومان به دلار — مقدار «پایه/دستی» (بدون تماس شبکه).
+     * این همان رفتار قبلی است و برای نمایشِ پنل و تست‌ها استفاده می‌شود؛
+     * مسیرِ واقعیِ ساخت فاکتور از effectiveUsdRate() می‌گذرد که نرخ API را هم می‌آورد.
+     */
     public static function tomanPerUsd(Store $store): float
     {
-        $raw = Payments::toNumber((string)($store->getSetting('pay_toman_per_usd', '100000') ?? '100000'));
-        return ($raw !== null && $raw > 0) ? $raw : 100000.0;
+        $raw = Payments::toNumber((string)($store->getSetting(FxRate::K_MANUAL, '100000') ?? '100000'));
+        return ($raw !== null && $raw > 0) ? $raw : FxRate::FALLBACK_RATE;
     }
 
+    /**
+     * گذاشتن نرخ دستی = «قفل کردن» نرخ.
+     * تا وقتی ادمین دکمهٔ «🔄 نرخ خودکار» را نزده، تازه‌سازیِ خودکار دستِ او را عوض نمی‌کند.
+     */
     public static function setTomanPerUsd(Store $store, float $rate): void
     {
-        $store->setSetting('pay_toman_per_usd', (string)($rate > 0 ? $rate : 100000));
+        $rate = $rate > 0 ? $rate : FxRate::FALLBACK_RATE;
+        $store->setSetting(FxRate::K_MANUAL, (string)$rate);
+        FxRate::setManual($store, $rate);
+    }
+
+    /** برگرداندن نرخ به حالت «خودکار» (از API خوانده شود) */
+    public static function setUsdRateAuto(Store $store): void
+    {
+        FxRate::enableAuto($store);
+    }
+
+    /**
+     * نرخِ مؤثر برای ساخت فاکتور: اول نرخ تازهٔ API، وگرنه نرخ دستی/پیش‌فرض.
+     * هیچ‌وقت خطا نمی‌دهد — اگر شبکه باشد نبود، فاکتور با نرخ قبلی ساخته می‌شود.
+     */
+    public static function effectiveUsdRate(Store $store): float
+    {
+        try {
+            return FxRate::forInvoice($store);
+        } catch (Throwable $e) {
+            return self::tomanPerUsd($store);
+        }
     }
 
     /**
@@ -79,7 +108,7 @@ class PaymentPricing
      */
     public static function tomanToUsd(int $toman, float $rate): float
     {
-        if ($rate <= 0) $rate = 100000.0;
+        if ($rate <= 0) $rate = FxRate::FALLBACK_RATE;
         if ($toman <= 0) return 0.0;
         $usd = ceil(($toman / $rate) * 100) / 100;   // همیشه رو به بالا، دو رقم
         return max(self::NOWPAY_MIN_USD, $usd);

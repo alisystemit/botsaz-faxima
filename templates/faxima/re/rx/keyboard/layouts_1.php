@@ -198,6 +198,45 @@ if (is_array($keyboardLayout) && isset($keyboardLayout['keyboard']) && is_array(
     $keyboardRows = $keyboardLayout['keyboard'];
 }
 
+$rxMiniAppDomain = (string)($domainhosts ?? ($GLOBALS['domainhosts'] ?? ''));
+$rxMiniAppApply = function (array $rows) use ($datatextbot, $rxMiniAppDomain) {
+    $rxMiniAppUrl = '';
+    $rxMiniAppHost = rtrim((string)preg_replace('#^https?://#i', '', trim($rxMiniAppDomain)), '/');
+    if ($rxMiniAppHost !== '') {
+        $rxMiniAppCandidate = 'https://' . $rxMiniAppHost . '/app/';
+        if (filter_var($rxMiniAppCandidate, FILTER_VALIDATE_URL) !== false
+            && strtolower((string)parse_url($rxMiniAppCandidate, PHP_URL_SCHEME)) === 'https'
+            && (string)parse_url($rxMiniAppCandidate, PHP_URL_HOST) !== '') {
+            $rxMiniAppUrl = $rxMiniAppCandidate;
+        }
+    }
+    $rxMiniAppLabel = (string)($datatextbot['text_miniapp_button'] ?? '');
+    if (trim($rxMiniAppLabel) === '') $rxMiniAppLabel = '🚀 Open Mini App';
+    $rxMiniAppFound = false;
+    $rxMiniAppRows = [];
+    foreach ($rows as $rxMiniAppRow) {
+        if (!is_array($rxMiniAppRow)) { $rxMiniAppRows[] = $rxMiniAppRow; continue; }
+        $rxMiniAppNewRow = [];
+        foreach ($rxMiniAppRow as $rxMiniAppBtn) {
+            if (is_array($rxMiniAppBtn) && isset($rxMiniAppBtn['text']) && $rxMiniAppBtn['text'] === 'text_miniapp_button') {
+                $rxMiniAppFound = true;
+                if ($rxMiniAppUrl === '') continue;
+                unset($rxMiniAppBtn['callback_data'], $rxMiniAppBtn['_rxsk']);
+                $rxMiniAppBtn['text'] = $rxMiniAppLabel;
+                $rxMiniAppBtn['web_app'] = ['url' => $rxMiniAppUrl];
+            }
+            $rxMiniAppNewRow[] = $rxMiniAppBtn;
+        }
+        if (!empty($rxMiniAppNewRow) || empty($rxMiniAppRow)) $rxMiniAppRows[] = $rxMiniAppNewRow;
+    }
+    if ($rxMiniAppFound && $rxMiniAppUrl === '' && function_exists('rx_log_event')) {
+        rx_log_event('MINIAPP_BUTTON_SKIPPED', 'Main keyboard Mini App button skipped: invalid or empty domainhosts.', [
+            'where' => 'layouts_1',
+        ]);
+    }
+    return $rxMiniAppRows;
+};
+
 if ($setting['inlinebtnmain'] == "oninline" && !empty($keyboardRows)) {
     $trace_keyboard = $keyboardRows;
     foreach ($trace_keyboard as $key => $callback_set) {
@@ -259,6 +298,7 @@ if ($setting['inlinebtnmain'] == "oninline" && !empty($keyboardRows)) {
     $keyboard = ['inline_keyboard' => []];
     $keyboardcustom = $trace_keyboard;
     $keyboardcustom = json_decode(strtr(strval(json_encode($keyboardcustom)), $replacements), true);
+    if (is_array($keyboardcustom)) $keyboardcustom = $rxMiniAppApply($keyboardcustom);
     if (!empty($temp_addtional_key)) $keyboardcustom[] = $temp_addtional_key;
     $keyboard['inline_keyboard'] = $keyboardcustom;
     $keyboard = function_exists('rx_finalizeInlineAdminKb')
@@ -287,6 +327,7 @@ if ($setting['inlinebtnmain'] == "oninline" && !empty($keyboardRows)) {
     $keyboard = ['keyboard' => [], 'resize_keyboard' => true];
     $keyboardcustom = $keyboardRows;
     $keyboardcustom = json_decode(strtr(strval(json_encode($keyboardcustom)), $replacements), true);
+    if (is_array($keyboardcustom)) $keyboardcustom = $rxMiniAppApply($keyboardcustom);
     if (!empty($temp_addtional_key)) $keyboardcustom[] = $temp_addtional_key;
     $keyboard['keyboard'] = $keyboardcustom;
     $keyboard = function_exists('rx_finalizeInlineAdminKb')
@@ -548,6 +589,7 @@ $trnado = rx_kb_encode([
 $tonpay = rx_kb_encode([
         [rx_kb_style(['text' => "🏷️ نام نمایشی درگاه تون‌پی", 'callback_data' => 'tonpay_name'], 'tonpay_name', $_rx_gw_styles)],
         [rx_kb_style(['text' => "🔑 ثبت API Key تون‌پی", 'callback_data' => 'tonpay_apikey'], 'tonpay_apikey', $_rx_gw_styles)],
+        [rx_kb_style(['text' => "🔀 مقصد پرداخت تون‌پی", 'callback_data' => 'tonpay_paymode'], 'tonpay_paymode', $_rx_gw_styles)],
         [rx_kb_style(['text' => "💰 کش بک تون‌پی", 'callback_data' => 'tonpay_cashback'], 'tonpay_cashback', $_rx_gw_styles)],
         [
             rx_kb_style(['text' => "⬇️ کف تون‌پی", 'callback_data' => 'tonpay_min'], 'tonpay_min', $_rx_gw_styles),
@@ -687,13 +729,12 @@ $adminPanelsMenu = rx_kb_encode([
         rx_kb_style(['text' => $textbotlang['Admin']['btnkeyboardadmin']['managementpanel'], 'callback_data' => 'admin_managepanel'], 'admin_managepanel', $_rx_adm_styles),
         rx_kb_style(['text' => $textbotlang['Admin']['btnkeyboardadmin']['addpanel'], 'callback_data' => 'admin_addpanel'], 'admin_addpanel', $_rx_adm_styles)
     ],
-    [rx_kb_style(['text' => "🛠 قابلیت های پنل", 'callback_data' => 'admin_features'], 'admin_features', $_rx_adm_styles)],
     [
         rx_kb_style(['text' => "⏳ قیمت سریع زمان", 'callback_data' => 'admin_timeprice'], 'admin_timeprice', $_rx_adm_styles),
         rx_kb_style(['text' => "🔋 قیمت سریع حجم", 'callback_data' => 'admin_volprice'], 'admin_volprice', $_rx_adm_styles)
     ],
     [
-        rx_kb_style(['text' => "🔙 بازگشت به منوی قبل", 'callback_data' => 'adm_hub_main'], 'panelshub_backmenu', $_rx_adm_styles),
+        rx_kb_style(['text' => "🔙 بازگشت به منوی قبل", 'callback_data' => 'panelshub_backmenu'], 'panelshub_backmenu', $_rx_adm_styles),
         rx_kb_style(['text' => "🏠 منوی مدیریت", 'callback_data' => 'adm_hub_main'], 'panelshub_backadmin', $_rx_adm_styles)
     ],
 ]);
@@ -702,7 +743,7 @@ $adminChannelMenu = rx_kb_encode([
     [rx_kb_style(['text' => "📯 تنظیمات کانال", 'callback_data' => 'set_channel'], 'set_channel', $_rx_set_styles)],
     [rx_kb_style(['text' => "📣 گزارشات ربات", 'callback_data' => 'set_reports'], 'set_reports', $_rx_set_styles)],
     [
-        rx_kb_style(['text' => "🔙 بازگشت به منوی قبل", 'callback_data' => 'adm_hub_main'], 'channelhub_backmenu', $_rx_set_styles),
+        rx_kb_style(['text' => "🔙 بازگشت به منوی قبل", 'callback_data' => 'channelhub_backmenu'], 'channelhub_backmenu', $_rx_set_styles),
         rx_kb_style(['text' => "🏠 منوی مدیریت", 'callback_data' => 'adm_hub_main'], 'channelhub_backadmin', $_rx_set_styles)
     ],
 ]);
@@ -710,10 +751,9 @@ $adminChannelMenu = rx_kb_encode([
 $adminUsersMenu = rx_kb_encode([
     [rx_kb_style(['text' => $textbotlang['Admin']['btnkeyboardadmin']['managruser'], 'callback_data' => 'admin_users'], 'admin_users', $_rx_adm_styles)],
     [rx_kb_style(['text' => "👨‍🔧 بخش ادمین", 'callback_data' => 'set_adminmgr'], 'set_adminmgr', $_rx_set_styles)],
-    [rx_kb_style(['text' => "➕ محدودیت تست برای همه", 'callback_data' => 'set_testlimit'], 'set_testlimit', $_rx_set_styles)],
     [rx_kb_style(['text' => "💵 رسید های تایید نشده", 'callback_data' => 'admin_invoices'], 'admin_invoices', $_rx_adm_styles)],
     [
-        rx_kb_style(['text' => "🔙 بازگشت به منوی قبل", 'callback_data' => 'adm_hub_main'], 'usershub_backmenu', $_rx_adm_styles),
+        rx_kb_style(['text' => "🔙 بازگشت به منوی قبل", 'callback_data' => 'usershub_backmenu'], 'usershub_backmenu', $_rx_adm_styles),
         rx_kb_style(['text' => "🏠 منوی مدیریت", 'callback_data' => 'adm_hub_main'], 'usershub_backadmin', $_rx_adm_styles)
     ],
 ]);

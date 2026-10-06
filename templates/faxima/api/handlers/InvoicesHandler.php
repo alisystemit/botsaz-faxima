@@ -109,7 +109,8 @@ final class InvoicesHandler extends BaseHandler
             if (($row['Status'] ?? '') === 'active') {
                 $timeSell = is_numeric($row['time_sell'] ?? null) ? (int)$row['time_sell'] : 0;
                 $serviceTime = is_numeric($row['Service_time'] ?? null) ? (int)$row['Service_time'] : 0;
-                $calcExpire = ($timeSell > 0 && $serviceTime > 0) ? ($timeSell + ($serviceTime * 86400)) : 0;
+                $unitSeconds = (($row['name_product'] ?? '') === 'سرویس تست') ? 3600 : 86400;
+                $calcExpire = ($timeSell > 0 && $serviceTime > 0) ? ($timeSell + ($serviceTime * $unitSeconds)) : 0;
 
                 if ($calcExpire > 0 && $calcExpire <= time()) {
                     try {
@@ -162,6 +163,7 @@ final class InvoicesHandler extends BaseHandler
                 $row['status'] = $row['Status'] ?? 'active';
             }
             $row['has_queued_renewal'] = isset($queuedUsernames[(string)$row['username']]);
+            $row['display_username'] = guardDisplayUsername((string)$row['username'], (string)($row['Service_location'] ?? ''));
         }
         unset($row);
 

@@ -28,6 +28,11 @@ require_once $root.'/src/Payment/Limits.php';
 require_once $root.'/src/Payment/Pricing.php';
 require_once $root.'/src/Payment/NowPayments.php';
 require_once $root.'/src/Payment/CardToCard.php';
+// درگاه‌های اینترنتیِ تازه و ماژول نرخ دلار. وجودشان اینجا لازم است چون
+// پیش‌فرض‌های اولیه از config.php خوانده و در settings کاشته می‌شوند.
+require_once $root.'/src/Payment/ZarinPal.php';
+require_once $root.'/src/Payment/AqaPay.php';
+require_once $root.'/src/FxRate.php';
 Payments::ensureSchema($store);
 $payCfg = $cfg['payment'] ?? [];
 if ($store->getSetting('pay_limit_price') === null) {
@@ -45,6 +50,29 @@ if ($store->getSetting('pay_card_owner') === null) $store->setSetting('pay_card_
 if ($store->getSetting('pay_toman_per_usd') === null) $store->setSetting('pay_toman_per_usd', (string)($payCfg['toman_per_usd'] ?? 100000));
 if ($store->getSetting('pay_nowpay_api_key') === null) $store->setSetting('pay_nowpay_api_key', (string)($cfg['nowpayments']['api_key'] ?? ''));
 if ($store->getSetting('pay_nowpay_ipn_secret') === null) $store->setSetting('pay_nowpay_ipn_secret', (string)($cfg['nowpayments']['ipn_secret'] ?? ''));
+// کد پذیرنده/پینِ درگاه‌های اینترنتیِ تازه — از config.php خوانده و یک‌بار کاشته می‌شوند
+if ($store->getSetting('pay_zarin_merchant_id') === null) $store->setSetting('pay_zarin_merchant_id', (string)($cfg['zarinpal']['merchant_id'] ?? ''));
+if ($store->getSetting('pay_aqaye_pin') === null) $store->setSetting('pay_aqaye_pin', (string)($cfg['aqayepardakht']['pin'] ?? ''));
+
+// ===== نرخ دلار: یک بار از API گرفته و کش می‌شود =====
+// فقط اگر هنوز هیچ نرخی ثبت نشده باشد؛ اگر API در دسترس نبود همان
+// پیش‌فرض config.php می‌ماند و فاکتورها خراب نمی‌شوند.
+if ($store->getSetting(FxRate::K_RATE) === null || trim((string)$store->getSetting(FxRate::K_RATE, '')) === '') {
+    $store->setSetting(FxRate::K_MANUAL, (string)($payCfg['toman_per_usd'] ?? 100000));
+    $fxOk = false;
+    try {
+        $fx = FxRate::fetch(6);
+        if (!empty($fx['ok'])) {
+            FxRate::seed($store, (float)$fx['rate'], (string)$fx['source']);
+            $fxOk = true;
+        } else {
+            $store->setSetting(FxRate::K_FETCHED, (string)$fx['error']);
+        }
+    } catch (Throwable $e) {
+        $store->setSetting(FxRate::K_FETCHED, 'خطای شبکه: ' . $e->getMessage());
+    }
+    echo 'usd rate: ' . ($fxOk ? 'fetched (' . FxRate::source($store) . ')' : 'fallback (manual)') . "\n";
+}
 
 // وضعیت فعال/غیرفعال درگاه‌ها — فقط اگر قبلاً ست نشده باشند.
 // نکتهٔ مهم: config.php قدیمی اصلاً کلید payment.enabled را ندارد؛ در آن حالت

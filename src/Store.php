@@ -317,6 +317,40 @@ class Store
         $st->execute([$status, $id]);
     }
 
+    /**
+     * به‌روزرسانی چند فیلدِ یک ربات (مثلاً توکنِ تازه یا آیدی ادمینِ جدید).
+     *
+     * چرا یک متدِ عمومی لازم شد: قبلاً فقط setBotStatus بود و هر تغییرِ دیگری
+     * باید با SQL دستی داخل bot.php نوشته می‌شد — یعنی نام ستون‌ها در چند جای
+     * پروژه تکرار می‌شد و یک اشتباه تایپی یعنی رکوردِ نیمه‌ویرایش.
+     *
+     * فقط ستون‌هایِ شناخته‌شده پذیرفته می‌شوند (فهرستِ سخت‌گیرانه) تا از SQL
+     * injection از طریق نامِ ستون جلوگیری شود.
+     *
+     * @return bool آیا واقعاً چیزی عوض شد؟
+     */
+    public function updateBot(int $id, array $fields): bool
+    {
+        // توجه: 'webhook_secret' عمداً نیست — چنین ستونی در جدول bots وجود ندارد
+        // (secret از فرمولِ Manager::resolveWebhookSecret ساخته می‌شود، نه از دیتابیس)
+        $allowed = ['type', 'folder', 'token', 'bot_username', 'bot_id', 'admin_id',
+                    'db_name', 'db_table_prefix', 'webhook_url', 'status'];
+        $sets = [];
+        $vals = [];
+        foreach ($fields as $col => $val) {
+            if (!in_array($col, $allowed, true)) {
+                throw new InvalidArgumentException("ستونِ ناشناخته در updateBot: {$col}");
+            }
+            $sets[] = "{$col}=?";
+            $vals[] = $val;
+        }
+        if ($sets === []) return false;
+        $vals[] = $id;
+        $st = $this->pdo->prepare("UPDATE bots SET " . implode(', ', $sets) . " WHERE id=?");
+        $st->execute($vals);
+        return $st->rowCount() > 0;
+    }
+
     public function deleteBot(int $id): void
     {
         $st = $this->pdo->prepare("DELETE FROM bots WHERE id=?");

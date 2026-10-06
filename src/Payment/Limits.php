@@ -66,8 +66,9 @@ class PaymentLimits
     /** پیام یکسانِ مسدودی — جای یک منبع حقیقت */
     public static function blockedNotice(): string
     {
-        return "⛔️ حساب شما مسدود است و امکان ساخت ربات یا خرید اسلات وجود ندارد.\n"
-            . "اگر فکر می‌کنید اشتباه شده، با ادمین تماس بگیرید.";
+        return "⛔️ <b>حساب شما مسدود است</b>\n\n"
+            . "امکان ساخت ربات یا خرید اسلات برای این حساب وجود ندارد.\n"
+            . "اگر فکر می‌کنید اشتباه شده، با ادمین در میان بگذارید.";
     }
 
     /** چند اسلات خالی مانده؟ نامحدود => -1 */
@@ -83,6 +84,6 @@ class PaymentLimits
 
     public static function formatLimit(int $limit): string
     {
-        return $limit < 0 ? 'نامحدود ♾️' : (string)$limit;
+        return $limit < 0 ? '♾️ نامحدود' : (string)$limit;
     }
 }

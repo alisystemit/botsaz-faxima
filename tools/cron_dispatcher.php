@@ -104,7 +104,11 @@ $__cronStart = microtime(true);
 // دسترسیِ نوشتن ندارد، فقط یک نشانه در data/pending_update می‌گذارد. اینجا
 // آن نشانه مصرف می‌شود و همان `bash tools/update.sh` اجرا می‌شود — دقیقاً مثل
 // اجرای دستی، ولی با مالکِ فایلِ کرون (معمولاً ادمینِ واقعیِ درخت).
-foreach (['full' => '', 'templates' => '--templates-only'] as $_pendingKind => $_pendingArg) {
+// نکته: pending از نوع 'templates' دیگر update.sh --templates-only را صدا نمی‌زند؛
+// همان اسکریپتِ همگام‌سازیِ PHP اجرا می‌شود. update.sh --templates-only فقط
+// همین اسکریپت را صدا می‌زد و قبلاً git reset اجرا می‌کرد که بروزرسانی‌های
+// templates/ را برمی‌گرداند.
+foreach (['full' => ''] as $_pendingKind => $_pendingArg) {
     $_flag = __DIR__ . '/../data/pending_update/' . $_pendingKind . '.json';
     if (!is_file($_flag)) continue;
     @unlink($_flag);
@@ -119,6 +123,18 @@ foreach (['full' => '', 'templates' => '--templates-only'] as $_pendingKind => $
     $_tail = implode("\n", array_slice($_out, -30));
     $log->info('cron', "pending '{$_pendingKind}' update finished rc={$_rc}");
     @file_put_contents(__DIR__ . '/../data/logs/selfupdate.log', "\n========== pending {$_pendingKind} " . date('Y-m-d H:i:s') . " ==========\nrc={$_rc}\n" . $_tail . "\n", FILE_APPEND | LOCK_EX);
+}
+$_flagT = __DIR__ . '/../data/pending_update/templates.json';
+if (is_file($_flagT)) {
+    @unlink($_flagT);
+    $log->info('cron', "running pending 'templates' sync");
+    $_root = dirname(__DIR__);
+    $_out = [];
+    $_rc = 1;
+    @exec('cd ' . escapeshellarg($_root) . ' && ' . escapeshellarg(phpBin($cfg)) . ' tools/sync_templates.php 2>&1', $_out, $_rc);
+    $_tail = implode("\n", array_slice($_out, -30));
+    $log->info('cron', "pending 'templates' sync finished rc={$_rc}");
+    @file_put_contents(__DIR__ . '/../data/logs/selfupdate.log', "\n========== pending templates " . date('Y-m-d H:i:s') . " ==========\nrc={$_rc}\n" . $_tail . "\n", FILE_APPEND | LOCK_EX);
 }
 
 // ===== بررسی تمام ربات‌های فعال =====

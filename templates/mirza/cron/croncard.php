@@ -1,5 +1,4 @@
 <?php
-require_once __DIR__ . '/_guard.php';
 ini_set('error_log', 'error_log');
 date_default_timezone_set('Asia/Tehran');
 require_once '../config.php';

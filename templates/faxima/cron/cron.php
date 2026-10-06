@@ -13,25 +13,6 @@ if (function_exists('putenv') && !preg_match('/(^|,)\s*putenv\s*(,|$)/', strtolo
     @putenv('TZ=Asia/Tehran');
 }
 
-// ===== گارد ورود وب (قبل از قفل و هر کار دیگر) =====
-// CLI (cron_dispatcher / crontab با php) مجاز است؛ HTTP فقط با secret مشتق از توکن ربات.
-if (php_sapi_name() !== 'cli') {
-    $rxGuardCfg = dirname(__DIR__) . '/config.php';
-    $rxGuardToken = '';
-    if (is_readable($rxGuardCfg)) {
-        $rxGuardRaw = (string) @file_get_contents($rxGuardCfg);
-        if (preg_match('/\$APIKEY\s*=\s*[\'"]([^\'"]*)[\'"]/', $rxGuardRaw, $rxGuardM)) {
-            $rxGuardToken = $rxGuardM[1];
-        }
-    }
-    $rxGuardSecret = $rxGuardToken !== '' ? hash('sha256', $rxGuardToken . '_faoxima_cron_secret') : '';
-    $rxGuardProvided = isset($_GET['secret']) && is_string($_GET['secret']) ? $_GET['secret'] : '';
-    if ($rxGuardSecret === '' || $rxGuardProvided === '' || !hash_equals($rxGuardSecret, $rxGuardProvided)) {
-        http_response_code(403);
-        exit('Forbidden');
-    }
-}
-
 
 $lockFile = __DIR__ . '/cron.lock';
 $lockHandle = @fopen($lockFile, 'c');
@@ -281,8 +262,8 @@ $dispatchAsync = static function (array $urls, bool $useLoopback) use ($rxIntern
             CURLOPT_NOSIGNAL        => true,
             CURLOPT_CONNECTTIMEOUT_MS => 1500,
             CURLOPT_TIMEOUT_MS      => 4000,
-            CURLOPT_SSL_VERIFYPEER  => true,
-            CURLOPT_SSL_VERIFYHOST  => 2,
+            CURLOPT_SSL_VERIFYPEER  => false,
+            CURLOPT_SSL_VERIFYHOST  => 0,
             CURLOPT_FOLLOWLOCATION  => false,
             CURLOPT_FORBID_REUSE    => true,
             CURLOPT_FRESH_CONNECT   => true,

@@ -149,16 +149,259 @@ function rx_send_banner_message($chat_id, $section, $text, $keyboard = null, $pa
     $fileCol = "banner_{$section}_file_id";
     $status = is_array($setting) ? ($setting[$statusCol] ?? '0') : '0';
     $fileId = is_array($setting) ? trim((string)($setting[$fileCol] ?? '')) : '';
-    if ($status == '1' && $fileId !== '') {
-        return telegram('sendphoto', [
+    $startMediaActive = false;
+    if ($section === 'start') {
+        try {
+            $startMediaActive = rx_start_media_active_config() !== null;
+            if ($startMediaActive) {
+                rx_send_start_media($chat_id);
+            }
+        } catch (\Throwable $startMediaError) {
+            rx_start_media_log('start hook failed: ' . $startMediaError->getMessage());
+        }
+    }
+    if ($status == '1' && $fileId !== '' && !$startMediaActive) {
+        $photoResult = telegram('sendphoto', [
             'chat_id' => $chat_id,
             'photo' => $fileId,
             'caption' => $text,
             'reply_markup' => $keyboard,
             'parse_mode' => $parse_mode,
         ]);
+        if (is_array($photoResult) && !empty($photoResult['ok'])) {
+            return $photoResult;
+        }
     }
     return sendmessage($chat_id, $text, $keyboard, $parse_mode);
+}
+function rx_start_media_types()
+{
+    return ['sticker', 'animation', 'emoji', 'custom_emoji'];
+}
+function rx_start_media_log($message)
+{
+    $line = '[start_media] ' . $message;
+    if (function_exists('faoxima_dedup_error_log')) {
+        faoxima_dedup_error_log('start_media_' . md5($line), $line, 3600);
+        return;
+    }
+    @error_log($line);
+}
+function rx_start_media_utf16_length($value)
+{
+    if (!is_string($value) || $value === '') {
+        return 0;
+    }
+    $encoded = @mb_convert_encoding($value, 'UTF-16LE', 'UTF-8');
+    return is_string($encoded) ? intdiv(strlen($encoded), 2) : 0;
+}
+function rx_start_media_is_emoji_text($value)
+{
+    if (!is_string($value) || $value === '' || strlen($value) > 128 || mb_strlen($value, 'UTF-8') > 40) {
+        return false;
+    }
+    if (!mb_check_encoding($value, 'UTF-8') || preg_match('/[\s\x{00A0}\x{2000}-\x{200B}\x{2028}\x{2029}\x{3000}]/u', $value)) {
+        return false;
+    }
+    $pictographic = '[\x{00A9}\x{00AE}\x{203C}\x{2049}\x{2122}\x{2139}\x{2190}-\x{21FF}\x{231A}-\x{23FF}\x{24C2}\x{25A0}-\x{25FF}\x{2600}-\x{27BF}\x{2900}-\x{297F}\x{2B00}-\x{2BFF}\x{3030}\x{303D}\x{3297}\x{3299}\x{1F000}-\x{1FAFF}]';
+    $element = '(?:[0-9#*]\x{FE0F}?\x{20E3}|[\x{1F1E6}-\x{1F1FF}]{2}|' . $pictographic . '[\x{FE0E}\x{FE0F}]?[\x{1F3FB}-\x{1F3FF}]?(?:[\x{E0020}-\x{E007E}]+\x{E007F})?\x{FE0F}?)';
+    $sequence = $element . '(?:\x{200D}' . $element . ')*';
+    return (bool) preg_match('/^(?:' . $sequence . '){1,5}$/u', $value);
+}
+function rx_start_media_normalize_entities($entities, $text)
+{
+    if (!is_array($entities) || !is_string($text) || $text === '') {
+        return [];
+    }
+    $textLength = rx_start_media_utf16_length($text);
+    $normalized = [];
+    foreach ($entities as $entity) {
+        if (!is_array($entity) || ($entity['type'] ?? '') !== 'custom_emoji') {
+            continue;
+        }
+        $customEmojiId = trim((string)($entity['custom_emoji_id'] ?? ''));
+        $offset = $entity['offset'] ?? null;
+        $length = $entity['length'] ?? null;
+        if ($customEmojiId === '' || !ctype_digit($customEmojiId) || strlen($customEmojiId) > 30) {
+            continue;
+        }
+        if (!is_int($offset) && !(is_string($offset) && ctype_digit($offset))) {
+            continue;
+        }
+        if (!is_int($length) && !(is_string($length) && ctype_digit($length))) {
+            continue;
+        }
+        $offset = (int) $offset;
+        $length = (int) $length;
+        if ($offset < 0 || $length <= 0 || $offset + $length > $textLength) {
+            continue;
+        }
+        $normalized[] = [
+            'type' => 'custom_emoji',
+            'offset' => $offset,
+            'length' => $length,
+            'custom_emoji_id' => $customEmojiId,
+        ];
+    }
+    return $normalized;
+}
+function rx_start_media_is_valid_file_id($fileId)
+{
+    return is_string($fileId) && $fileId !== '' && strlen($fileId) <= 512 && (bool) preg_match('/^[A-Za-z0-9_\-]+$/', $fileId);
+}
+function rx_start_media_build_config($type, $fileId, $text, $entities)
+{
+    $type = (string) $type;
+    if (!in_array($type, rx_start_media_types(), true)) {
+        return null;
+    }
+    if ($type === 'sticker' || $type === 'animation') {
+        $fileId = trim((string) $fileId);
+        return rx_start_media_is_valid_file_id($fileId)
+            ? ['type' => $type, 'file_id' => $fileId, 'text' => '', 'entities' => []]
+            : null;
+    }
+    $text = (string) $text;
+    if ($type === 'emoji') {
+        return rx_start_media_is_emoji_text($text)
+            ? ['type' => 'emoji', 'file_id' => '', 'text' => $text, 'entities' => []]
+            : null;
+    }
+    if (is_string($entities)) {
+        $entities = json_decode($entities, true);
+    }
+    if (!rx_start_media_is_emoji_text($text)) {
+        return null;
+    }
+    $normalizedEntities = rx_start_media_normalize_entities($entities, $text);
+    if (empty($normalizedEntities)) {
+        return null;
+    }
+    return ['type' => 'custom_emoji', 'file_id' => '', 'text' => $text, 'entities' => $normalizedEntities];
+}
+function rx_start_media_stored_config($settingRow = null)
+{
+    if ($settingRow === null) {
+        $settingRow = $GLOBALS['setting'] ?? null;
+    }
+    if (!is_array($settingRow)) {
+        return null;
+    }
+    return rx_start_media_build_config(
+        $settingRow['start_media_type'] ?? '',
+        $settingRow['start_media_file_id'] ?? '',
+        $settingRow['start_media_text'] ?? '',
+        $settingRow['start_media_entities'] ?? ''
+    );
+}
+function rx_start_media_is_enabled($settingRow = null)
+{
+    if ($settingRow === null) {
+        $settingRow = $GLOBALS['setting'] ?? null;
+    }
+    return is_array($settingRow) && (string)($settingRow['start_media_status'] ?? '0') === '1';
+}
+function rx_start_media_active_config($settingRow = null)
+{
+    if (!rx_start_media_is_enabled($settingRow)) {
+        return null;
+    }
+    return rx_start_media_stored_config($settingRow);
+}
+function rx_start_media_parse_message($message)
+{
+    if (!is_array($message)) {
+        return null;
+    }
+    if (isset($message['animation']) && is_array($message['animation'])) {
+        return rx_start_media_build_config('animation', $message['animation']['file_id'] ?? '', '', []);
+    }
+    if (isset($message['sticker']) && is_array($message['sticker'])) {
+        $sticker = $message['sticker'];
+        if (($sticker['type'] ?? '') === 'custom_emoji') {
+            $customEmojiId = function_exists('rxPremiumEmojiExtractCustomId')
+                ? rxPremiumEmojiExtractCustomId(['sticker' => $sticker])
+                : '';
+            $baseEmoji = trim((string)($sticker['emoji'] ?? ''));
+            if ($customEmojiId === '' || !rx_start_media_is_emoji_text($baseEmoji)) {
+                return null;
+            }
+            return rx_start_media_build_config('custom_emoji', '', $baseEmoji, [[
+                'type' => 'custom_emoji',
+                'offset' => 0,
+                'length' => rx_start_media_utf16_length($baseEmoji),
+                'custom_emoji_id' => $customEmojiId,
+            ]]);
+        }
+        return rx_start_media_build_config('sticker', $sticker['file_id'] ?? '', '', []);
+    }
+    foreach (['photo', 'video', 'video_note', 'document', 'audio', 'voice', 'contact', 'location', 'venue', 'poll', 'dice'] as $unsupportedField) {
+        if (isset($message[$unsupportedField])) {
+            return null;
+        }
+    }
+    if (!isset($message['text']) || !is_string($message['text']) || $message['text'] === '') {
+        return null;
+    }
+    $rawText = $message['text'];
+    $entities = (isset($message['entities']) && is_array($message['entities'])) ? $message['entities'] : [];
+    $hasCustomEmoji = function_exists('rxPremiumEmojiExtractCustomId')
+        ? rxPremiumEmojiExtractCustomId(['entities' => $entities]) !== ''
+        : false;
+    if ($hasCustomEmoji) {
+        return rx_start_media_build_config('custom_emoji', '', $rawText, $entities);
+    }
+    return rx_start_media_build_config('emoji', '', trim($rawText), []);
+}
+function rx_start_media_dispatch($chat_id, array $config)
+{
+    $type = (string)($config['type'] ?? '');
+    if ($type === 'sticker') {
+        return telegram('sendSticker', [
+            'chat_id' => $chat_id,
+            'sticker' => $config['file_id'],
+        ]);
+    }
+    if ($type === 'animation') {
+        return telegram('sendAnimation', [
+            'chat_id' => $chat_id,
+            'animation' => $config['file_id'],
+        ]);
+    }
+    if ($type === 'emoji') {
+        return telegram('sendMessage', [
+            'chat_id' => $chat_id,
+            'text' => $config['text'],
+            '_rx_already_transformed' => true,
+        ]);
+    }
+    if ($type === 'custom_emoji') {
+        return telegram('sendMessage', [
+            'chat_id' => $chat_id,
+            'text' => $config['text'],
+            'entities' => json_encode(array_values($config['entities']), JSON_UNESCAPED_UNICODE),
+            '_rx_already_transformed' => true,
+        ]);
+    }
+    return ['ok' => false, 'description' => 'unsupported start media type'];
+}
+function rx_send_start_media($chat_id)
+{
+    try {
+        $config = rx_start_media_active_config();
+        if ($config === null) {
+            return false;
+        }
+        $result = rx_start_media_dispatch($chat_id, $config);
+        if (is_array($result) && !empty($result['ok'])) {
+            return true;
+        }
+        $description = is_array($result) ? (string)($result['description'] ?? 'unknown error') : 'no response';
+        rx_start_media_log('send ' . $config['type'] . ' failed: ' . $description);
+    } catch (\Throwable $startMediaError) {
+        rx_start_media_log('send exception: ' . $startMediaError->getMessage());
+    }
+    return false;
 }
 function rx_buy_banner_file_id()
 {
@@ -170,22 +413,25 @@ function rx_buy_banner_file_id()
 function rx_send_buy_first_step($chat_id, $message_id, $datain, $text, $keyboard, $isCallback)
 {
     $fileId = rx_buy_banner_file_id();
-    if ($fileId === '') {
-        if ($isCallback) {
-            return Editmessagetext($chat_id, $message_id, $text, $keyboard);
+    if ($fileId !== '') {
+        $photoResult = telegram('sendphoto', [
+            'chat_id' => $chat_id,
+            'photo' => $fileId,
+            'caption' => $text,
+            'reply_markup' => $keyboard,
+            'parse_mode' => 'HTML',
+        ]);
+        if (is_array($photoResult) && !empty($photoResult['ok'])) {
+            if ($isCallback) {
+                deletemessage($chat_id, $message_id);
+            }
+            return $photoResult;
         }
-        return sendmessage($chat_id, $text, $keyboard, 'HTML');
     }
     if ($isCallback) {
-        deletemessage($chat_id, $message_id);
+        return Editmessagetext($chat_id, $message_id, $text, $keyboard);
     }
-    return telegram('sendphoto', [
-        'chat_id' => $chat_id,
-        'photo' => $fileId,
-        'caption' => $text,
-        'reply_markup' => $keyboard,
-        'parse_mode' => 'HTML',
-    ]);
+    return sendmessage($chat_id, $text, $keyboard, 'HTML');
 }
 function panel_feature_registry()
 {
@@ -980,13 +1226,6 @@ function replaceCronJobsMatchingStatus($pattern, $newCommands)
     return ['status' => $verifyOk ? 'success' : 'error', 'user' => $cronUser];
 }
 
-function faximaCronSecret()
-{
-    global $APIKEY;
-    $token = (isset($APIKEY) && is_string($APIKEY)) ? $APIKEY : '';
-    return $token !== '' ? hash('sha256', $token . '_faoxima_cron_secret') : '';
-}
-
 function rxActivecronPattern($domainhosts)
 {
     $projectHost = trim((string) preg_replace('#^https?://#i', '', $domainhosts), '/');
@@ -1006,9 +1245,8 @@ function activecronStatus()
         return ['status' => 'error', 'user' => null];
     }
 
-    $rxCronSecret = function_exists('faximaCronSecret') ? faximaCronSecret() : '';
     $cronCommands = [
-        "*/1 * * * * curl -s https://$domainhosts/cron/cron.php" . ($rxCronSecret !== '' ? '?secret=' . $rxCronSecret : '') . " >/dev/null 2>&1",
+        "*/1 * * * * curl -s https://$domainhosts/cron/cron.php >/dev/null 2>&1",
     ];
 
     return replaceCronJobsMatchingStatus(rxActivecronPattern($domainhosts), $cronCommands);
@@ -1597,4 +1835,78 @@ function CreatePaymentNv($invoice_id, $amount)
     $result = curl_exec($ch);
     curl_close($ch);
     return json_decode($result, true);
+}
+
+if (!function_exists('rx_sendTopicReport')) {
+    function rx_sendTopicReport(array $params, array $context = [])
+    {
+        $chatId = trim((string) ($params['chat_id'] ?? ''));
+        if ($chatId === '' || $chatId === '0') {
+            return false;
+        }
+        $params['chat_id'] = $chatId;
+        $maxAttempts = 3;
+        $maxRetryAfter = 5;
+        $timeBudget = 15.0;
+        $startedAt = microtime(true);
+        $plainFallbackUsed = false;
+        $response = null;
+        $errorCode = 0;
+        $description = '';
+        $retryAfter = 0;
+        $attempt = 0;
+        while ($attempt < $maxAttempts) {
+            $attempt++;
+            try {
+                $response = telegram('sendmessage', $params);
+            } catch (Throwable $e) {
+                $response = ['ok' => false, 'error_code' => 0, 'description' => $e->getMessage()];
+            }
+            if (is_array($response) && !empty($response['ok'])) {
+                return $response;
+            }
+            $errorCode = is_array($response) ? (int) ($response['error_code'] ?? 0) : 0;
+            $description = is_array($response) ? (string) ($response['description'] ?? '') : 'empty response';
+            $retryAfter = is_array($response) ? (int) ($response['parameters']['retry_after'] ?? 0) : 0;
+            if (!$plainFallbackUsed && !empty($params['parse_mode']) && stripos($description, "can't parse entities") !== false) {
+                $plainFallbackUsed = true;
+                $params['text'] = html_entity_decode(strip_tags((string) ($params['text'] ?? '')), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+                unset($params['parse_mode']);
+                continue;
+            }
+            $class = function_exists('rx_broadcast_classify') ? rx_broadcast_classify($response) : ['temporary' => false, 'manual' => true];
+            if (empty($class['temporary']) || !empty($class['manual']) || $attempt >= $maxAttempts) {
+                break;
+            }
+            $wait = $errorCode === 429 ? max(1, $retryAfter) : $attempt;
+            if ($wait > $maxRetryAfter || (microtime(true) - $startedAt + $wait) > $timeBudget) {
+                break;
+            }
+            sleep($wait);
+        }
+        $threadId = (string) ($params['message_thread_id'] ?? '');
+        $parameters = is_array($response) && isset($response['parameters']) ? $response['parameters'] : null;
+        $logContext = [
+            'status' => $errorCode,
+            'body' => $chatId . '|' . $threadId . '|' . implode('|', array_map('strval', array_filter($context, 'is_scalar'))),
+            'chat_id' => $chatId,
+            'message_thread_id' => $threadId,
+            'error_code' => $errorCode,
+            'description' => $description,
+            'retry_after' => $retryAfter,
+            'parameters' => $parameters !== null ? json_encode($parameters) : '',
+            'attempts' => $attempt,
+        ];
+        foreach ($context as $key => $value) {
+            if (is_scalar($value) && !isset($logContext[$key])) {
+                $logContext[$key] = $value;
+            }
+        }
+        if (function_exists('rx_log_event')) {
+            rx_log_event('TOPIC_REPORT_FAILED', 'Purchase report could not be delivered to the report topic', $logContext);
+        } else {
+            error_log('[TOPIC_REPORT_FAILED] ' . json_encode($logContext));
+        }
+        return false;
+    }
 }

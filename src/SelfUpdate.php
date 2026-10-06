@@ -579,27 +579,16 @@ class SelfUpdate
      */
     public static function runTemplatesOnly(int $timeoutSec = 600): array
     {
-        $probs = self::problems();
-        if ($probs !== []) return ['ok' => false, 'rc' => -1, 'out' => '', 'problems' => $probs];
-
-        $src = self::repoDir();
+        // --templates-only قبلاً از مسیر update.sh می‌گذشت که git reset --hard
+        // اجرا می‌کرد و بروزرسانی‌های templates/ را برمی‌گرداند. حالا مستقیم به
+        // همگام‌سازِ PHP واگذار می‌شود.
         $live = self::rootDir();
-        $bash = is_executable('/usr/bin/bash') ? '/usr/bin/bash' : (is_executable('/bin/bash') ? '/bin/bash' : 'bash');
-        $pathGuess = dirname(PHP_BINARY);
-
-        // متغیرهای محیطیِ جدا از proc_open داده می‌شوند تا هم در لینوکس کار کند
-        // و هم در ویندوز (که cmd.exe پیشوندِ VAR=x را نمی‌فهمد)
-        $env = getenv();
-        if (!is_array($env)) $env = [];
-        $env['PATH'] = $pathGuess . PATH_SEPARATOR . ($env['PATH'] ?? '');
-        $env['GIT_CONFIG_COUNT'] = '1';
-        $env['GIT_CONFIG_KEY_0'] = 'safe.directory';
-        // مسیرها با اسلش رو به جلو تا برای bash هم قابل فهم باشند (ویندوز/دِو)
-        $env['GIT_CONFIG_VALUE_0'] = str_replace('\\', '/', $src);
-        $env['BOTSAZ_LIVE_DIR'] = str_replace('\\', '/', $live);
-
-        $cmd = self::asOwnerPrefix($src) . $bash . ' tools/update.sh --templates-only 2>&1';
-        $res = self::runCmd($cmd, $src, $timeoutSec, $env);
+        $script = $live . '/tools/sync_templates.php';
+        if (!is_file($script)) {
+            return ['ok' => false, 'rc' => -1, 'out' => "sync_templates.php نیست", 'problems' => []];
+        }
+        $php = Manager::phpBinary();
+        $res = self::runCmd(escapeshellarg($php) . ' ' . escapeshellarg($script) . ' ' . (int)$timeoutSec . ' 2>&1', $live, $timeoutSec);
         $res['problems'] = [];
         return $res;
     }

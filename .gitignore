@@ -51,3 +51,8 @@ templates/Pasargad*/node_modules/
 
 # هیچ قالبی نباید .git داشته باشد (کلون تودرتو ⇒ فایل‌ها وارد ریپو نمی‌شوند)
 templates/**/.git/
+
+# همگام‌سازی قالب‌ها (خودکار می‌سازد؛ هرگز نباید در ریپو باشد)
+/data/tpl_repos/
+/data/template_sources.json
+/data/pending_update/

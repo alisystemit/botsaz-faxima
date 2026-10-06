@@ -230,15 +230,6 @@ function DirectPayment($order_id)
         $stmt->bindParam(':username', $steppay[1], PDO::PARAM_STR);
         $stmt->execute();
         $get_invoice = $stmt->fetch(PDO::FETCH_ASSOC);
-        if ($get_invoice === false || strtolower($get_invoice['status'] ?? $get_invoice['Status'] ?? '') !== 'unpaid') {
-            // فاکتور پرداخت یافت نشد یا منقضی شده است
-            sendmessage($Balance_id['id'], "❌ فاکتور پرداخت یافت نشد یا منقضی شده است", $keyboard, 'HTML');
-            foreach ($admin_ids as $admin) {
-                sendmessage($admin, "❌ فاکتور پرداخت یافت نشد یا منقضی شده است", null, 'HTML');
-                step('home', $admin);
-            }
-            return false;
-        }
         $username_ac = $get_invoice['username'];
         $randomString = bin2hex(random_bytes(2));
         $marzban_list_get = select("marzban_panel", "*", "name_panel", $get_invoice['Service_location'], "select");
@@ -291,7 +282,8 @@ function DirectPayment($order_id)
         $Shoppinginfo = json_encode($Shoppinginfo);
         if ($marzban_list_get['type'] == "wgdashboard") {
             $textcreatuser = sprintf($textbotlang['users']['buy']['createservicewgbuy'], $dataoutput['username'], $get_invoice['name_product'], $marzban_list_get['name_panel'], $get_invoice['Service_time'], $get_invoice['Volume']);
-        } elseif ($marzban_list_get['type'] == "mikrotik") {
+        }
+        if ($marzban_list_get['type'] == "mikrotik") {
             $textcreatuser = sprintf($textbotlang['users']['buy']['createservice_mikrotik_buy'], $dataoutput['username'], $dataoutput['subscription_url'], $get_invoice['name_product'], $marzban_list_get['name_panel'], $get_invoice['Service_time'], $get_invoice['Volume']);
         } else {
             $textcreatuser = sprintf($textbotlang['users']['buy']['createservice'], $dataoutput['username'], $get_invoice['name_product'], $marzban_list_get['name_panel'], $get_invoice['Service_time'], $get_invoice['Volume'], $config, $output_config_link);
@@ -362,7 +354,7 @@ function DirectPayment($order_id)
             $result = ($SellDiscountlimit['price'] / 100) * $get_invoice['price_product'];
             $pricediscount = $get_invoice['price_product'] - $result;
             $text_report = sprintf($textbotlang['users']['Report']['discountused'], $Balance_id['username'], $Balance_id['id'], $partsdic[1]);
-            if (strlen((string)$setting['Channel_Report']) > 0) {
+            if (strlen($setting['Channel_Report']) > 0) {
                 telegram('sendmessage', [
                     'chat_id' => $setting['Channel_Report'],
                     'text' => $text_report,
@@ -372,7 +364,7 @@ function DirectPayment($order_id)
             $pricediscount = null;
         }
         $affiliatescommission = select("affiliates", "*", null, null, "select");
-        if ($affiliatescommission['status_commission'] == "oncommission" && !empty($Balance_id['affiliates'])) {
+        if ($affiliatescommission['status_commission'] == "oncommission" && ($Balance_id['affiliates'] !== null || $Balance_id['affiliates'] != 0)) {
             if ($pricediscount == null) {
                 $result = ($get_invoice['price_product'] * $affiliatescommission['affiliatespercentage']) / 100;
             } else {
@@ -448,48 +440,23 @@ function sanitizeUserName($string)
 }
 function checktelegramip()
 {
-    // بازه‌های رسمی IPv4 تلگرام (بروزرسانی: https://core.telegram.org/bots/webhooks#ip-range-discovery)
+
     $telegram_ip_ranges = [
-        ['lower' => '149.154.160.0', 'upper' => '149.154.175.255'], // 149.154.160.0/20
-        ['lower' => '91.108.4.0',   'upper' => '91.108.7.255'],    // 91.108.4.0/22
-        ['lower' => '91.108.8.0',   'upper' => '91.108.11.255'],   // 91.108.8.0/22
-        ['lower' => '91.108.12.0',  'upper' => '91.108.15.255'],   // 91.108.12.0/22
-        ['lower' => '91.108.16.0',  'upper' => '91.108.19.255'],   // 91.108.16.0/22
-        ['lower' => '91.108.20.0',  'upper' => '91.108.23.255'],   // 91.108.20.0/22
-        ['lower' => '91.108.56.0',  'upper' => '91.108.59.255'],   // 91.108.56.0/22
-        ['lower' => '185.76.151.0', 'upper' => '185.76.151.255'],  // 185.76.151.0/24
+        ['lower' => '149.154.160.0', 'upper' => '149.154.175.255'],
+        ['lower' => '91.108.4.0', 'upper' => '91.108.7.255']
     ];
-    $remote = $_SERVER['REMOTE_ADDR'] ?? '';
-    if ($remote === '' || filter_var($remote, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) === false) {
-        return false;
-    }
-    $ip_dec = (float) sprintf("%u", ip2long($remote));
-    foreach ($telegram_ip_ranges as $telegram_ip_range) {
-        $lower_dec = (float) sprintf("%u", ip2long($telegram_ip_range['lower']));
-        $upper_dec = (float) sprintf("%u", ip2long($telegram_ip_range['upper']));
-        if ($ip_dec >= $lower_dec && $ip_dec <= $upper_dec) {
-            return true;
+    $ip_dec = (float) sprintf("%u", ip2long($_SERVER['REMOTE_ADDR']));
+    $ok = false;
+    foreach ($telegram_ip_ranges as $telegram_ip_range)
+        if (!$ok) {
+            $lower_dec = (float) sprintf("%u", ip2long($telegram_ip_range['lower']));
+            $upper_dec = (float) sprintf("%u", ip2long($telegram_ip_range['upper']));
+            if ($ip_dec >= $lower_dec and $ip_dec <= $upper_dec)
+                $ok = true;
         }
-    }
-    return false;
-}
-/** secret کرون میرزا — با templates/mirza/cron/_guard.php یکسان است */
-function mirzaCronSecret()
-{
-    global $APIKEY;
-    $token = (isset($APIKEY) && is_string($APIKEY)) ? $APIKEY : '';
-    return $token !== '' ? hash('sha256', $token . '_mirza_cron_secret') : '';
-}
+    return $ok;
 
-/** آدرس کامل اسکریپت کرون میرزا همراه secret (برای crontab / نمایش به ادمین) */
-function mirzaCronUrl($script)
-{
-    global $domainhosts;
-    $url = 'https://' . $domainhosts . '/cron/' . ltrim((string)$script, '/');
-    $secret = mirzaCronSecret();
-    return $secret !== '' ? $url . '?secret=' . $secret : $url;
 }
-
 function generateAuthStr($length = 10)
 {
     $characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';

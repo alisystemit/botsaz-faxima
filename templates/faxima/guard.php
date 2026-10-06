@@ -126,9 +126,25 @@ function guardDecodeResponse(array $response)
         } else {
             $message = $statusCode;
         }
+        if (is_array($decodedBody) && !empty($decodedBody['errors'])) {
+            $errors = $decodedBody['errors'];
+            $details = [];
+            if (is_array($errors)) {
+                foreach ($errors as $errorKey => $errorItem) {
+                    $itemText = is_scalar($errorItem) ? (string) $errorItem : json_encode($errorItem, JSON_UNESCAPED_UNICODE);
+                    $details[] = is_string($errorKey) ? $errorKey . ': ' . $itemText : $itemText;
+                }
+            } else {
+                $details[] = is_scalar($errors) ? (string) $errors : json_encode($errors, JSON_UNESCAPED_UNICODE);
+            }
+            if (!empty($details)) {
+                $message = trim((string) $message) . ' | ' . implode(' ; ', $details);
+            }
+        }
         return [
             'status' => false,
-            'msg' => $message
+            'msg' => $message,
+            'http_code' => (int) $statusCode
         ];
     }
 
@@ -470,14 +486,52 @@ function guardResolveServiceIds($namePanel, $serviceValue = null)
     ];
 }
 
+function guardNormalizeUsername($username)
+{
+    $username = strtolower(trim((string) $username));
+    $username = str_replace('-', '_', $username);
+    $username = preg_replace('/[^a-z0-9_]/', '_', $username);
+    if (strlen($username) > 30) {
+        $username = substr($username, 0, 30);
+    }
+    if (strlen($username) < 3) {
+        $username = str_pad($username, 3, '_');
+    }
+    return $username;
+}
+
+function guardDisplayUsername($username, $panel)
+{
+    $username = (string) $username;
+    if ($username === '') {
+        return $username;
+    }
+    if (!is_array($panel)) {
+        $namePanel = trim((string) $panel);
+        if ($namePanel === '' || !function_exists('select')) {
+            return $username;
+        }
+        $panel = select("marzban_panel", "*", "name_panel", $namePanel, "select");
+    }
+    if (is_array($panel) && ($panel['type'] ?? null) === 'guard') {
+        return guardNormalizeUsername($username);
+    }
+    return $username;
+}
+
+function guardNormalizeUsernames(array $usernames)
+{
+    return array_values(array_map('guardNormalizeUsername', $usernames));
+}
+
 function guardAdaptSubscriptionPayloadForVersion(array $subscription, string $version)
 {
-    if ($version !== 'v2') {
-        return $subscription;
-    }
     if (array_key_exists('service_ids', $subscription)) {
         $subscription['services'] = $subscription['service_ids'];
         unset($subscription['service_ids']);
+    }
+    if ($version !== 'v2') {
+        return $subscription;
     }
     unset($subscription['discord_webhook_url'], $subscription['auto_delete_days'], $subscription['auto_renewals']);
     return $subscription;
@@ -495,6 +549,9 @@ function guardCreateSubscription($namePanel, array $payload)
     }
 
     foreach ($payload as &$subscription) {
+        if (isset($subscription['username'])) {
+            $subscription['username'] = guardNormalizeUsername($subscription['username']);
+        }
         if (isset($subscription['limit_expire'])) {
             $limitExpire = $subscription['limit_expire'];
             if (is_numeric($limitExpire)) {
@@ -522,6 +579,21 @@ function guardCreateSubscription($namePanel, array $payload)
         }
 
         $subscription = guardAdaptSubscriptionPayloadForVersion($subscription, guardVersionOf($config));
+
+        $subscription['services'] = array_values(array_map('intval', (array) ($subscription['services'] ?? [])));
+        foreach (['limit_usage', 'limit_expire'] as $intField) {
+            if (isset($subscription[$intField]) && is_numeric($subscription[$intField])) {
+                $subscription[$intField] = (int) $subscription[$intField];
+            }
+        }
+        if (isset($subscription['telegram_id'])) {
+            $subscription['telegram_id'] = trim((string) $subscription['telegram_id']);
+        }
+        foreach ($subscription as $fieldKey => $fieldValue) {
+            if ($fieldValue === null || ($fieldKey === 'telegram_id' && $fieldValue === '')) {
+                unset($subscription[$fieldKey]);
+            }
+        }
     }
     unset($subscription);
 
@@ -543,6 +615,10 @@ function guardUpdateSubscription($namePanel, string $username, array $payload)
     $config = getGuardPanelConfig($namePanel);
     if ($config['status'] === false) {
         return $config;
+    }
+    $username = guardNormalizeUsername($username);
+    if (isset($payload['username'])) {
+        $payload['username'] = guardNormalizeUsername($payload['username']);
     }
     if (guardVersionOf($config) === 'v2') {
         $bulkPayload = guardAdaptSubscriptionPayloadForVersion($payload, 'v2');
@@ -570,6 +646,7 @@ function guardDeleteSubscriptions($namePanel, array $usernames)
     if ($config['status'] === false) {
         return $config;
     }
+    $usernames = guardNormalizeUsernames($usernames);
     $response = guardApiRequest($config, 'DELETE', '/api/subscriptions', ['usernames' => $usernames]);
     return guardDecodeResponse($response);
 }
@@ -580,6 +657,7 @@ function guardGetSubscription($namePanel, string $username)
     if ($config['status'] === false) {
         return $config;
     }
+    $username = guardNormalizeUsername($username);
 
     if (guardVersionOf($config) === 'v2') {
         $query = http_build_query(['usernames' => $username, 'limit' => 1]);
@@ -618,6 +696,7 @@ function guardGetSubscriptionUsages($namePanel, string $username)
     if ($config['status'] === false) {
         return $config;
     }
+    $username = guardNormalizeUsername($username);
     $encodedUsername = urlencode($username);
     if (guardVersionOf($config) === 'v2') {
         $response = guardApiRequest($config, 'GET', "/api/subscriptions/{$encodedUsername}/hourly-usage");
@@ -633,6 +712,7 @@ function guardGetSubscriptionLinks($namePanel, string $username)
     if ($config['status'] === false) {
         return $config;
     }
+    $username = guardNormalizeUsername($username);
     if (guardVersionOf($config) !== 'v2') {
         return [
             'status' => false,
@@ -650,6 +730,7 @@ function guardToggleSubscriptions($namePanel, array $usernames, string $action)
     if ($config['status'] === false) {
         return $config;
     }
+    $usernames = guardNormalizeUsernames($usernames);
     $endpoint = $action === "disable" ? '/api/subscriptions/disable' : '/api/subscriptions/enable';
     $response = guardApiRequest($config, 'POST', $endpoint, ['usernames' => $usernames]);
     return guardDecodeResponse($response);
@@ -661,6 +742,7 @@ function guardResetSubscriptions($namePanel, array $usernames)
     if ($config['status'] === false) {
         return $config;
     }
+    $usernames = guardNormalizeUsernames($usernames);
     $response = guardApiRequest($config, 'POST', '/api/subscriptions/reset', ['usernames' => $usernames]);
     return guardDecodeResponse($response);
 }
@@ -671,6 +753,7 @@ function guardRevokeSubscriptions($namePanel, array $usernames)
     if ($config['status'] === false) {
         return $config;
     }
+    $usernames = guardNormalizeUsernames($usernames);
     $response = guardApiRequest($config, 'POST', '/api/subscriptions/revoke', ['usernames' => $usernames]);
     return guardDecodeResponse($response);
 }

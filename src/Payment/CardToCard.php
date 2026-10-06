@@ -2,6 +2,8 @@
 // ===== ماژول کارت‌به‌کارت (تأیید دستی توسط ادمین) =====
 // ادمین شماره کارت را ست می‌کند؛ کاربر فیش/رسید می‌فرستد؛ ادمین تأیید/رد می‌کند.
 
+require_once __DIR__ . '/../Ui.php';
+
 class PaymentCard
 {
     public static function getCardNumber(Store $store): string
@@ -48,17 +50,23 @@ class PaymentCard
     {
         $num = self::getCardNumber($store);
         $owner = self::getCardOwner($store);
-        $t = "💳 <b>پرداخت کارت‌به‌کارت</b>\n\nمبلغ: <b>" . number_format($amountToman) . " تومان</b>\n";
-        if ($orderRef !== '') $t .= "شماره پیگیری داخلی: <code>" . htmlspecialchars($orderRef) . "</code>\n";
-        $t .= "شماره کارت:\n<code>" . htmlspecialchars($num !== '' ? $num : 'تنظیم نشده — با ادمین در میان بگذارید') . "</code>\n";
-        if ($owner !== '') $t .= "به نام: " . htmlspecialchars($owner) . "\n";
+        $t = "💳 <b>پرداخت کارت‌به‌کارت</b>\n\n";
+        $t .= Ui::kv('💰', 'مبلغ', Ui::toman($amountToman)) . "\n";
+        if ($orderRef !== '') $t .= Ui::kv('🔢', 'شماره پیگیری داخلی', (string)$orderRef, true) . "\n";
+        $t .= "\n🏦 <b>اطلاعات کارت</b>\n";
+        $t .= Ui::kv('🔢', 'شماره کارت', $num !== '' ? $num : 'تنظیم نشده — با ادمین در میان بگذارید', true) . "\n";
+        if ($owner !== '') $t .= Ui::kv('👤', 'به نام', $owner) . "\n";
         $note = PaymentGateways::note($store, PaymentGateways::CARD, [
             'amount' => number_format($amountToman) . ' تومان',
             'slots' => '۱',
         ]);
         if ($note !== '') $t .= "\n" . $note . "\n";
-        $t .= "\nبعد از واریز، فیش (عکس) یا شماره پیگیری را همین‌جا بفرستید تا ادمین بررسی کند.";
-        return $t;
+        $t .= "\n" . Ui::sep() . "\n";
+        $t .= "📸 <b>مرحلهٔ بعد</b>\n"
+            . Ui::bullet('1️⃣', 'به همان اندازه واریز کنید.')
+            . "\n" . Ui::bullet('2️⃣', 'عکس فیش یا شمارهٔ پیگیری را همین‌جا بفرستید.')
+            . "\n" . Ui::bullet('3️⃣', 'ادمین بررسی می‌کند و به شما اطلاع می‌دهد.');
+        return Ui::out($t);
     }
 
     /** اعتبارسنجی ورودی رسید: عکس/فایل همیشه قبول؛ متن حداقل 4 کاراکتر */

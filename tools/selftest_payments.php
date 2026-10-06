@@ -195,7 +195,7 @@ $shopKb = PaymentPanel::limitShopKb($store);
 check('کیبورد فروشگاه شامل خرید اسلات', str_contains($shopKb, 'pay:buy:limit:1'));
 check('کیبورد فروشگاه شامل خرید قالب', str_contains($shopKb, 'pay:buy:template:faxima'));
 check('کیبورد فروشگاه دکمهٔ برگشت دارد', str_contains($shopKb, Nav::CB_BACK_MAIN));
-check('متن فروشگاه ساخته شد', str_contains(PaymentPanel::limitShopText($store, $user, $supers), 'افزایش لیمیت'));
+check('متن فروشگاه ساخته شد', str_contains(PaymentPanel::limitShopText($store, $user, $supers), 'فروشگاه ساخت ربات'));
 check('متن پرداخت‌های من ساخته شد', str_contains(PaymentPanel::myPaymentsText($store, $uid), 'پرداخت'));
 
 // Nav: برگشت مرحله‌های پرداخت

@@ -75,7 +75,7 @@ function logApiRequest($headers, $data, $action)
             "INSERT IGNORE INTO logs_api (header, data, time, ip, actions) VALUES (?, ?, ?, ?, ?)"
         );
         $stmt->execute([
-            json_encode($headers),
+            json_encode(FaoximaApiCredential::redactHeaders($headers)),
             json_encode($data),
             date('Y/m/d H:i:s'),
             $_SERVER['REMOTE_ADDR'] ?? 'unknown',
@@ -509,6 +509,9 @@ switch ($data['actions'] ?? '') {
         $stmt->bindValue(':user_id', intval($data['chat_id']), PDO::PARAM_INT);
         $stmt->bindValue(':limit_test', intval($data['limit_test']), PDO::PARAM_INT);
         $stmt->execute();
+        if (function_exists('rx_test_override_set')) {
+            rx_test_override_set((string) intval($data['chat_id']), (string) max(0, intval($data['limit_test'])), 'api');
+        }
         sendJsonResponse(true, "Successful");
         break;
     case 'transfer_account':

@@ -118,6 +118,63 @@ foreach (Manager::templates() as $tplKey => $tplSpec) {
     }
 }
 
+// ===== ۲.۱. بررسی endpointهای پرداخت و فایل‌های هسته =====
+echo "[2.1] بررسی endpointهای پرداخت...\n";
+foreach (['Ui.php', 'BuildSettings.php', 'FxRate.php'] as $core) {
+    if (is_file(__DIR__ . '/../src/' . $core)) $ok[] = "Core module src/{$core}";
+    else $errors[] = "src/{$core} missing — git pull";
+}
+foreach (['nowpayments_ipn.php', 'zarinpal_ipn.php', 'aqayepardakht_ipn.php'] as $ipn) {
+    if (is_file(__DIR__ . '/../' . $ipn)) $ok[] = "Callback endpoint {$ipn}";
+    else $errors[] = "{$ipn} missing — callbacks will 404 (git pull)";
+}
+
+// ===== ۲.۲. بررسی درگاه‌های پرداخت =====
+echo "[2.2] بررسی درگاه‌های پرداخت...\n";
+try {
+    require_once __DIR__ . '/../src/Payment/Payments.php';
+    require_once __DIR__ . '/../src/Payment/Gateways.php';
+    require_once __DIR__ . '/../src/Payment/Limits.php';
+    require_once __DIR__ . '/../src/Payment/Pricing.php';
+    require_once __DIR__ . '/../src/Payment/CardToCard.php';
+    require_once __DIR__ . '/../src/Payment/NowPayments.php';
+    require_once __DIR__ . '/../src/Payment/ZarinPal.php';
+    require_once __DIR__ . '/../src/Payment/AqaPay.php';
+    require_once __DIR__ . '/../src/FxRate.php';
+    Payments::ensureSchema($store);
+
+    $base = rtrim((string)($cfg['base_url'] ?? ''), '/');
+    if ($base === '') {
+        $warnings[] = "base_url خالی است — فاکتورهای آنلاین ساخته نمی‌شوند";
+    } else {
+        // آدرس بازگشتِ هر درگاه باید دقیقاً همان چیزی باشد که به سرویس داده می‌شود
+        foreach ([
+            'NOWPayments'    => '/nowpayments_ipn.php',
+            'زرین‌پال'       => '/zarinpal_ipn.php',
+            'آقای پرداخت'   => '/aqayepardakht_ipn.php',
+        ] as $name => $path) {
+            if (strpos($base, 'https://') !== 0) {
+                $warnings[] = "base_url ({$base}) https نیست — {$name} فاکتور نمی‌سازد";
+                break;
+            }
+        }
+    }
+
+    if (PaymentGateways::isEnabled($store, PaymentGateways::ZARIN)
+        && !PaymentZarin::hasMerchantId($store, $cfg)) {
+        $warnings[] = "درگاه زرین‌پال روشن است ولی کد پذیرنده ثبت نشده — کاربر روش پرداخت نمی‌بیند";
+    }
+    if (PaymentGateways::isEnabled($store, PaymentGateways::AQAYE)
+        && !PaymentAqaye::hasPin($store, $cfg)) {
+        $warnings[] = "درگاه آقای پرداخت روشن است ولی کد پین ثبت نشده — کاربر روش پرداخت نمی‌بیند";
+    }
+    $ok[] = 'Payment schema ok (gateways: ' . implode(', ', PaymentGateways::keys()) . ')';
+    $ok[] = 'USD rate: ' . number_format(FxRate::stored($store)) . ' Toman'
+        . (FxRate::source($store) !== '' ? ' (' . FxRate::source($store) . ')' : '');
+} catch (Throwable $e) {
+    $warnings[] = "بررسی درگاه‌های پرداخت ناتمام ماند: " . $e->getMessage();
+}
+
 // ===== ۳. بررسی دیتابیس =====
 echo "[3] بررسی دیتابیس...\n";
 try {

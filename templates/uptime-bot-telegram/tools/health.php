@@ -1,4 +1,5 @@
 <?php
+<?php
 /**
  * ===== چک سلامت سیستم (System Health Check) =====
  * اجرای: php tools/health.php [--json] [--full]

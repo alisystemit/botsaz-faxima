@@ -553,6 +553,544 @@ function rxRenderPremiumEmojiPanel($from_id, $page = 1) {
         }
     }
 }
+
+function rxPremiumEmojiInputSteps() {
+    return ['premium_emoji_get_char', 'premium_emoji_get_id', 'premium_emoji_edit_id'];
+}
+
+function rxPremiumEmojiCancelKind($text, $datain) {
+    global $textbotlang;
+    $cb = is_string($datain) ? trim($datain) : '';
+    if ($cb !== '') {
+        if (in_array($cb, ['adm_hub_main', 'backadmin', 'admin'], true)) {
+            return 'admin';
+        }
+        if (in_array($cb, ['backmenu', 'adm_backmenu', 'premium_emoji_settings'], true)
+            || preg_match('/^premium_emoji_settings_\d+$/', $cb)) {
+            return 'panel';
+        }
+        return 'leave';
+    }
+    $raw = is_string($text) ? trim($text) : '';
+    if ($raw === '') {
+        return null;
+    }
+    $backAdmin = (string)($textbotlang['Admin']['backadmin'] ?? '🏠 بازگشت به منوی مدیریت');
+    $backMenu  = (string)($textbotlang['Admin']['backmenu'] ?? '▶️ بازگشت به منوی قبل');
+    if ($raw === $backAdmin) {
+        return 'admin';
+    }
+    if ($raw === $backMenu) {
+        return 'panel';
+    }
+    $clean = function_exists('rx_cleanEmojiAndSymbols') ? rx_cleanEmojiAndSymbols($raw) : mb_strtolower($raw, 'UTF-8');
+    if ($clean === '') {
+        return null;
+    }
+    if (in_array($clean, [
+        'بازگشت به منوی مدیریت', 'بازگشت به منوی اصلی', 'بازگشت به منو اصلی', 'بازگشت به خانه',
+        'بازگشت به ادمین', 'بازگشت به پنل مدیریت', 'بازگشت به پنل ادمین', 'منوی مدیریت', 'منوی اصلی', 'خانه',
+    ], true)) {
+        return 'admin';
+    }
+    if (in_array($clean, [
+        'لغو', 'انصراف', 'بازگشت', 'بازگشت به منوی قبل', 'بازگشت به منو قبل', 'بازگشت به قبل', 'منوی قبل', 'منو قبل',
+        'cancel', '/cancel', 'back',
+    ], true)) {
+        return 'panel';
+    }
+    return null;
+}
+
+function rxPremiumEmojiResetState($from_id) {
+    if (function_exists('update')) {
+        update("user", "Processing_value", "0", "id", $from_id);
+    }
+    if (function_exists('step')) {
+        step('home', $from_id);
+    }
+}
+
+function rxPremiumEmojiIsValidBase($value) {
+    if (!is_string($value)) {
+        return false;
+    }
+    $value = trim($value);
+    if ($value === '' || mb_strlen($value, 'UTF-8') > 16) {
+        return false;
+    }
+    if (preg_match('/[\s\x{00A0}\x{2000}-\x{200B}\x{2028}\x{2029}\x{3000}]/u', $value)) {
+        return false;
+    }
+    if (preg_match('/\p{L}/u', $value)) {
+        return false;
+    }
+    if (function_exists('isValidPremiumEmojiSource') && !isValidPremiumEmojiSource($value)) {
+        return false;
+    }
+    return (bool) preg_match('/[\x{1F000}-\x{1FAFF}\x{2190}-\x{21FF}\x{2300}-\x{23FF}\x{25A0}-\x{27BF}\x{2900}-\x{297F}\x{2B00}-\x{2BFF}\x{3030}\x{303D}\x{3297}\x{3299}\x{203C}\x{2049}\x{2122}\x{2139}\x{20E3}]/u', $value);
+}
+
+function rxPremiumEmojiExtractCustomId(array $message) {
+    $fromEntities = function ($entities) {
+        if (!is_array($entities)) {
+            return '';
+        }
+        foreach ($entities as $ent) {
+            if (is_array($ent) && ($ent['type'] ?? '') === 'custom_emoji' && !empty($ent['custom_emoji_id'])) {
+                $cid = trim((string)$ent['custom_emoji_id']);
+                if ($cid !== '' && ctype_digit($cid) && strlen($cid) <= 30) {
+                    return $cid;
+                }
+            }
+        }
+        return '';
+    };
+    $fromSticker = function ($sticker) {
+        if (is_array($sticker) && ($sticker['type'] ?? '') === 'custom_emoji' && !empty($sticker['custom_emoji_id'])) {
+            $cid = trim((string)$sticker['custom_emoji_id']);
+            if ($cid !== '' && ctype_digit($cid) && strlen($cid) <= 30) {
+                return $cid;
+            }
+        }
+        return '';
+    };
+
+    $cid = $fromEntities($message['entities'] ?? null);
+    if ($cid === '') {
+        $cid = $fromEntities($message['caption_entities'] ?? null);
+    }
+    if ($cid === '') {
+        $cid = $fromSticker($message['sticker'] ?? null);
+    }
+    if ($cid === '') {
+        $reply = $message['reply_to_message'] ?? null;
+        if (is_array($reply)) {
+            $cid = $fromEntities($reply['entities'] ?? null);
+            if ($cid === '') {
+                $cid = $fromEntities($reply['caption_entities'] ?? null);
+            }
+            if ($cid === '') {
+                $cid = $fromSticker($reply['sticker'] ?? null);
+            }
+        }
+    }
+    if ($cid === '') {
+        $candidate = trim((string)($message['text'] ?? $message['caption'] ?? ''));
+        if ($candidate !== '' && ctype_digit($candidate) && strlen($candidate) >= 8 && strlen($candidate) <= 30) {
+            $cid = $candidate;
+        }
+    }
+    return $cid;
+}
+
+function rxPremiumEmojiIsDuplicateError($e) {
+    if ($e instanceof PDOException) {
+        $info = $e->errorInfo;
+        if (is_array($info) && isset($info[1]) && (int)$info[1] === 1062) {
+            return true;
+        }
+    }
+    $msg = (string)$e->getMessage();
+    return stripos($msg, 'Duplicate') !== false || strpos($msg, '1062') !== false;
+}
+
+function rxStartMediaWaitingStep() {
+    return 'start_media_waiting';
+}
+
+function rxStartMediaCallbacks() {
+    return [
+        'stmedia_menu', 'stmedia_banner_off', 'stmedia_settings', 'stmedia_toggle', 'stmedia_set',
+        'stmedia_cancel', 'stmedia_type', 'stmedia_preview', 'stmedia_delete', 'stmedia_delete_yes',
+    ];
+}
+
+function rxStartMediaColumns() {
+    return [
+        'start_media_status' => "VARCHAR(20) NULL DEFAULT '0'",
+        'start_media_type' => "VARCHAR(32) NULL DEFAULT ''",
+        'start_media_file_id' => "VARCHAR(512) NULL DEFAULT ''",
+        'start_media_text' => "VARCHAR(255) NULL DEFAULT ''",
+        'start_media_entities' => "TEXT NULL",
+    ];
+}
+
+function rxStartMediaEnsureSchema() {
+    global $pdo;
+    static $schemaReady = null;
+    if ($schemaReady !== null) {
+        return $schemaReady;
+    }
+    if (!($pdo instanceof PDO)) {
+        return $schemaReady = false;
+    }
+    try {
+        $stmt = $pdo->prepare("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'setting'");
+        $stmt->execute();
+        $existingColumns = array_map('strtolower', $stmt->fetchAll(PDO::FETCH_COLUMN) ?: []);
+        if (empty($existingColumns)) {
+            return $schemaReady = false;
+        }
+        foreach (rxStartMediaColumns() as $columnName => $columnDefinition) {
+            if (!in_array(strtolower($columnName), $existingColumns, true)) {
+                $pdo->exec("ALTER TABLE setting ADD `{$columnName}` {$columnDefinition}");
+            }
+        }
+        return $schemaReady = true;
+    } catch (\Throwable $schemaError) {
+        rx_start_media_log('schema ensure failed: ' . $schemaError->getMessage());
+        return $schemaReady = false;
+    }
+}
+
+function rxStartMediaReloadSetting() {
+    global $setting;
+    $freshSetting = select("setting", "*", null, null, "select", ['cache' => false]);
+    if (is_array($freshSetting)) {
+        $setting = $freshSetting;
+    }
+    return is_array($setting) ? $setting : [];
+}
+
+function rxStartMediaWrite($sql, array $params = []) {
+    global $pdo;
+    if (!($pdo instanceof PDO)) {
+        return false;
+    }
+    try {
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute($params);
+        return true;
+    } catch (\Throwable $writeError) {
+        rx_start_media_log('write failed: ' . $writeError->getMessage());
+        return false;
+    }
+}
+
+function rxStartMediaTypeLabel($type) {
+    $labels = [
+        'sticker' => "🖼 استیکر معمولی",
+        'animation' => "🎞 گیف / انیمیشن",
+        'emoji' => "😀 ایموجی معمولی",
+        'custom_emoji' => "🌟 ایموجی پرمیوم",
+    ];
+    return $labels[(string) $type] ?? "— تنظیم نشده";
+}
+
+function rxStartMediaAnswer($toast = null, $showAlert = false) {
+    global $callback_query_id;
+    if (empty($callback_query_id)) {
+        return;
+    }
+    $payload = ['callback_query_id' => $callback_query_id, 'cache_time' => 0];
+    if (is_string($toast) && $toast !== '') {
+        $payload['text'] = $toast;
+        $payload['show_alert'] = (bool) $showAlert;
+    }
+    try {
+        telegram('answerCallbackQuery', $payload);
+    } catch (\Throwable $answerError) {
+    }
+}
+
+function rxStartMediaShow($from_id, $text, array $inlineRows, $editInPlace) {
+    global $message_id;
+    $keyboard = json_encode(['inline_keyboard' => $inlineRows], JSON_UNESCAPED_UNICODE);
+    if ($editInPlace && !empty($message_id)) {
+        $editResult = Editmessagetext($from_id, $message_id, $text, $keyboard, 'HTML');
+        if (is_array($editResult) && (!empty($editResult['ok']) || stripos((string)($editResult['description'] ?? ''), 'message is not modified') !== false)) {
+            return $editResult;
+        }
+    }
+    return sendmessage($from_id, $text, $keyboard, 'HTML');
+}
+
+function rxStartMediaStatusText($isOn) {
+    global $textbotlang;
+    return $isOn
+        ? (string)($textbotlang['Admin']['Status']['statuson'] ?? '✅ روشن')
+        : (string)($textbotlang['Admin']['Status']['statusoff'] ?? '❌ خاموش');
+}
+
+function rxStartMediaRenderMenu($from_id, $editInPlace = true) {
+    $settingRow = rxStartMediaReloadSetting();
+    $bannerOn = (string)($settingRow['banner_start_status'] ?? '0') === '1';
+    $mediaOn = rx_start_media_is_enabled($settingRow);
+    $storedConfig = rx_start_media_stored_config($settingRow);
+    $text = "🎭 <b>ارسال استیکر در استارت</b>\n\n"
+        . "📌 <b>وضعیت فعلی:</b>\n"
+        . "• بنر استارت: " . rxStartMediaStatusText($bannerOn) . "\n"
+        . "• ارسال خودکار رسانه: " . rxStartMediaStatusText($mediaOn) . "\n"
+        . "• رسانه تنظیم‌شده: " . rxStartMediaTypeLabel($storedConfig['type'] ?? '') . "\n\n"
+        . "💡 بنر استارت و رسانه خودکار هم‌زمان فعال نمی‌شوند؛ با روشن کردن ارسال رسانه، بنر استارت به‌صورت خودکار خاموش می‌شود.";
+    $bannerButton = $bannerOn
+        ? "🖼 غیرفعال‌سازی بنر استارت (اکنون روشن)"
+        : "🖼 بنر استارت غیرفعال است";
+    $rows = [
+        [['text' => $bannerButton, 'callback_data' => 'stmedia_banner_off']],
+        [['text' => "⚙️ تنظیمات ارسال استیکر", 'callback_data' => 'stmedia_settings']],
+        [['text' => "🔙 بازگشت", 'callback_data' => 'featcat_bot']],
+    ];
+    return rxStartMediaShow($from_id, $text, $rows, $editInPlace);
+}
+
+function rxStartMediaRenderSettings($from_id, $editInPlace = true, $headline = '') {
+    $settingRow = rxStartMediaReloadSetting();
+    $mediaOn = rx_start_media_is_enabled($settingRow);
+    $storedConfig = rx_start_media_stored_config($settingRow);
+    $typeLabel = rxStartMediaTypeLabel($storedConfig['type'] ?? '');
+    $text = ($headline !== '' ? $headline . "\n\n" : '')
+        . "⚙️ <b>تنظیمات ارسال استیکر</b>\n\n"
+        . "• ارسال خودکار در /start: " . rxStartMediaStatusText($mediaOn) . "\n"
+        . "• نوع رسانه فعلی: " . $typeLabel . "\n";
+    if ($storedConfig !== null && in_array($storedConfig['type'], ['emoji', 'custom_emoji'], true)) {
+        $text .= "• ایموجی پایه: " . htmlspecialchars($storedConfig['text'], ENT_QUOTES, 'UTF-8') . "\n";
+    }
+    $text .= "\n📥 انواع قابل قبول: استیکر معمولی، ایموجی پرمیوم، ایموجی معمولی، گیف (انیمیشن تلگرام).\n"
+        . "رسانه قبل از پیام خوش‌آمد /start به‌صورت یک پیام جداگانه ارسال می‌شود.";
+    $rows = [
+        [['text' => ($mediaOn ? "✅ ارسال خودکار: روشن" : "❌ ارسال خودکار: خاموش"), 'callback_data' => 'stmedia_toggle']],
+        [['text' => ($storedConfig === null ? "📤 تنظیم رسانه" : "📤 جایگزینی رسانه"), 'callback_data' => 'stmedia_set']],
+        [['text' => "🏷 نوع: " . $typeLabel, 'callback_data' => 'stmedia_type']],
+        [['text' => "👁 پیش‌نمایش", 'callback_data' => 'stmedia_preview'],
+         ['text' => "🗑 حذف رسانه", 'callback_data' => 'stmedia_delete']],
+        [['text' => "🔙 بازگشت", 'callback_data' => 'stmedia_menu']],
+    ];
+    return rxStartMediaShow($from_id, $text, $rows, $editInPlace);
+}
+
+function rxStartMediaSetStep(&$user, $from_id, $stepName) {
+    step($stepName, $from_id);
+    if (is_array($user)) {
+        $user['step'] = $stepName;
+    }
+}
+
+function rxStartMediaHandleCallback($from_id, $callbackName, &$user) {
+    if (!rxStartMediaEnsureSchema()) {
+        rxStartMediaAnswer("⚠️ ساختار پایگاه داده برای این بخش آماده نیست. لطفاً به‌روزرسانی جداول (table.php) را اجرا کنید.", true);
+        return;
+    }
+    if ((string)($user['step'] ?? '') === rxStartMediaWaitingStep() && $callbackName !== 'stmedia_set') {
+        rxStartMediaSetStep($user, $from_id, 'home');
+    }
+    $settingRow = rxStartMediaReloadSetting();
+
+    if ($callbackName === 'stmedia_menu') {
+        rxStartMediaAnswer();
+        rxStartMediaRenderMenu($from_id);
+        return;
+    }
+    if ($callbackName === 'stmedia_settings') {
+        rxStartMediaAnswer();
+        rxStartMediaRenderSettings($from_id);
+        return;
+    }
+    if ($callbackName === 'stmedia_banner_off') {
+        if ((string)($settingRow['banner_start_status'] ?? '0') !== '1') {
+            rxStartMediaAnswer("ℹ️ بنر استارت از قبل غیرفعال است.", true);
+            rxStartMediaRenderMenu($from_id);
+            return;
+        }
+        if (!rxStartMediaWrite("UPDATE setting SET banner_start_status = '0'")) {
+            rxStartMediaAnswer("❌ غیرفعال‌سازی بنر ناموفق بود. لطفاً دوباره تلاش کنید.", true);
+            return;
+        }
+        rxStartMediaAnswer("✅ بنر استارت غیرفعال شد.");
+        rxStartMediaRenderMenu($from_id);
+        return;
+    }
+    if ($callbackName === 'stmedia_toggle') {
+        if (rx_start_media_is_enabled($settingRow)) {
+            if (!rxStartMediaWrite("UPDATE setting SET start_media_status = '0'")) {
+                rxStartMediaAnswer("❌ ذخیره تغییرات ناموفق بود.", true);
+                return;
+            }
+            rxStartMediaAnswer("❌ ارسال خودکار رسانه خاموش شد.");
+            rxStartMediaRenderSettings($from_id);
+            return;
+        }
+        if (rx_start_media_stored_config($settingRow) === null) {
+            rxStartMediaAnswer("⚠️ ابتدا یک رسانه معتبر تنظیم کنید.", true);
+            return;
+        }
+        $bannerWasOn = (string)($settingRow['banner_start_status'] ?? '0') === '1';
+        if (!rxStartMediaWrite("UPDATE setting SET start_media_status = '1', banner_start_status = '0'")) {
+            rxStartMediaAnswer("❌ فعال‌سازی ناموفق بود؛ هیچ تغییری اعمال نشد.", true);
+            return;
+        }
+        rxStartMediaAnswer($bannerWasOn
+            ? "✅ ارسال خودکار رسانه روشن شد و بنر استارت به‌صورت خودکار غیرفعال شد."
+            : "✅ ارسال خودکار رسانه روشن شد.", $bannerWasOn);
+        rxStartMediaRenderSettings($from_id);
+        return;
+    }
+    if ($callbackName === 'stmedia_set') {
+        rxStartMediaSetStep($user, $from_id, rxStartMediaWaitingStep());
+        rxStartMediaAnswer();
+        rxStartMediaShow($from_id,
+            "📤 <b>تنظیم رسانه استارت</b>\n\n"
+            . "یکی از موارد زیر را ارسال کنید:\n"
+            . "• استیکر معمولی\n"
+            . "• ایموجی پرمیوم\n"
+            . "• ایموجی معمولی (فقط ایموجی، بدون متن)\n"
+            . "• گیف / انیمیشن تلگرام\n\n"
+            . "ℹ️ تا زمانی که رسانه معتبری دریافت نشود، رسانه فعلی تغییر نمی‌کند.",
+            [[['text' => "🔙 لغو", 'callback_data' => 'stmedia_cancel']]],
+            true
+        );
+        return;
+    }
+    if ($callbackName === 'stmedia_cancel') {
+        rxStartMediaAnswer("لغو شد.");
+        rxStartMediaRenderSettings($from_id);
+        return;
+    }
+    if ($callbackName === 'stmedia_type') {
+        $storedConfig = rx_start_media_stored_config($settingRow);
+        rxStartMediaAnswer("نوع رسانه فعلی: " . rxStartMediaTypeLabel($storedConfig['type'] ?? ''), true);
+        return;
+    }
+    if ($callbackName === 'stmedia_preview') {
+        $storedConfig = rx_start_media_stored_config($settingRow);
+        if ($storedConfig === null) {
+            rxStartMediaAnswer("⚠️ هیچ رسانه معتبری تنظیم نشده است.", true);
+            return;
+        }
+        rxStartMediaAnswer();
+        global $message_id;
+        if (!empty($message_id)) {
+            deletemessage($from_id, $message_id);
+        }
+        $previewResult = rx_start_media_dispatch($from_id, $storedConfig);
+        $headline = '';
+        if (!is_array($previewResult) || empty($previewResult['ok'])) {
+            rx_start_media_log('preview ' . $storedConfig['type'] . ' failed: ' . (is_array($previewResult) ? (string)($previewResult['description'] ?? 'unknown error') : 'no response'));
+            $headline = "❌ ارسال پیش‌نمایش ناموفق بود؛ ممکن است رسانه ذخیره‌شده دیگر معتبر نباشد. لطفاً رسانه را دوباره تنظیم کنید.";
+        } else {
+            $headline = "👆 پیش‌نمایش رسانه استارت";
+        }
+        rxStartMediaRenderSettings($from_id, false, $headline);
+        return;
+    }
+    if ($callbackName === 'stmedia_delete') {
+        if (rx_start_media_stored_config($settingRow) === null && trim((string)($settingRow['start_media_type'] ?? '')) === '') {
+            rxStartMediaAnswer("ℹ️ رسانه‌ای برای حذف وجود ندارد.", true);
+            return;
+        }
+        rxStartMediaAnswer();
+        rxStartMediaShow($from_id,
+            "🗑 <b>حذف رسانه استارت</b>\n\nآیا مطمئن هستید؟ با حذف رسانه، ارسال خودکار نیز خاموش می‌شود.",
+            [[['text' => "✅ بله، حذف شود", 'callback_data' => 'stmedia_delete_yes'],
+              ['text' => "❌ خیر", 'callback_data' => 'stmedia_settings']]],
+            true
+        );
+        return;
+    }
+    if ($callbackName === 'stmedia_delete_yes') {
+        if (!rxStartMediaWrite("UPDATE setting SET start_media_status = '0', start_media_type = '', start_media_file_id = '', start_media_text = '', start_media_entities = NULL")) {
+            rxStartMediaAnswer("❌ حذف رسانه ناموفق بود.", true);
+            return;
+        }
+        rxStartMediaAnswer("🗑 رسانه حذف شد.");
+        rxStartMediaRenderSettings($from_id);
+        return;
+    }
+    rxStartMediaAnswer("⚠️ درخواست نامعتبر است.", true);
+}
+
+function rxStartMediaHandleInput($from_id, array $message, &$user) {
+    $cancelKind = null;
+    if (isset($message['text']) && is_string($message['text']) && function_exists('rxPremiumEmojiCancelKind')) {
+        $cancelKind = rxPremiumEmojiCancelKind($message['text'], '');
+    }
+    if ($cancelKind === 'admin') {
+        rxStartMediaSetStep($user, $from_id, 'home');
+        return false;
+    }
+    if ($cancelKind === 'panel') {
+        rxStartMediaSetStep($user, $from_id, 'home');
+        rxStartMediaRenderSettings($from_id, false, "لغو شد.");
+        return true;
+    }
+    $cancelRow = [[['text' => "🔙 لغو", 'callback_data' => 'stmedia_cancel']]];
+    $parsedConfig = rx_start_media_parse_message($message);
+    if ($parsedConfig === null) {
+        rxStartMediaShow($from_id,
+            "❌ <b>ورودی نامعتبر است.</b>\n\n"
+            . "فقط یکی از موارد زیر پذیرفته می‌شود:\n"
+            . "• استیکر معمولی\n"
+            . "• ایموجی پرمیوم\n"
+            . "• ایموجی معمولی (حداکثر ۵ ایموجی، بدون متن یا فاصله)\n"
+            . "• گیف / انیمیشن تلگرام\n\n"
+            . "رسانه فعلی تغییری نکرد. دوباره ارسال کنید یا لغو را بزنید.",
+            $cancelRow,
+            false
+        );
+        return true;
+    }
+    if (!rxStartMediaEnsureSchema()) {
+        rxStartMediaShow($from_id, "⚠️ ساختار پایگاه داده برای این بخش آماده نیست. لطفاً به‌روزرسانی جداول (table.php) را اجرا کنید.", $cancelRow, false);
+        return true;
+    }
+    $saved = rxStartMediaWrite(
+        "UPDATE setting SET start_media_type = ?, start_media_file_id = ?, start_media_text = ?, start_media_entities = ?",
+        [
+            $parsedConfig['type'],
+            $parsedConfig['file_id'],
+            $parsedConfig['text'],
+            empty($parsedConfig['entities']) ? null : json_encode($parsedConfig['entities'], JSON_UNESCAPED_UNICODE),
+        ]
+    );
+    if (!$saved) {
+        rxStartMediaShow($from_id, "❌ ذخیره رسانه ناموفق بود. رسانه قبلی حفظ شد؛ دوباره تلاش کنید یا لغو را بزنید.", $cancelRow, false);
+        return true;
+    }
+    rxStartMediaSetStep($user, $from_id, 'home');
+    rxStartMediaRenderSettings($from_id, false, "✅ رسانه با موفقیت ذخیره شد: " . rxStartMediaTypeLabel($parsedConfig['type']));
+    return true;
+}
+
+function rxStartMediaHandleAdminUpdate($from_id, $datain, $update, &$user, $isAdministrator) {
+    $callbackName = is_string($datain) ? trim($datain) : '';
+    $isWaiting = is_array($user) && (string)($user['step'] ?? '') === rxStartMediaWaitingStep();
+    if ($callbackName !== '' && strpos($callbackName, 'stmedia_') === 0) {
+        if (!$isAdministrator) {
+            rxStartMediaAnswer("⛔️ فقط ادمین اصلی به این بخش دسترسی دارد.", true);
+            return true;
+        }
+        if (!in_array($callbackName, rxStartMediaCallbacks(), true)) {
+            rxStartMediaAnswer("⚠️ درخواست نامعتبر است.", true);
+            return true;
+        }
+        try {
+            rxStartMediaHandleCallback($from_id, $callbackName, $user);
+        } catch (\Throwable $callbackError) {
+            rx_start_media_log('admin callback ' . $callbackName . ' failed: ' . $callbackError->getMessage());
+            rxStartMediaAnswer("⚠️ خطای داخلی رخ داد.", true);
+        }
+        return true;
+    }
+    if (!$isWaiting) {
+        return false;
+    }
+    if (!$isAdministrator || $callbackName !== '') {
+        rxStartMediaSetStep($user, $from_id, 'home');
+        return false;
+    }
+    $message = (is_array($update) && isset($update['message']) && is_array($update['message'])) ? $update['message'] : null;
+    if ($message === null) {
+        return false;
+    }
+    try {
+        return rxStartMediaHandleInput($from_id, $message, $user);
+    } catch (\Throwable $inputError) {
+        rx_start_media_log('admin input failed: ' . $inputError->getMessage());
+        rxStartMediaShow($from_id, "⚠️ خطای داخلی رخ داد؛ رسانه قبلی حفظ شد.", [[['text' => "🔙 لغو", 'callback_data' => 'stmedia_cancel']]], false);
+        return true;
+    }
+}
 if (!function_exists('crypto_supported_currencies')) {
     function crypto_supported_currencies(): array
     {
@@ -881,11 +1419,38 @@ if (!function_exists('cm_apply_payment')) {
             return;
         }
 
-        $userRow = function_exists('select') ? select('user', '*', 'id', $payment['id_user'], 'select') : null;
-        $oldBalance = is_array($userRow) ? (int) ($userRow['Balance'] ?? 0) : 0;
-        $newBalance = $oldBalance + $finalIrr;
+        $userRow = function_exists('select') ? select('user', '*', 'id', $payment['id_user'], 'select', ['cache' => false]) : null;
+        if (!function_exists('balance_atomic_credit') || !balance_atomic_credit($payment['id_user'], $finalIrr)) {
+            try {
+                $release = $pdo->prepare("UPDATE Payment_report SET payment_Status = :s WHERE id_order = :id AND payment_Status = 'paid'");
+                $release->execute([':s' => (string) ($payment['payment_Status'] ?? 'waiting'), ':id' => $orderId]);
+            } catch (Throwable $e) {
+                error_log('[crypto] cm_apply_payment release failed: ' . $e->getMessage());
+            }
+            if (function_exists('clearSelectCache')) clearSelectCache('Payment_report');
+            if (function_exists('rx_log_event')) {
+                rx_log_event('WALLET_CREDIT_FAILED', 'cm_apply_payment wallet credit failed; claim released', [
+                    'id_order' => $orderId,
+                    'id_user' => $payment['id_user'] ?? null,
+                    'amount' => $finalIrr,
+                ]);
+            }
+            if ($callbackQueryId && function_exists('telegram')) {
+                telegram('answerCallbackQuery', [
+                    'callback_query_id' => $callbackQueryId,
+                    'text' => '❌ شارژ کیف پول انجام نشد. دوباره تلاش کنید.',
+                    'show_alert' => true,
+                    'cache_time' => 0,
+                ]);
+            }
+            return;
+        }
+        if (function_exists('wallet_ledger_record')) {
+            wallet_ledger_record($payment['id_user'], 'credit', $finalIrr, 'topup_crypto', (string) ($payment['Payment_Method'] ?? 'crypto'), $orderId);
+        }
+        $balanceRow = function_exists('select') ? select('user', 'Balance', 'id', $payment['id_user'], 'select', ['cache' => false]) : null;
+        $newBalance = is_array($balanceRow) ? (int) ($balanceRow['Balance'] ?? 0) : ((is_array($userRow) ? (int) ($userRow['Balance'] ?? 0) : 0) + $finalIrr);
         if (function_exists('update')) {
-            update('user', 'Balance', $newBalance, 'id', $payment['id_user']);
             update('Payment_report', 'at_updated', date('Y/m/d H:i:s'), 'id_order', $orderId);
         }
 

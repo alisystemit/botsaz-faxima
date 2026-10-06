@@ -14,34 +14,12 @@ if (!defined('REFACTORED_LEGACY_ROOT')) {
 }
 @chdir(__DIR__);
 
-// ===== گارد دسترسی table.php =====
-// فراخوانی مستقیم از HTTP فقط با secret مجاز است؛ include داخلی (جریان بازنشانی پنل ادمین)
-// و اجرای CLI آزاد می‌مانند. تشخیص: هنگام فراخوانی مستقیم، SCRIPT_FILENAME همین فایل است.
-if (PHP_SAPI !== 'cli') {
-    $rxTableScript = isset($_SERVER['SCRIPT_FILENAME']) ? @realpath($_SERVER['SCRIPT_FILENAME']) : false;
-    if ($rxTableScript !== false && $rxTableScript === @realpath(__FILE__)) {
-        $rxTableCfgRaw = (string) @file_get_contents(__DIR__ . '/config.php');
-        $rxTableToken = '';
-        if (preg_match('/\$APIKEY\s*=\s*[\'"]([^\'"]*)[\'"]/', $rxTableCfgRaw, $rxTableM)) {
-            $rxTableToken = (string) $rxTableM[1];
-        }
-        $rxTableSecret = $rxTableToken !== '' ? hash('sha256', $rxTableToken . '_faxima_table_secret') : '';
-        $rxTableProvided = isset($_GET['secret']) && is_string($_GET['secret']) ? $_GET['secret'] : '';
-        if ($rxTableSecret === '' || $rxTableProvided === '' || !hash_equals($rxTableSecret, $rxTableProvided)) {
-            http_response_code(403);
-            exit('Forbidden');
-        }
-    }
-    unset($rxTableScript, $rxTableCfgRaw, $rxTableToken, $rxTableM, $rxTableSecret, $rxTableProvided);
-}
-
 require_once 'function.php';
 require_once 'config.php';
 require_once 'botapi.php';
 global $connect, $pdo;
 
 $rxDbHost = isset($dbhost) && $dbhost !== '' ? (string) $dbhost : '';
-$rxDbPort = isset($dbport) ? (int) $dbport : 0; // 0 = پورت پیش‌فرض
 $rxDbName = isset($dbname) && $dbname !== '' ? (string) $dbname : '';
 $rxDbUser = isset($usernamedb) && $usernamedb !== '' ? (string) $usernamedb : '';
 $rxDbPass = isset($passworddb) ? (string) $passworddb : '';
@@ -75,9 +53,7 @@ if ($rxDbPass === '') {
 if (!(isset($connect) && $connect instanceof mysqli)) {
     if ($rxDbName !== '' && $rxDbUser !== '') {
         try {
-            $rxMysqli = $rxDbPort > 0
-                ? @new mysqli($rxDbHost, $rxDbUser, $rxDbPass, $rxDbName, $rxDbPort)
-                : @new mysqli($rxDbHost, $rxDbUser, $rxDbPass, $rxDbName);
+            $rxMysqli = @new mysqli($rxDbHost, $rxDbUser, $rxDbPass, $rxDbName);
             if ($rxMysqli->connect_errno === 0) {
                 $rxMysqli->set_charset('utf8mb4');
                 $connect = $rxMysqli;
@@ -94,7 +70,7 @@ if (!(isset($pdo) && $pdo instanceof PDO)) {
     if ($rxDbName !== '' && $rxDbUser !== '') {
         try {
             $pdo = new PDO(
-                "mysql:host={$rxDbHost}" . ($rxDbPort > 0 ? ";port={$rxDbPort}" : '') . ";dbname={$rxDbName};charset=utf8mb4",
+                "mysql:host={$rxDbHost};dbname={$rxDbName};charset=utf8mb4",
                 $rxDbUser,
                 $rxDbPass,
                 [
@@ -648,7 +624,12 @@ try {
         banner_cart_status varchar(20) NULL DEFAULT '0',
         banner_cart_file_id varchar(255) NULL DEFAULT '',
         banner_buy_status varchar(20) NULL DEFAULT '0',
-        banner_buy_file_id varchar(255) NULL DEFAULT '')
+        banner_buy_file_id varchar(255) NULL DEFAULT '',
+        start_media_status varchar(20) NULL DEFAULT '0',
+        start_media_type varchar(32) NULL DEFAULT '',
+        start_media_file_id varchar(512) NULL DEFAULT '',
+        start_media_text varchar(255) NULL DEFAULT '',
+        start_media_entities TEXT NULL)
         ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_unicode_ci");
         $stmt->execute();
         $stmt = $pdo->prepare("INSERT INTO setting (Bot_Status,roll_Status,get_number,limit_usertest_all,iran_number,NotUser,affiliatesstatus,affiliatespercentage,removedayc,showcard,statuscategory,numbercount,statusnewuser,statusagentrequest,volumewarn,inlinebtnmain,verifystart,statussupportpv,statusnamecustom,statuscategorygenral,agentreqprice,cronvolumere,bulkbuy,on_hold_day,verifybucodeuser,scorestatus,Lottery_prize,wheelـluck,wheelـluck_price,iplogin,daywarn,categoryhelp,linkappstatus,languageen,languageru,wheelagent,Lotteryagent,statusfirstwheel,statuslimitchangeloc,limitnumber,Debtsettlement,Dice,keyboardmain,statusnoteforf,statuscopycart,timeauto_not_verify,status_keyboard_config,cron_status) VALUES ('botstatuson','rolleon','offAuthenticationphone','1','offAuthenticationiran','offnotuser','offaffiliates','0','0','1','offcategory','0','onnewuser','onrequestagent','2','offinline','offverify','offpvsupport','offnamecustom','offcategorys','0','5','onbulk','4','offverify','0','$DATAAWARD','0','0','0','2','0','0','0','0','1','1','0','0','$limitlist','1','0','$keyboardmain','1','0','4','1','$status_cron')");
@@ -997,8 +978,90 @@ try {
     }
     ensureMarzbanGuardFieldsMigrated();
     ensureRebeccaPanelFieldsMigrated();
+    rxSafeAddColumn($connect, "marzban_panel", "test_settings", "TEXT NULL");
 } catch (Exception $e) {
     error_log('[panels] ' . $e->getMessage());
+}
+
+try {
+    $connect->query("CREATE TABLE IF NOT EXISTS test_account_usage (
+        id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        user_id VARCHAR(64) NOT NULL,
+        code_panel VARCHAR(100) NOT NULL,
+        used_count INT UNSIGNED NOT NULL DEFAULT 0,
+        quota_generation INT UNSIGNED NOT NULL DEFAULT 1,
+        created_at INT UNSIGNED NOT NULL DEFAULT 0,
+        updated_at INT UNSIGNED NOT NULL DEFAULT 0,
+        UNIQUE KEY uq_tau_user_panel (user_id, code_panel)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+    $connect->query("CREATE TABLE IF NOT EXISTS test_account_reservation (
+        id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        user_id VARCHAR(64) NOT NULL,
+        code_panel VARCHAR(100) NOT NULL,
+        quota_mode VARCHAR(16) NOT NULL,
+        quota_generation INT UNSIGNED NOT NULL DEFAULT 1,
+        usage_counted TINYINT(1) NOT NULL DEFAULT 0,
+        state VARCHAR(16) NOT NULL,
+        id_invoice VARCHAR(64) NULL,
+        username VARCHAR(200) NULL,
+        source VARCHAR(16) NOT NULL DEFAULT 'bot',
+        created_at INT UNSIGNED NOT NULL DEFAULT 0,
+        updated_at INT UNSIGNED NOT NULL DEFAULT 0,
+        INDEX idx_tar_user_panel (user_id, code_panel),
+        INDEX idx_tar_state (state),
+        INDEX idx_tar_panel_gen_state (code_panel, quota_generation, state)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+    $connect->query("CREATE TABLE IF NOT EXISTS test_account_user_override (
+        id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        user_id VARCHAR(64) NOT NULL,
+        remaining_limit INT UNSIGNED NOT NULL DEFAULT 0,
+        active TINYINT(1) NOT NULL DEFAULT 0,
+        revision INT UNSIGNED NOT NULL DEFAULT 1,
+        updated_at INT UNSIGNED NOT NULL DEFAULT 0,
+        updated_by VARCHAR(64) NULL,
+        UNIQUE KEY uq_tauo_user (user_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+    rxSafeAddColumn($connect, "test_account_usage", "quota_generation", "INT UNSIGNED NOT NULL DEFAULT 1");
+    rxSafeAddColumn($connect, "test_account_reservation", "quota_generation", "INT UNSIGNED NOT NULL DEFAULT 1");
+    $tarIdx = $connect->query("SHOW INDEX FROM `test_account_reservation` WHERE Key_name = 'idx_tar_panel_gen_state'");
+    if ($tarIdx && mysqli_num_rows($tarIdx) == 0) {
+        $connect->query("ALTER TABLE `test_account_reservation` ADD INDEX idx_tar_panel_gen_state (code_panel, quota_generation, state)");
+    }
+} catch (Exception $e) {
+    error_log('[test-account-migrate] ' . $e->getMessage());
+}
+
+try {
+    $connect->query("CREATE TABLE IF NOT EXISTS fx_rate_cache (
+        pair VARCHAR(20) NOT NULL PRIMARY KEY,
+        rate DECIMAL(18,4) NOT NULL,
+        previous_rate DECIMAL(18,4) NULL,
+        pending_rate DECIMAL(18,4) NULL,
+        pending_count INT UNSIGNED NOT NULL DEFAULT 0,
+        source VARCHAR(50) NOT NULL,
+        fetched_at INT UNSIGNED NOT NULL,
+        status VARCHAR(20) NOT NULL DEFAULT 'ok',
+        last_error VARCHAR(500) NULL,
+        last_event VARCHAR(500) NULL,
+        stale_notified_at INT UNSIGNED NOT NULL DEFAULT 0,
+        updated_at INT UNSIGNED NOT NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+    $connect->query("CREATE TABLE IF NOT EXISTS fx_price_quote (
+        user_id VARCHAR(64) NOT NULL,
+        context VARCHAR(100) NOT NULL,
+        amount BIGINT NOT NULL,
+        meta TEXT NULL,
+        created_at INT UNSIGNED NOT NULL,
+        expires_at INT UNSIGNED NOT NULL,
+        PRIMARY KEY (user_id, context),
+        KEY idx_fx_quote_expires (expires_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+    rxSafeAddColumn($connect, "fx_rate_cache", "last_event", "VARCHAR(500) NULL");
+    rxSafeAddColumn($connect, "fx_rate_cache", "stale_notified_at", "INT UNSIGNED NOT NULL DEFAULT 0");
+    rxSafeAddColumn($connect, "marzban_panel", "fx_pricing_config", "TEXT NULL");
+    rxSafeAddColumn($connect, "invoice", "pricing_snapshot", "TEXT NULL");
+} catch (Exception $e) {
+    error_log('[fx-pricing-migrate] ' . $e->getMessage());
 }
 
 try {
@@ -1643,6 +1706,7 @@ try {
         ['text_request_agent_dec', '📌 توضیحات خود را برای ثبت درخواست نمایندگی ارسال نمایید.'],
         ['text_extend', '♻️ تمدید سرویس'],
         ['text_wgdashboard', $text_wgdashboard],
+        ['text_miniapp_button', '🚀 Open Mini App'],
         ['miniapp_suggest_1', "کاربر گرامی، برای خرید، تمدید و مدیریت سرویس‌های خود لطفاً از مینی‌اپ اختصاصی ربات استفاده کنید.\n\n✨ مزایای استفاده از مینی‌اپ:\n• رابط کاربری مدرن و بسیار ساده\n• سرعت بسیار بالا در خرید و تحویل سرویس\n• مدیریت کامل و لحظه‌ای اکانت‌ها\n• پرداخت امن و آسان\n\n👇 جهت ورود روی دکمه زیر کلیک کنید:"],
         ['dyn_errors_verification_failed', '❌ خطایی در تایید انجام شده است لطفا مراحل پرداخت را مجددا انجام دهید'],
         ['dyn_errors_restart_process', '❌ مراحل خرید را مجددا از اول انجام دهید'],
@@ -2187,6 +2251,7 @@ try {
         ['minbalancetonpay', $main],
         ['maxbalancetonpay', $max],
         ['helptonpay', '2'],
+        ['tonpay_payment_mode', 'bot'],
         ['statuscubepay', 'offcubepay'],
         ['apicubepay', ''],
         ['chashbackcubepay', '0'],
@@ -3320,6 +3385,8 @@ try {
     rxSafeAddColumn($connect, "Payment_report", "tronado_payment_url",    "VARCHAR(500) NULL");
     rxSafeAddColumn($connect, "Payment_report", "tonpay_invoice_id",      "VARCHAR(64) NULL");
     rxSafeAddColumn($connect, "Payment_report", "tonpay_invoice_url",     "VARCHAR(500) NULL");
+    rxSafeAddColumn($connect, "Payment_report", "tonpay_web_invoice_url", "VARCHAR(500) NULL");
+    rxSafeAddColumn($connect, "Payment_report", "tonpay_last_checked_at", "BIGINT NULL");
     rxSafeAddColumn($connect, "Payment_report", "cubepay_authority",      "VARCHAR(64) NULL");
     rxSafeAddColumn($connect, "Payment_report", "cubepay_payment_link",   "VARCHAR(500) NULL");
     rxSafeAddColumn($connect, "Payment_report", "cubepay_method",         "VARCHAR(20) NULL");
@@ -3423,6 +3490,43 @@ try {
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
     } catch (Throwable $e) {
         error_log('[table.php] wallet_ledger create: ' . $e->getMessage());
+    }
+
+    try {
+        $haveWlKey = $connect->query("SHOW COLUMNS FROM wallet_ledger LIKE 'fulfillment_key'");
+        if ($haveWlKey && $haveWlKey->num_rows === 0) {
+            $connect->query("ALTER TABLE wallet_ledger ADD COLUMN fulfillment_key VARCHAR(191) NULL, ADD UNIQUE KEY uniq_wl_fulfillment_key (fulfillment_key)");
+        }
+    } catch (Throwable $e) {
+        error_log('[table.php] wallet_ledger fulfillment_key: ' . $e->getMessage());
+    }
+
+    try {
+        $connect->query("CREATE TABLE IF NOT EXISTS payment_fulfillment (
+            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            id_order VARCHAR(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+            payment_report_id INT UNSIGNED NULL,
+            operation_type VARCHAR(40) NOT NULL,
+            state VARCHAR(20) NOT NULL,
+            processing_token CHAR(32) NULL,
+            lease_expires_at INT UNSIGNED NULL,
+            attempt_count INT UNSIGNED NOT NULL DEFAULT 0,
+            before_state MEDIUMTEXT NULL,
+            target_state MEDIUMTEXT NULL,
+            result_state MEDIUMTEXT NULL,
+            last_error TEXT NULL,
+            created_at INT UNSIGNED NOT NULL,
+            updated_at INT UNSIGNED NOT NULL,
+            completed_at INT UNSIGNED NULL,
+            UNIQUE KEY uniq_pf_id_order (id_order),
+            KEY idx_pf_state_lease (state, lease_expires_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+        $havePrOrderIdx = $connect->query("SHOW INDEX FROM Payment_report WHERE Key_name = 'idx_pr_id_order'");
+        if ($havePrOrderIdx && $havePrOrderIdx->num_rows === 0) {
+            $connect->query("ALTER TABLE Payment_report ADD INDEX idx_pr_id_order (id_order(191))");
+        }
+    } catch (Throwable $e) {
+        error_log('[table.php] payment_fulfillment create: ' . $e->getMessage());
     }
 
     try {
@@ -3563,6 +3667,16 @@ try {
     addFieldToTable("setting", "banner_buy_file_id", "", "VARCHAR(255)");
 } catch (Exception $e) {
     file_put_contents('error_log', '[table.php setting banner cols] ' . $e->getMessage() . "\n", FILE_APPEND);
+}
+
+try {
+    addFieldToTable("setting", "start_media_status", "0", "VARCHAR(20) NULL DEFAULT '0'");
+    addFieldToTable("setting", "start_media_type", "", "VARCHAR(32) NULL DEFAULT ''");
+    addFieldToTable("setting", "start_media_file_id", "", "VARCHAR(512) NULL DEFAULT ''");
+    addFieldToTable("setting", "start_media_text", "", "VARCHAR(255) NULL DEFAULT ''");
+    addFieldToTable("setting", "start_media_entities", null, "TEXT NULL");
+} catch (Exception $e) {
+    file_put_contents('error_log', '[table.php setting start media cols] ' . $e->getMessage() . "\n", FILE_APPEND);
 }
 
 try {

@@ -1,5 +1,4 @@
 <?php
-require_once __DIR__ . '/_guard.php';
 ini_set('error_log', 'error_log');
 date_default_timezone_set('Asia/Tehran');
 require_once '../config.php';
@@ -22,7 +21,7 @@ $stmt->execute();
         if($get_username_Check['status'] != "Unsuccessful"){
         if(in_array($get_username_Check['status'],['limited','expired'])){
         $timeservice = $get_username_Check['expire'] - time();
-        $day = (int)($timeservice / 86400); // گرد کردن به سمت صفر تا حذف N روز بعد از انقضا انجام شود
+        $day = floor($timeservice / 86400);
         $output =  $get_username_Check['data_limit'] - $get_username_Check['used_traffic'];
         $textservice = select("textbot","text","id_text","text_Purchased_services","select");
         $RemainingVolume = formatBytes($output);

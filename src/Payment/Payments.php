@@ -11,6 +11,22 @@ class Payments
 
     public const METHOD_CARD = 'card';
     public const METHOD_NOWPAY = 'nowpay';
+    public const METHOD_ZARIN = 'zarin';
+    public const METHOD_AQAYE = 'aqaye';
+
+    /** برچسب و ایموجی هر روش پرداخت — یک منبع حقیقت برای همهٔ پیام‌ها */
+    private const METHOD_LABEL = [
+        self::METHOD_CARD   => ['💳', 'کارت‌به‌کارت'],
+        self::METHOD_NOWPAY => ['🪙', 'کریپتو (NOWPayments)'],
+        self::METHOD_ZARIN  => ['🟣', 'درگاه زرین‌پال'],
+        self::METHOD_AQAYE  => ['🧿', 'درگاه آقای پرداخت'],
+    ];
+
+    public static function methodLabel(string $method): string
+    {
+        $m = self::METHOD_LABEL[$method] ?? ['💰', $method !== '' ? $method : 'نامشخص'];
+        return $m[0] . ' ' . $m[1];
+    }
 
     // pending=ساخته‌شده، await_receipt=در انتظار فیش، await_admin=نزد ادمین،
     // await_pay=فاکتور کریپتو صادر شده، paid=پرداخت‌شده، used=ووچر مصرف‌شده،
@@ -511,6 +527,15 @@ class Payments
     }
 
     /**
+     * نامی عمومی‌تر از markCryptoPaid — هر درگاهی که «تأیید خودکار» دارد
+     * (کریپتو، زرین‌پال، آقای پرداخت) از همین گذارِ اتمیک استفاده می‌کند.
+     */
+    public static function markAutoPaid(Store $store, int $id): ?array
+    {
+        return self::markCryptoPaid($store, $id);
+    }
+
+    /**
      * یک خط خلاصه از وضعیت یک پرداخت.
      * خروجی HTML است (پیام‌ها parse_mode=HTML دارند) ⇒ هر فیلدِ دیتابیس escape می‌شود.
      */
@@ -518,7 +543,7 @@ class Payments
     {
         $stMap = [
             'pending' => '⏳ در انتظار', 'await_receipt' => '🧾 در انتظار فیش',
-            'await_admin' => '👀 نزد ادمین', 'await_pay' => '🪙 در انتظار پرداخت کریپتو',
+            'await_admin' => '👀 نزد ادمین', 'await_pay' => '🔗 در انتظار پرداخت آنلاین',
             'paid' => '✅ پرداخت‌شده', 'used' => '🎟️ مصرف‌شده',
             'declined' => '❌ رد شده', 'cancelled' => '🚫 لغو شده', 'expired' => '⌛ منقضی',
         ];
@@ -527,6 +552,8 @@ class Payments
         $kind = ($p['kind'] ?? '') === 'template' ? 'قالب' : 'لیمیت';
         $tpl = (string)($p['template'] ?? '') !== '' ? ' (' . htmlspecialchars((string)$p['template']) . ')' : '';
         $slots = (int)($p['slots'] ?? 0) > 0 ? " [{$p['slots']} اسلات]" : '';
-        return "#{$p['id']} {$kind}{$tpl}{$slots} — " . number_format((int)($p['amount'] ?? 0)) . " تومان — " . htmlspecialchars($st);
+        $method = (string)($p['method'] ?? '');
+        $m = $method !== '' ? ' — ' . htmlspecialchars(self::methodLabel($method), ENT_QUOTES, 'UTF-8') : '';
+        return "#{$p['id']} {$kind}{$tpl}{$slots} — " . number_format((int)($p['amount'] ?? 0)) . " تومان{$m} — " . htmlspecialchars($st);
     }
 }

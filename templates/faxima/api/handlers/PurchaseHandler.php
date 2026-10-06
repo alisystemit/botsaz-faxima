@@ -67,6 +67,21 @@ final class PurchaseHandler extends BaseHandler
             FaoximaResponse::fail(403, faoxima_textbot_get('dyn_purchase_product_not_allowed_for_agent', 'این محصول برای نوع کاربری شما فعال نیست'));
         }
 
+        $fxKinds = empty($customService) ? 'product' : ['custom_volume', 'custom_time'];
+        if (empty($customService)) {
+            $product = fx_apply_to_product($product, $panel);
+        }
+        if (fx_context($panel, $fxKinds) !== null && !fx_quote_token_valid(FaoximaInput::string($this->data, 'fx_quote'), $panel, $fxKinds)) {
+            $fxDisplayPrice = empty($customService)
+                ? fx_finalize_amount(fx_apply_user_discount($product['price_product'], (int)($this->user['pricediscount'] ?? 0)), $panel, $fxKinds)
+                : fx_finalize_amount($product['price_product'], $panel, $fxKinds);
+            FaoximaResponse::fail(409, fx_price_changed_api_message(), fx_price_changed_api_obj($fxDisplayPrice, fx_quote_token($panel, $fxKinds)));
+        }
+        $fxListPrice = (float) fx_finalize_amount($product['price_product'], $panel, $fxKinds);
+        $fxBasePrice = empty($customService)
+            ? ($product['fx_base_price'] ?? $product['price_product'])
+            : fx_custom_base_price($panel, $this->user['agent'] ?? 'f', $product['Volume_constraint'] ?? 0, $product['Service_time'] ?? 0);
+
 
         $discount = (int)($this->user['pricediscount'] ?? 0);
         if ($discount !== 0) {
@@ -91,7 +106,7 @@ final class PurchaseHandler extends BaseHandler
                 FaoximaResponse::fail(422, (string)($dv['reason'] ?? faoxima_textbot_get('dyn_purchase_invalid_discount_code', '❌ کد تخفیف نامعتبر است.')));
             }
             $discPriceBefore = (float)$product['price_product'];
-            $product['price_product'] = MiniDiscount::applyToPrice($dv['row'], $discPriceBefore);
+            $product['price_product'] = fx_finalize_amount(MiniDiscount::applyToPrice($dv['row'], $discPriceBefore), $panel, $fxKinds);
             $discPriceAfter = (float)$product['price_product'];
             $discAmount = $discPriceBefore - $discPriceAfter;
             MiniDiscount::logOrderDiscount([
@@ -107,6 +122,9 @@ final class PurchaseHandler extends BaseHandler
             ]);
         }
 
+
+        $product['price_product'] = fx_finalize_amount($product['price_product'], $panel, $fxKinds);
+        $fxSnapshot = fx_pricing_snapshot($panel, $fxKinds, $fxBasePrice, $product['price_product'], $fxListPrice - (float) $product['price_product'], ['product' => (string)($product['code_product'] ?? ''), 'source_channel' => 'miniapp']);
 
         $orderId = bin2hex(random_bytes(4));
         $customUsername = FaoximaInput::nullableString($this->data, 'custom_username');
@@ -205,6 +223,7 @@ final class PurchaseHandler extends BaseHandler
                 FaoximaLogger::exception($e, 'Unpaid invoice insert failed', ['user_id' => $this->user['id']]);
                 FaoximaResponse::serverError(faoxima_textbot_get('dyn_purchase_invoice_save_failed', 'خطا در ذخیره فاکتور'));
             }
+            fx_store_invoice_snapshot($orderId, $fxSnapshot);
 
             $amountDue = (int) ceil($shortfall);
 
@@ -303,12 +322,14 @@ final class PurchaseHandler extends BaseHandler
             FaoximaLogger::exception($e, 'Invoice insert failed', ['user_id' => $this->user['id']]);
             FaoximaResponse::serverError('خطا در ذخیره فاکتور');
         }
+        fx_store_invoice_snapshot($orderId, $fxSnapshot);
 
 
         $expireTs = $serviceTime > 0 ? strtotime('+' . $serviceTime . ' days') : 0;
 
 
         $priceToCharge = (float) $product['price_product'];
+        $balanceBeforePurchase = (float) $this->user['Balance'];
         $balanceChargedAtomically = false;
         if ($priceToCharge > 0.0) {
             $agent = $this->user['agent'] ?? 'f';
@@ -378,7 +399,7 @@ final class PurchaseHandler extends BaseHandler
                 sendmessage($this->user['id'], faoxima_textbot_get('dyn_purchase_score_earned_1', '📌شما 1 امتیاز جدید کسب کردید.'), null, 'html');
                 update('user', 'score', (int)$this->user['score'] + 1, 'id', $this->user['id']);
             }
-            $this->reportPurchase($buyReport, $product, $panel, $usernameAc, $orderId, $invoiceCount);
+            $this->reportPurchase($buyReport, $product, $panel, $usernameAc, $orderId, $invoiceCount, $balanceBeforePurchase);
 
             $stockConfigs = ($stockContent !== '' && $stockContent !== $stockSubLink) ? [$stockContent] : [];
             $stockOutput = [];
@@ -449,11 +470,12 @@ final class PurchaseHandler extends BaseHandler
             $panel['name_panel'],
             $product['code_product'],
             $usernameAc,
-            $createPayload
+            $createPayload,
+            true
         );
 
         if (empty($remote['username'])) {
-            $reason = is_array($remote) ? json_encode($remote['msg'] ?? $remote) : (string)$remote;
+            $reason = is_array($remote) ? rx_panel_error_text($remote['msg'] ?? null, $remote['detail'] ?? null) : htmlspecialchars((string)$remote, ENT_QUOTES, 'UTF-8');
             FaoximaLogger::error('createUser failed', [
                 'user_id' => $this->user['id'],
                 'panel' => $panel['name_panel'],
@@ -484,6 +506,12 @@ final class PurchaseHandler extends BaseHandler
             $this->reportToChannel($errorText, $errorReport);
 
             FaoximaResponse::serverError(faoxima_textbot_get('dyn_purchase_create_user_failed_customer', 'خطایی در ساخت اشتراک رخ داده است با پشتیبانی در ارتباط باشید'));
+        }
+
+        if (!empty($remote['renamed_from'])) {
+            $usernameAc = rx_adopt_created_username($remote, $usernameAc, $orderId);
+            $usernameWasRenamed = true;
+            rx_notify_username_renamed($this->user['id'], $remote, $panel);
         }
 
         if ($discountCode !== '') {
@@ -520,7 +548,7 @@ final class PurchaseHandler extends BaseHandler
         }
 
         $template = $this->resolveTemplate($panel['type'] ?? '');
-        $template = str_replace('{username}', "<code>{$remote['username']}</code>", $template);
+        $template = str_replace('{username}', "<code>" . guardDisplayUsername($remote['username'], $panel) . "</code>", $template);
         $template = str_replace('{name_service}', $product['name_product'] ?? '', $template);
         $template = str_replace('{location}', $panel['name_panel'] ?? '', $template);
 
@@ -620,7 +648,7 @@ final class PurchaseHandler extends BaseHandler
         }
 
 
-        $this->reportPurchase($buyReport, $product, $panel, $usernameAc, $orderId, $invoiceCount);
+        $this->reportPurchase($buyReport, $product, $panel, $usernameAc, $orderId, $invoiceCount, $balanceBeforePurchase);
 
         FaoximaLogger::debug('Purchase completed', [
             'user_id'  => $this->user['id'],
@@ -662,6 +690,7 @@ final class PurchaseHandler extends BaseHandler
             'service'  => [
                 'id'                => $orderId,
                 'username'          => (string)($remote['username'] ?? $usernameAc),
+                'display_username'  => guardDisplayUsername((string)($remote['username'] ?? $usernameAc), $panel),
                 'username_requested' => $requestedUsernameAc,
                 'username_was_changed' => $usernameWasRenamed,
                 'status'            => 'active',
@@ -837,8 +866,8 @@ final class PurchaseHandler extends BaseHandler
             FaoximaResponse::badRequest(faoxima_textbot_get('dyn_purchase_invalid_time_restart', 'زمان نامعتبر است خرید را از اول انجام دهید'));
         }
 
-        $price = ($volume * (float)($tp[$agent] ?? 0))
-               + ($time   * (float)($timeP[$agent] ?? 0));
+        $price = ($volume * (float) fx_adjust_base_toman($tp[$agent] ?? 0, $panel, 'custom_volume'))
+               + ($time   * (float) fx_adjust_base_toman($timeP[$agent] ?? 0, $panel, 'custom_time'));
 
         return [
             'code_product'      => 'customvolume',
@@ -897,13 +926,13 @@ final class PurchaseHandler extends BaseHandler
         sendmessage($this->user['affiliates'], $textUser, null, 'HTML');
     }
 
-    private function reportPurchase(string $topicId, array $product, array $panel, string $usernameAc, string $orderId, int $invoiceCount): void
+    private function reportPurchase(string $topicId, array $product, array $panel, string $usernameAc, string $orderId, int $invoiceCount, float $balanceBeforePurchase): void
     {
         $balanceAfter = (float) FaoximaDb::fetchScalar(
             'SELECT Balance FROM user WHERE id = :id',
             [':id' => $this->user['id']]
         );
-        $balanceBefore = number_format((float)$this->user['Balance']);
+        $balanceBefore = number_format($balanceBeforePurchase);
         $balanceAfter  = number_format($balanceAfter);
 
         $firstBuy = $invoiceCount === 1 ? faoxima_textbot_get('dyn_purchase_first_buy_flag', '📌 خرید اول کاربر') : '';
@@ -913,7 +942,7 @@ final class PurchaseHandler extends BaseHandler
             'first_buy' => $firstBuy,
             'user_id' => $this->user['id'],
             'username' => $this->user['username'],
-            'config_username' => $usernameAc,
+            'config_username' => guardDisplayUsername($usernameAc, $panel),
             'panel_name' => $panel['name_panel'],
             'product_name' => $product['name_product'],
             'service_time' => $product['Service_time'],
@@ -949,13 +978,13 @@ final class PurchaseHandler extends BaseHandler
         $channel = $this->setting['Channel_Report'] ?? '';
         if ((string)$channel === '') return;
 
-        telegram('sendmessage', [
+        rx_sendTopicReport([
             'chat_id'           => $channel,
             'message_thread_id' => $topicId,
             'text'              => $text,
             'parse_mode'        => 'HTML',
             'reply_markup'      => $reply,
-        ]);
+        ], ['flow' => 'miniapp_buy', 'order_id' => $orderId, 'user_id' => (string)$this->user['id']]);
     }
 
     private function reportToChannel(string $text, string $topicId): void

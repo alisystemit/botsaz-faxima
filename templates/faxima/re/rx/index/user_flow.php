@@ -52,44 +52,55 @@ if (!function_exists('tk_album_send')) {
 $tkCancelKb = json_encode(['inline_keyboard' => [[['text' => '🔙 انصراف', 'callback_data' => 'tk_cancel']]]], JSON_UNESCAPED_UNICODE);
 
 if ($user['step'] == "createusertest" || preg_match('/locationtest_(.*)/', $datain, $dataget) || (($text !== '' && $text == $datatextbot['text_usertest']) || $datain == "usertestbtn" || $text == "usertest")) {
-    if (!check_active_btn($setting['keyboardmain'], "text_usertest")) {
+    $rxTestIsAdmin = in_array($from_id, $admin_ids);
+    $userlimit = select("user", "*", "id", $from_id, "select", ['cache' => false]);
+    if (!is_array($userlimit) || empty($userlimit)) {
+        $userlimit = $user;
+    }
+    if (!rx_test_feature_enabled()) {
         sendmessage($from_id, $datatextbot['dyn_errors_test_service_unavailable'] ?? "📌 سرویس تست در حال حاضر در دسترس نیست .", null, 'HTML');
         return;
     }
-    $userlimit = select("user", "*", "id", $from_id, "select");
-    if ($userlimit['limit_usertest'] <= 0 && !in_array($from_id, $admin_ids)) {
-        sendmessage($from_id, $textbotlang['users']['usertest']['limitwarning'], $keyboard_buy, 'html');
+    $rxTestGate = rx_test_verification_gate($userlimit, $rxTestIsAdmin);
+    if ($rxTestGate === 'phone') {
+        if ($user['step'] != "get_number") {
+            sendmessage($from_id, $textbotlang['users']['number']['Confirming'], $request_contact, 'HTML');
+            step('get_number', $from_id);
+        }
         return;
     }
-    if ((($setting['get_number'] == "onAuthenticationphone") || ($setting['iran_number'] == "onAuthenticationiran")) && $user['step'] != "get_number" && $user['number'] == "none" && !rx_auth_skip_user($user)) {
-        sendmessage($from_id, $textbotlang['users']['number']['Confirming'], $request_contact, 'HTML');
-        step('get_number', $from_id);
-    }
-    if ($user['number'] == "none" && (($setting['get_number'] == "onAuthenticationphone") || ($setting['iran_number'] == "onAuthenticationiran")) && !rx_auth_skip_user($user))
+    if ($rxTestGate === 'verify') {
+        sendmessage($from_id, $datatextbot['dyn_testaccount_verify_required'] ?? "⚠️ حساب شما هنوز احراز هویت نشده است.", null, 'HTML');
         return;
-    $locationproduct = select("marzban_panel", "*", "TestAccount", "ONTestAccount", "count");
-    if ($locationproduct == 1) {
-        $panel = select("marzban_panel", "*", "TestAccount", "ONTestAccount", "select");
-        if ($panel['hide_user'] != null) {
-            $list_user = json_decode($panel['hide_user'], true);
-            if (in_array($from_id, $list_user)) {
-                sendmessage($from_id, $textbotlang['Admin']['managepanel']['nullpanel'], null, 'HTML');
-                return;
-            }
-        }
-        $location = $panel['code_panel'];
-    } else {
-        if (isset($dataget[1])) {
-            $location = $dataget[1];
-        } else {
-            if ($user['step'] != "createusertest") {
-                return;
-            } else {
-                $location = $user['Processing_value_one'];
-            }
-        }
     }
-    $marzban_list_get = select("marzban_panel", "*", "code_panel", $location, "select");
+    $rxTestCode = null;
+    if (preg_match('/^locationtest_(.+)$/', (string) $datain, $rxTestMatch)) {
+        $rxTestCode = $rxTestMatch[1];
+    } elseif ($user['step'] == "createusertest") {
+        $rxTestCode = (string) $user['Processing_value_one'];
+    }
+    $rxTestEligible = rx_test_eligible_panels($userlimit);
+    if ($rxTestCode === null && count($rxTestEligible) !== 1) {
+        return;
+    }
+    $marzban_list_get = rx_test_resolve_panel($userlimit, $rxTestCode, $rxTestEligible);
+    if ($marzban_list_get === null) {
+        if ($user['step'] == "createusertest") {
+            step('home', $from_id);
+        }
+        sendmessage($from_id, $textbotlang['Admin']['managepanel']['nullpanel'], null, 'HTML');
+        return;
+    }
+    $rxTestSettings = rx_test_panel_settings($marzban_list_get);
+    $rxTestQuota = rx_test_quota_state($userlimit, $marzban_list_get, $rxTestSettings, $rxTestIsAdmin);
+    if (!$rxTestQuota['can_create']) {
+        if ($user['step'] == "createusertest") {
+            step('home', $from_id);
+        }
+        sendmessage($from_id, $rxTestQuota['reason'] === 'audience_restricted' ? rx_test_audience_denied_text() : $textbotlang['users']['usertest']['limitwarning'], $keyboard_buy, 'html');
+        return;
+    }
+    $location = $marzban_list_get['code_panel'];
     $_rx_usernameKb = ($marzban_list_get['MethodUsername'] == "نام کاربری دلخواه + عدد رندوم" || $marzban_list_get['MethodUsername'] == "متن دلخواه کاربر + رندوم") ? $usernamePromptKb : $backuser;
     if ($marzban_list_get['MethodUsername'] == $textbotlang['users']['customusername'] || $marzban_list_get['MethodUsername'] == "نام کاربری دلخواه + عدد رندوم" || $marzban_list_get['MethodUsername'] == "متن دلخواه کاربر + رندوم") {
         if ($user['step'] != "createusertest") {
@@ -98,11 +109,8 @@ if ($user['step'] == "createusertest" || preg_match('/locationtest_(.*)/', $data
             sendmessage($from_id, $textbotlang['users']['selectusername'], $_rx_usernameKb, 'html');
             return;
         }
-    } else {
-        $name_panel = $location;
     }
     if ($user['step'] == "createusertest") {
-        $name_panel = $user['Processing_value_one'];
         if ($datain === 'gen_random_uname') {
             $text = rx_build_smart_random_username($username ?? '', $from_id);
             if ($callback_query_id && function_exists('telegram')) {
@@ -116,60 +124,46 @@ if ($user['step'] == "createusertest" || preg_match('/locationtest_(.*)/', $data
     } else {
         deletemessage($from_id, $message_id);
     }
-    if ($marzban_list_get['type'] == "Manualsale") {
-        $stmt = $pdo->prepare("SELECT * FROM manualsell WHERE codepanel = :codepanel AND codeproduct = :codeproduct AND status = 'active'");
-        $value = "usertest";
-        $stmt->bindParam(':codepanel', $marzban_list_get['code_panel']);
-        $stmt->bindParam(':codeproduct', $value);
-        $stmt->execute();
-        $configexits = $stmt->rowCount();
-        if (intval($configexits) == 0) {
+    if (!rx_test_manual_stock_available($marzban_list_get)) {
+        step('home', $from_id);
+        sendmessage($from_id, faoxima_textbot_get('dyn_testaccount_manualsale_stock_depleted', "❌ موجودی این سرویس به پایان رسیده."), null, 'HTML');
+        return;
+    }
+    $rxTestReserveError = '';
+    $rxTestReservation = rx_test_reserve($userlimit, $marzban_list_get, $rxTestSettings, $rxTestIsAdmin, 'bot', $rxTestReserveError);
+    if ($rxTestReservation === null) {
+        step('home', $from_id);
+        if ($rxTestReserveError === 'panel_unavailable') {
+            sendmessage($from_id, $textbotlang['Admin']['managepanel']['nullpanel'], null, 'HTML');
+            return;
+        }
+        sendmessage($from_id, $rxTestReserveError === 'audience_restricted' ? rx_test_audience_denied_text() : $textbotlang['users']['usertest']['limitwarning'], $keyboard_buy, 'html');
+        return;
+    }
+    $randomString = bin2hex(random_bytes(4));
+    $text = strtolower((string) $text);
+    try {
+        $username_ac = rx_test_build_username($userlimit, $marzban_list_get, $text, $randomString);
+    } catch (Throwable $rxTestErr) {
+        rx_test_reservation_update($rxTestReservation, 'failed');
+        rx_test_release($rxTestReservation);
+        step('home', $from_id);
+        sendmessage($from_id, $textbotlang['users']['usertest']['errorcreat'], $keyboard, 'html');
+        return;
+    }
+    $rxTestProvision = rx_test_provision($userlimit, $marzban_list_get, $rxTestSettings, $rxTestReservation, $username_ac, $randomString);
+    if (empty($rxTestProvision['ok'])) {
+        step('home', $from_id);
+        if ($rxTestProvision['error'] === 'stock_empty') {
             sendmessage($from_id, faoxima_textbot_get('dyn_testaccount_manualsale_stock_depleted', "❌ موجودی این سرویس به پایان رسیده."), null, 'HTML');
             return;
         }
-    }
-    $limit_usertest = $userlimit['limit_usertest'] - 1;
-    update("user", "limit_usertest", $limit_usertest, "id", $from_id);
-    $randomString = bin2hex(random_bytes(4));
-    $text = strtolower($text);
-    $marzban_list_get = select("marzban_panel", "*", "code_panel", $name_panel, "select");
-    $text = strtolower($text);
-    $username_ac = generateUsername($from_id, $marzban_list_get['MethodUsername'], $user['username'], $randomString, $text, $marzban_list_get['namecustom'], $user['namecustom']);
-    $username_ac = strtolower($username_ac);
-    $DataUserOut = $marzban_list_get['type'] != "Manualsale" ? $ManagePanel->DataUser($marzban_list_get['name_panel'], $username_ac) : null;
-    $random_number = rand(1000000, 9999999);
-    if (isset($DataUserOut['username']) || rxTableValueExists('invoice', 'username', $username_ac)) {
-        $username_ac = $random_number . "-" . $username_ac;
-    }
-    $datac = array(
-        'expire' => strtotime(date("Y-m-d H:i:s", strtotime("+" . $marzban_list_get['time_usertest'] . "hours"))),
-        'data_limit' => $marzban_list_get['val_usertest'] * 1048576,
-        'from_id' => $from_id,
-        'username' => $username_ac,
-        'type' => 'usertest'
-    );
-    $date = time();
-    $notifctions = json_encode(array(
-        'volume' => false,
-        'time' => false,
-    ));
-    $stmt = $connect->prepare("INSERT IGNORE INTO invoice (id_user, id_invoice, username,time_sell, Service_location, name_product, price_product, Volume, Volume_unit, Service_time,Status,notifctions) VALUES (?, ?,  ?, ?, ?, ?, ?,?,?,?,?,?)");
-    $Status = "active";
-    $info_product['name_product'] = "سرویس تست";
-    $info_product['price_product'] = "0";
-    $Status = "active";
-    $volumeUnit = 'MB';
-    $stmt->bind_param("ssssssssssss", $from_id, $randomString, $username_ac, $date, $marzban_list_get['name_panel'], $info_product['name_product'], $info_product['price_product'], $marzban_list_get['val_usertest'], $volumeUnit, $marzban_list_get['time_usertest'], $Status, $notifctions);
-    $stmt->execute();
-    $stmt->close();
-    $dataoutput = $ManagePanel->createUser($marzban_list_get['name_panel'], "usertest", $username_ac, $datac);
-    if ($dataoutput['username'] == null) {
-        $dataoutput['msg'] = json_encode($dataoutput['msg']);
         sendmessage($from_id, $textbotlang['users']['usertest']['errorcreat'], $keyboard, 'html');
+        $rxTestErrReason = htmlspecialchars((string) $rxTestProvision['msg'], ENT_QUOTES, 'UTF-8');
         $texterros = "
 ⭕️ یک کاربر قصد دریافت اکانت  تست داشت که ساخت کانفیگ با خطا مواجه شده و به کاربر کانفیگ داده نشد
 <blockquote>✍️ دلیل خطا :
-{$dataoutput['msg']}</blockquote>
+{$rxTestErrReason}</blockquote>
 <blockquote>آیدی کابر : $from_id</blockquote>
 <blockquote>نام کاربری کاربر : @$username</blockquote>
 <blockquote>نام پنل : {$marzban_list_get['name_panel']}</blockquote>";
@@ -181,10 +175,11 @@ if ($user['step'] == "createusertest" || preg_match('/locationtest_(.*)/', $data
                 'parse_mode' => "HTML"
             ]);
         }
-        step('home', $from_id);
-        update("invoice", "Status", "Unsuccessful", "id_invoice", $randomString);
         return;
     }
+    $dataoutput = $rxTestProvision['output'];
+    $username_ac = (string) ($rxTestProvision['username'] ?? $username_ac);
+    rx_notify_username_renamed($from_id, $dataoutput, $marzban_list_get);
     $output_config_link = "";
     $config = "";
     $output_config_link = rxShouldShowConnectionLink($marzban_list_get, $dataoutput['file_ext'] ?? null) ? rxResolveConnectionLink($marzban_list_get, $dataoutput['subscription_url'], $dataoutput['file_ext'] ?? null) : "";
@@ -212,21 +207,25 @@ if ($user['step'] == "createusertest" || preg_match('/locationtest_(.*)/', $data
 
 🧑‍🦯 شما میتوانید شیوه اتصال را  با فشردن دکمه زیر و انتخاب سیستم عامل خود را دریافت کنید";
     }
-    $usertest_day = $marzban_list_get['time_usertest'];
-    $usertest_volume = $marzban_list_get['val_usertest'];
-    if (intval($usertest_day) == 0)
-        $usertest_day = $textbotlang['users']['stateus']['Unlimited'];
-    if (intval($usertest_volume) == 0)
-        $usertest_volume = $textbotlang['users']['stateus']['Unlimited'];
-    else
-        $usertest_volume = formatBytes((float) $usertest_volume * 1048576);
-    $textcreatuser = str_replace('{username}', $dataoutput['username'], $datatextbot['textaftertext']);
+    $usertest_day = rx_test_display_time($rxTestSettings);
+    $usertest_volume = rx_test_display_volume($rxTestSettings);
+    $textcreatuser = str_replace('{username}', guardDisplayUsername($dataoutput['username'], $marzban_list_get), $datatextbot['textaftertext']);
     $textcreatuser = str_replace('{name_service}', "تست", $textcreatuser);
     $textcreatuser = str_replace('{location}', $marzban_list_get['name_panel'], $textcreatuser);
     $textcreatuser = str_replace('{day}', $usertest_day, $textcreatuser);
     $textcreatuser = preg_replace('/\{volume\}[ \t\x{200c}]*(?:گیگابایت|گیگ|GB|مگابایت|مگ|MB)?/iu', $usertest_volume, $textcreatuser);
     $textcreatuser = applyConnectionPlaceholders($textcreatuser, $output_config_link, $config);
-    sendMessageService($marzban_list_get, $dataoutput['configs'], $output_config_link, $dataoutput['username'], $usertestinfo, $textcreatuser, $randomString);
+    $rxTestDelivered = true;
+    try {
+        sendMessageService($marzban_list_get, $dataoutput['configs'], $output_config_link, $dataoutput['username'], $usertestinfo, $textcreatuser, $randomString);
+    } catch (Throwable $rxTestErr) {
+        $rxTestDelivered = false;
+        error_log('[usertest] delivery failed: ' . $rxTestErr->getMessage());
+    }
+    rx_test_mark_delivery($rxTestReservation, $rxTestDelivered);
+    if (!$rxTestDelivered) {
+        sendmessage($from_id, $datatextbot['dyn_testaccount_delivery_failed_saved'] ?? "⚠️ اکانت تست ساخته شد اما ارسال جزئیات آن ناموفق بود. اطلاعات سرویس در بخش «سرویس‌های من» در دسترس است.", null, 'HTML');
+    }
     sendmessage($from_id, $textbotlang['users']['selectoption'], $keyboard, 'HTML');
     step('home', $from_id);
     if ($marzban_list_get['MethodUsername'] == "متن دلخواه + عدد ترتیبی" || $marzban_list_get['MethodUsername'] == "نام کاربری + عدد به ترتیب" || $marzban_list_get['MethodUsername'] == "آیدی عددی+عدد ترتیبی" || $marzban_list_get['MethodUsername'] == "متن دلخواه نماینده + عدد ترتیبی") {
@@ -245,14 +244,16 @@ if ($user['step'] == "createusertest" || preg_match('/locationtest_(.*)/', $data
         ]
     ]);
     $timejalali = jdate('Y/m/d H:i:s');
+    $rxTestReportTime = !empty($rxTestSettings['time_unlimited']) ? rx_test_unlimited_label() : rx_test_stored_hours($rxTestSettings) . " ساعت";
+    $rxTestReportVolume = !empty($rxTestSettings['volume_unlimited']) ? rx_test_unlimited_label() : rx_test_stored_mb($rxTestSettings) . " MB";
     $text_report = "📣 جزئیات ساخت اکانت تست در ربات شما ثبت شد .
 <blockquote>▫️آیدی عددی کاربر : <code>$from_id</code></blockquote>
 <blockquote>▫️نام کاربری کاربر :@$username</blockquote>
-<blockquote>▫️نام کاربری کانفیگ :$username_ac</blockquote>
+<blockquote>▫️نام کاربری کانفیگ :" . guardDisplayUsername($username_ac, $marzban_list_get) . "</blockquote>
 <blockquote>▫️نام کاربر : $first_name</blockquote>
 <blockquote>▫️موقعیت سرویس : {$marzban_list_get['name_panel']}</blockquote>
-<blockquote>▫️زمان خریداری شده : {$marzban_list_get['time_usertest']} ساعت</blockquote>
-<blockquote>▫️حجم خریداری شده : {$marzban_list_get['val_usertest']} MB</blockquote>
+<blockquote>▫️زمان خریداری شده : {$rxTestReportTime}</blockquote>
+<blockquote>▫️حجم خریداری شده : {$rxTestReportVolume}</blockquote>
 <blockquote>▫️کد پیگیری: $randomString</blockquote>
 <blockquote>▫️نوع کاربر : {$user['agent']}</blockquote>
 <blockquote>▫️شماره تلفن کاربر : {$user['number']}</blockquote>
@@ -1141,7 +1142,7 @@ https://t.me/$usernamebot?start={$user['codeInvitation']}";
         if (!panel_feature_enabled($location, 'categorytime')) {
             $marzban_list_get = $locationproduct;
             $eextraprice = json_decode($marzban_list_get['pricecustomvolume'], true);
-            $custompricevalue = $eextraprice[$user['agent']];
+            $custompricevalue = fx_adjust_base_toman($eextraprice[$user['agent']], $marzban_list_get, 'custom_volume');
             $mainvolume = json_decode($marzban_list_get['mainvolume'], true);
             $mainvolume = $mainvolume[$user['agent']];
             $maxvolume = json_decode($marzban_list_get['maxvolume'], true);
@@ -1286,7 +1287,7 @@ https://t.me/$usernamebot?start={$user['codeInvitation']}";
     $nullproduct = (int)$productCountStmt->fetchColumn();
     if ($nullproduct == 0) {
         $eextraprice = json_decode($marzban_list_get['pricecustomvolume'], true);
-        $custompricevalue = $eextraprice[$user['agent']];
+        $custompricevalue = fx_adjust_base_toman($eextraprice[$user['agent']], $marzban_list_get, 'custom_volume');
         $mainvolume = json_decode($marzban_list_get['mainvolume'], true);
         $mainvolume = $mainvolume[$user['agent']];
         $maxvolume = json_decode($marzban_list_get['maxvolume'], true);
@@ -1438,7 +1439,7 @@ https://t.me/$usernamebot?start={$user['codeInvitation']}";
     $userdate = json_decode($user['Processing_value'], true);
     $marzban_list_get = select("marzban_panel", "*", "name_panel", $userdate['name_panel'], "select");
     $eextraprice = json_decode($marzban_list_get['pricecustomvolume'], true);
-    $custompricevalue = $eextraprice[$user['agent']];
+    $custompricevalue = fx_adjust_base_toman($eextraprice[$user['agent']], $marzban_list_get, 'custom_volume');
     $mainvolume = json_decode($marzban_list_get['mainvolume'], true);
     $mainvolume = $mainvolume[$user['agent']];
     $maxvolume = json_decode($marzban_list_get['maxvolume'], true);
@@ -1472,7 +1473,7 @@ https://t.me/$usernamebot?start={$user['codeInvitation']}";
     }
     $marzban_list_get = select("marzban_panel", "*", "name_panel", $userdate['name_panel'], "select");
     $eextraprice = json_decode($marzban_list_get['pricecustomtime'], true);
-    $customtimevalueprice = $eextraprice[$user['agent']];
+    $customtimevalueprice = fx_adjust_base_toman($eextraprice[$user['agent']], $marzban_list_get, 'custom_time');
     update("user", "Processing_value_one", $text, "id", $from_id);
     $textcustom = "⌛️ زمان سرویس خود را انتخاب نمایید
 📌 تعرفه هر روز  : " . rxFormatToman($customtimevalueprice) . "  تومان
@@ -1568,9 +1569,9 @@ https://t.me/$usernamebot?start={$user['codeInvitation']}";
     }
     update("user", "Processing_value_one", $loc, "id", $from_id);
     $eextraprice = json_decode($marzban_list_get['pricecustomvolume'], true);
-    $custompricevalue = $eextraprice[$user['agent']];
+    $custompricevalue = fx_adjust_base_toman($eextraprice[$user['agent']], $marzban_list_get, 'custom_volume');
     $eextraprice = json_decode($marzban_list_get['pricecustomtime'], true);
-    $customtimevalueprice = $eextraprice[$user['agent']];
+    $customtimevalueprice = fx_adjust_base_toman($eextraprice[$user['agent']], $marzban_list_get, 'custom_time');
     $parts = explode("_", $loc);
     if ($parts[0] == "customvolume") {
         $info_product['Volume_constraint'] = $parts[2];
@@ -1599,10 +1600,16 @@ https://t.me/$usernamebot?start={$user['codeInvitation']}";
         step('home', $from_id);
         return;
     }
+    $fxBuyKinds = $parts[0] == "customvolume" ? ['custom_volume', 'custom_time'] : 'product';
+    if ($parts[0] != "customvolume") {
+        $info_product = fx_apply_to_product($info_product, $marzban_list_get);
+    }
     if (intval($user['pricediscount']) != 0) {
         $resultper = ($info_product['price_product'] * $user['pricediscount']) / 100;
         $info_product['price_product'] = $info_product['price_product'] - $resultper;
     }
+    $info_product['price_product'] = fx_finalize_amount($info_product['price_product'], $marzban_list_get, $fxBuyKinds);
+    fx_quote_store($from_id, fx_quote_context_key('buy', (string) $loc), $info_product['price_product'], $marzban_list_get, $fxBuyKinds);
     $randomString = bin2hex(random_bytes(2));
     $text = strtolower($text);
     $username_ac = generateUsername($from_id, $marzban_list_get['MethodUsername'], $username, $randomString, $text, $marzban_list_get['namecustom'], $user['namecustom']);
@@ -1623,7 +1630,7 @@ https://t.me/$usernamebot?start={$user['codeInvitation']}";
     $info_product_price_product = number_format($info_product['price_product']);
     $userBalance = number_format($user['Balance']);
     $replacements = [
-        '{username}' => $username_ac,
+        '{username}' => guardDisplayUsername($username_ac, $marzban_list_get),
         '{name_product}' => $info_product['name_product'],
         '{Service_time}' => $info_product['Service_time'],
 
@@ -1634,7 +1641,7 @@ https://t.me/$usernamebot?start={$user['codeInvitation']}";
     ];
     $textin = strtr($datatextbot['text_pishinvoice'], $replacements);
     if ($usernameWasRenamed) {
-        $textin = "⚠️ نام کاربری «{$requestedUsername_ac}» قبلاً استفاده شده بود؛ نام کاربری «{$username_ac}» برای شما در نظر گرفته شد.\n\n" . $textin;
+        $textin = "⚠️ نام کاربری «" . guardDisplayUsername($requestedUsername_ac, $marzban_list_get) . "» قبلاً استفاده شده بود؛ نام کاربری «" . guardDisplayUsername($username_ac, $marzban_list_get) . "» برای شما در نظر گرفته شد.\n\n" . $textin;
     }
     if (intval($info_product['Volume_constraint']) == 0) {
         $textin = str_replace('گیگ', "", $textin);
@@ -1685,9 +1692,9 @@ https://t.me/$usernamebot?start={$user['codeInvitation']}";
         return;
     }
     $eextraprice = json_decode($marzban_list_get['pricecustomvolume'], true);
-    $custompricevalue = $eextraprice[$user['agent']];
+    $custompricevalue = fx_adjust_base_toman($eextraprice[$user['agent']], $marzban_list_get, 'custom_volume');
     $eextraprice = json_decode($marzban_list_get['pricecustomtime'], true);
-    $customtimevalueprice = $eextraprice[$user['agent']];
+    $customtimevalueprice = fx_adjust_base_toman($eextraprice[$user['agent']], $marzban_list_get, 'custom_time');
     if ($parts[0] == "customvolume") {
         $info_product['Volume_constraint'] = $parts[2];
         $info_product['name_product'] = $textbotlang['users']['customsellvolume']['title'];
@@ -1723,6 +1730,10 @@ https://t.me/$usernamebot?start={$user['codeInvitation']}";
     if (!array_key_exists('note', $info_product)) {
         $info_product['note'] = '';
     }
+    $fxBuyKinds = $parts[0] == "customvolume" ? ['custom_volume', 'custom_time'] : 'product';
+    if ($parts[0] != "customvolume") {
+        $info_product = fx_apply_to_product($info_product, $marzban_list_get);
+    }
     if ($datain == "confirmandgetserviceDiscount") {
         $discountcode = select("DiscountSell", "*", "codeDiscount", $partsdic[0], "count");
         if ($discountcode == 0) {
@@ -1730,9 +1741,35 @@ https://t.me/$usernamebot?start={$user['codeInvitation']}";
             return;
         }
         $priceproduct = $partsdic[1];
+        $fxBuyDiscountKey = fx_quote_context_key('buy_discount', (string) $user['Processing_value_one']);
+        if (!fx_quote_check($from_id, $fxBuyDiscountKey, $priceproduct, $marzban_list_get, $fxBuyKinds)) {
+            $fxRecheck = MiniDiscount::validateSell((string) $partsdic[0], 'buy', (string)($info_product['code_product'] ?? ''), (string)($marzban_list_get['code_panel'] ?? ''), (string)($info_product['category'] ?? ''), $user);
+            if (empty($fxRecheck['ok'])) {
+                sendmessage($from_id, (string)($fxRecheck['reason'] ?? $textbotlang['Admin']['Discount']['invalidcodedis']), null, 'HTML');
+                return;
+            }
+            $fxNewDiscounted = fx_apply_discount_rule(fx_finalize_amount($info_product['price_product'], $marzban_list_get, $fxBuyKinds), (string) $fxRecheck['value_type'], (float) $fxRecheck['value']);
+            $fxNewDiscounted = fx_finalize_amount($fxNewDiscounted, $marzban_list_get, $fxBuyKinds);
+            update("user", "Processing_value_four", $partsdic[0] . "_" . $fxNewDiscounted, "id", $from_id);
+            fx_quote_store($from_id, $fxBuyDiscountKey, $fxNewDiscounted, $marzban_list_get, $fxBuyKinds);
+            $_rx_nav_s = (isset($_rx_nav_styles) && is_array($_rx_nav_styles)) ? $_rx_nav_styles : [];
+            sendmessage($from_id, fx_price_changed_text($fxNewDiscounted), json_encode(['inline_keyboard' => [
+                [['text' => "💰 پرداخت و دریافت سرویس", 'callback_data' => "confirmandgetserviceDiscount"]],
+                [rx_kb_style(['text' => $textbotlang['users']['backbtn'], 'callback_data' => "backuser"], 'backuser', $_rx_nav_s)],
+            ]]), 'HTML');
+            return;
+        }
     } else {
         $priceproduct = $info_product['price_product'];
+        $fxBuyCheckAmount = fx_finalize_amount(fx_apply_user_discount($priceproduct, $user['pricediscount']), $marzban_list_get, $fxBuyKinds);
+        $fxBuyQuoteKey = fx_quote_context_key('buy', (string) $user['Processing_value_one']);
+        if (!fx_quote_check($from_id, $fxBuyQuoteKey, $fxBuyCheckAmount, $marzban_list_get, $fxBuyKinds)) {
+            fx_quote_store($from_id, $fxBuyQuoteKey, $fxBuyCheckAmount, $marzban_list_get, $fxBuyKinds);
+            sendmessage($from_id, fx_price_changed_text($fxBuyCheckAmount), $paymentom, 'HTML');
+            return;
+        }
     }
+    $fxBuyListPrice = $info_product['price_product'];
     $username_ac = strtolower($user['Processing_value_tow']);
     $DataUserOut = $marzban_list_get['type'] != "Manualsale" ? $ManagePanel->DataUser($marzban_list_get['name_panel'], $username_ac) : null;
     if (isset($DataUserOut['username']) || rxTableValueExists('invoice', 'username', $username_ac)) {
@@ -1762,6 +1799,7 @@ https://t.me/$usernamebot?start={$user['codeInvitation']}";
         $priceproduct = $priceproduct - $result;
         sendmessage($from_id, sprintf($textbotlang['users']['Discount']['discountapplied'], $user['pricediscount']), null, 'HTML');
     }
+    $priceproduct = fx_finalize_amount($priceproduct, $marzban_list_get, $fxBuyKinds);
     $notifctions = json_encode(array(
         'volume' => false,
         'time' => false,
@@ -1775,6 +1813,8 @@ https://t.me/$usernamebot?start={$user['codeInvitation']}";
     $stmt->bind_param("sssssssssssssssss", $from_id, $randomString, $username_ac, $date, $marzban_list_get['name_panel'], $info_product['name_product'], $priceproduct, $info_product['Volume_constraint'], $info_product['Service_time'], $Status, $userdate['nameconfig'], $user['affiliates'], $notifctions, $invoiceIpLimit, $invoiceHwidLimit, $invoiceSymbolicLimitEnabled, $invoiceSymbolicLimitUsers);
     $stmt->execute();
     $stmt->close();
+    $fxBuyBasePrice = $parts[0] == "customvolume" ? fx_custom_base_price($marzban_list_get, $user['agent'], $parts[2], $parts[1]) : ($info_product['fx_base_price'] ?? $fxBuyListPrice);
+    fx_store_invoice_snapshot($randomString, fx_pricing_snapshot($marzban_list_get, $fxBuyKinds, $fxBuyBasePrice, $priceproduct, (float) $fxBuyListPrice - (float) $priceproduct, ['product' => (string)($info_product['code_product'] ?? '')]));
     if ($priceproduct > $user['Balance'] && $user['agent'] != "n2" && intval($priceproduct) != 0) {
         $marzbandirectpay = panel_feature_enabled($marzban_list_get, 'directbuy') ? "ondirectbuy" : "offdirectbuy";
         $Balance_prim = $priceproduct - $user['Balance'];
@@ -1849,15 +1889,9 @@ https://t.me/$usernamebot?start={$user['codeInvitation']}";
         step('home', $from_id);
         return;
     }
-    $dataoutput = $ManagePanel->createUser($marzban_list_get['name_panel'], $info_product['code_product'], $username_ac, $datac);
+    $dataoutput = $ManagePanel->createUser($marzban_list_get['name_panel'], $info_product['code_product'], $username_ac, $datac, true);
     if (!isset($dataoutput['username']) || $dataoutput['username'] === null || $dataoutput['username'] === '') {
-        $errorMessage = $dataoutput['msg'] ?? 'unknown error';
-        if (is_array($errorMessage) || is_object($errorMessage)) {
-            $errorMessage = json_encode($errorMessage, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-        } else {
-            $errorMessage = (string) $errorMessage;
-        }
-        $dataoutput['msg'] = $errorMessage;
+        $dataoutput['msg'] = rx_panel_error_text($dataoutput['msg'] ?? null, $dataoutput['detail'] ?? null);
         sendmessage($from_id, $textbotlang['users']['sell']['ErrorConfig'], $keyboard, 'HTML');
         $texterros = "⭕️ خطای ساخت اشتراک
 <blockquote>✍️ دلیل خطا :
@@ -1876,6 +1910,8 @@ https://t.me/$usernamebot?start={$user['codeInvitation']}";
         step('home', $from_id);
         return;
     }
+    $username_ac = rx_adopt_created_username($dataoutput, $username_ac, $randomString);
+    rx_notify_username_renamed($from_id, $dataoutput, $marzban_list_get);
     update("invoice", "Status", "active", "username", $username_ac);
     $output_config_link = "";
     $config = "";
@@ -1892,7 +1928,7 @@ https://t.me/$usernamebot?start={$user['codeInvitation']}";
         $info_product['Service_time'] = $textbotlang['users']['stateus']['Unlimited'];
     if (intval($info_product['Volume_constraint']) == 0)
         $info_product['Volume_constraint'] = $textbotlang['users']['stateus']['Unlimited'];
-    $textcreatuser = str_replace('{username}', "<code>{$dataoutput['username']}</code>", $datatextbot['textafterpay']);
+    $textcreatuser = str_replace('{username}', "<code>" . guardDisplayUsername($dataoutput['username'], $marzban_list_get) . "</code>", $datatextbot['textafterpay']);
     $textcreatuser = str_replace('{name_service}', $info_product['name_product'], $textcreatuser);
     $textcreatuser = str_replace('{location}', $marzban_list_get['name_panel'], $textcreatuser);
     $textcreatuser = str_replace('{day}', $info_product['Service_time'], $textcreatuser);
@@ -2036,7 +2072,7 @@ https://t.me/$usernamebot?start={$user['codeInvitation']}";
 $textonebuy
 <blockquote>▫️آیدی عددی کاربر : <code>$from_id</code></blockquote>
 <blockquote>▫️نام کاربری کاربر :@$username</blockquote>
-<blockquote>▫️نام کاربری کانفیگ :$username_ac</blockquote>
+<blockquote>▫️نام کاربری کانفیگ :" . guardDisplayUsername($username_ac, $marzban_list_get) . "</blockquote>
 <blockquote>▫️نام کاربر : $first_name</blockquote>
 <blockquote>▫️موقعیت سرویس سرویس : {$userdate['name_panel']}</blockquote>
 <blockquote>▫️نام محصول :{$info_product['name_product']}</blockquote>
@@ -2052,13 +2088,13 @@ $textonebuy
 <blockquote>▫️قیمت نهایی : {$rxFmtPriceproduct} تومان</blockquote>
 <blockquote>▫️زمان خرید : $timejalali</blockquote>";
     if (strlen($setting['Channel_Report'] ?? '') > 0) {
-        telegram('sendmessage', [
+        rx_sendTopicReport([
             'chat_id' => $setting['Channel_Report'],
             'message_thread_id' => $buyreport,
             'text' => $text_report,
             'parse_mode' => "HTML",
             'reply_markup' => $Response
-        ]);
+        ], ['flow' => 'buy', 'order_id' => (string) ($randomString ?? ''), 'user_id' => (string) $from_id]);
     }
     if (function_exists('faoxima_public_purchase_log_event')) {
         faoxima_public_purchase_log_event('new_sub', [
@@ -2124,9 +2160,9 @@ $textonebuy
     step('payment', $from_id);
     $parts = explode("_", $user['Processing_value_one']);
     $eextraprice = json_decode($marzban_list_get['pricecustomvolume'], true);
-    $custompricevalue = $eextraprice[$user['agent']];
+    $custompricevalue = fx_adjust_base_toman($eextraprice[$user['agent']], $marzban_list_get, 'custom_volume');
     $eextraprice = json_decode($marzban_list_get['pricecustomtime'], true);
-    $customtimevalueprice = $eextraprice[$user['agent']];
+    $customtimevalueprice = fx_adjust_base_toman($eextraprice[$user['agent']], $marzban_list_get, 'custom_time');
     if ($parts[0] == "customvolume") {
         $info_product['Volume_constraint'] = $parts[2];
         $info_product['name_product'] = $textbotlang['users']['customsellvolume']['title'];
@@ -2152,6 +2188,11 @@ $textonebuy
         step('home', $from_id);
         return;
     }
+    $fxBuyKinds = $parts[0] == "customvolume" ? ['custom_volume', 'custom_time'] : 'product';
+    if ($parts[0] != "customvolume") {
+        $info_product = fx_apply_to_product($info_product, $marzban_list_get);
+    }
+    $info_product['price_product'] = fx_finalize_amount($info_product['price_product'], $marzban_list_get, $fxBuyKinds);
     $info_productmain = $info_product['price_product'];
     if ($__dvt === 'free') {
         $info_product['price_product'] = 0;
@@ -2168,6 +2209,7 @@ $textonebuy
         $info_product['Volume_constraint'] = $textbotlang['users']['stateus']['Unlimited'];
     if ($info_product['price_product'] < 0)
         $info_product['price_product'] = 0;
+    $info_product['price_product'] = fx_finalize_amount($info_product['price_product'], $marzban_list_get, $fxBuyKinds);
     $rxFmtInfoProductmain = rxFormatToman($info_productmain);
     $rxFmtInfoProductPriceDiscounted = rxFormatToman($info_product['price_product']);
     $rxFmtUserBalanceInvoicePreview = rxFormatToman($user['Balance']);
@@ -2191,6 +2233,7 @@ $textonebuy
     ]);
     $parametrsendvalue = $text . "_" . $info_product['price_product'];
     update("user", "Processing_value_four", $parametrsendvalue, "id", $from_id);
+    fx_quote_store($from_id, fx_quote_context_key('buy_discount', (string) $user['Processing_value_one']), $info_product['price_product'], $marzban_list_get, $fxBuyKinds);
     sendmessage($from_id, $textin, $paymentDiscount, 'HTML');
 } elseif ($text == "🗂 خرید انبوه" || $datain == "kharidanbuh") {
     if ($setting['bulkbuy'] == "offbulk") {
@@ -2264,7 +2307,7 @@ $textonebuy
 } elseif ($datain == "customsellvolumeom") {
     $marzban_list_get = select("marzban_panel", "*", "name_panel", $user['Processing_value'], "select");
     $eextraprice = json_decode($marzban_list_get['pricecustomvolume'], true);
-    $custompricevalue = $eextraprice[$user['agent']];
+    $custompricevalue = fx_adjust_base_toman($eextraprice[$user['agent']], $marzban_list_get, 'custom_volume');
     $textcustom = "🔋 لطفا مقدار حجم سرویس مورد نظر را وارد کنید ( برحسب گیگابایت ) :
 📌 تعرفه هر گیگ :  " . rxFormatToman($custompricevalue) . "
 🔔 حداقل حجم 1 گیگابایت و حداکثر 1000 گیگابایت می باشد.";
@@ -2275,7 +2318,7 @@ $textonebuy
     if (!isset($update['message']) && empty($text)) { return; }
     $marzban_list_get = select("marzban_panel", "*", "name_panel", $user['Processing_value'], "select");
     $eextraprice = json_decode($marzban_list_get['pricecustomtime'], true);
-    $customtimevalueprice = $eextraprice[$user['agent']];
+    $customtimevalueprice = fx_adjust_base_toman($eextraprice[$user['agent']], $marzban_list_get, 'custom_time');
     $mainvolume = json_decode($marzban_list_get['mainvolume'], true);
     $mainvolume = $mainvolume[$user['agent']];
     $maxvolume = json_decode($marzban_list_get['maxvolume'], true);
@@ -2371,9 +2414,9 @@ $textonebuy
     }
     update("user", "Processing_value_one", $loc, "id", $from_id);
     $eextraprice = json_decode($marzban_list_get['pricecustomvolume'], true);
-    $custompricevalue = $eextraprice[$user['agent']];
+    $custompricevalue = fx_adjust_base_toman($eextraprice[$user['agent']], $marzban_list_get, 'custom_volume');
     $eextraprice = json_decode($marzban_list_get['pricecustomtime'], true);
-    $customtimevalueprice = $eextraprice[$user['agent']];
+    $customtimevalueprice = fx_adjust_base_toman($eextraprice[$user['agent']], $marzban_list_get, 'custom_time');
     $parts = explode("_", $loc);
     if ($parts[0] == "customvolume") {
         $info_product['Volume_constraint'] = $parts[2];
@@ -2408,13 +2451,19 @@ $textonebuy
         $info_product['Volume_constraint'] = $textbotlang['users']['stateus']['Unlimited'];
     if ($info_product['Service_time'] == 0)
         $info_product['Service_time'] = $textbotlang['users']['stateus']['Unlimited'];
+    $fxBulkKinds = $parts[0] == "customvolume" ? ['custom_volume', 'custom_time'] : 'product';
+    if ($parts[0] != "customvolume") {
+        $info_product = fx_apply_to_product($info_product, $marzban_list_get);
+    }
     $info_product['price_product'] = intval($info_product['price_product']) * intval($user['Processing_value_four']);
+    $info_product['price_product'] = fx_finalize_amount($info_product['price_product'], $marzban_list_get, $fxBulkKinds);
     update("user", "Processing_value_price", $info_product['price_product'], "id", $from_id);
+    fx_quote_store($from_id, fx_quote_context_key('bulk', (string) $loc . '|' . (string) $user['Processing_value_four']), $info_product['price_product'], $marzban_list_get, $fxBulkKinds);
     $price_product_format = number_format($info_product['price_product']);
     $userbalancepish = number_format($user['Balance']);
     $textin = "
 📇 پیش فاکتور شما:
-👤 نام کاربری: <code>$username_ac</code>
+👤 نام کاربری: <code>" . guardDisplayUsername($username_ac, $marzban_list_get) . "</code>
 🔐 نام سرویس: {$info_product['name_product']}
 📆 مدت اعتبار: {$info_product['Service_time']} روز
 💶 قیمت: $price_product_format  تومان
@@ -2428,9 +2477,9 @@ $textonebuy
 } elseif ($user['step'] == "payments" && $datain == "confirmandgetservice") {
     $marzban_list_get = select("marzban_panel", "*", "name_panel", $user['Processing_value'], "select");
     $eextraprice = json_decode($marzban_list_get['pricecustomvolume'], true);
-    $custompricevalue = $eextraprice[$user['agent']];
+    $custompricevalue = fx_adjust_base_toman($eextraprice[$user['agent']], $marzban_list_get, 'custom_volume');
     $eextraprice = json_decode($marzban_list_get['pricecustomtime'], true);
-    $customtimevalueprice = $eextraprice[$user['agent']];
+    $customtimevalueprice = fx_adjust_base_toman($eextraprice[$user['agent']], $marzban_list_get, 'custom_time');
     $parts = explode("_", $user['Processing_value_one']);
     if ($parts[0] == "customvolume") {
         $info_product['Volume_constraint'] = $parts[2];
@@ -2458,10 +2507,24 @@ $textonebuy
         step('home', $from_id);
         return;
     }
+    $fxBulkKinds = $parts[0] == "customvolume" ? ['custom_volume', 'custom_time'] : 'product';
+    if ($parts[0] != "customvolume") {
+        $info_product = fx_apply_to_product($info_product, $marzban_list_get);
+    }
     if ($user['Processing_value_price'] !== null && $user['Processing_value_price'] !== '') {
         $priceproduct = (float) $user['Processing_value_price'];
     } else {
         $priceproduct = $info_product['price_product'] * $user['Processing_value_four'];
+    }
+    if (fx_context($marzban_list_get, $fxBulkKinds) !== null) {
+        $fxBulkFresh = fx_finalize_amount(intval($info_product['price_product']) * intval($user['Processing_value_four']), $marzban_list_get, $fxBulkKinds);
+        $fxBulkQuoteKey = fx_quote_context_key('bulk', (string) $user['Processing_value_one'] . '|' . (string) $user['Processing_value_four']);
+        if (!fx_quote_check($from_id, $fxBulkQuoteKey, $fxBulkFresh, $marzban_list_get, $fxBulkKinds) || (int) round($priceproduct) !== (int) $fxBulkFresh) {
+            update("user", "Processing_value_price", $fxBulkFresh, "id", $from_id);
+            fx_quote_store($from_id, $fxBulkQuoteKey, $fxBulkFresh, $marzban_list_get, $fxBulkKinds);
+            Editmessagetext($from_id, $message_id, fx_price_changed_text($fxBulkFresh), $paymentom);
+            return;
+        }
     }
     Editmessagetext($from_id, $message_id, $text_inline, null);
     $username_ac = $user['Processing_value_tow'];
@@ -2471,6 +2534,7 @@ $textonebuy
         $priceproduct = $priceproduct - $result;
         sendmessage($from_id, sprintf($textbotlang['users']['Discount']['discountapplied'], $user['pricediscount']), null, 'HTML');
     }
+    $priceproduct = fx_finalize_amount($priceproduct, $marzban_list_get, $fxBulkKinds);
     if ($priceproduct > $user['Balance'] && $user['agent'] != "n2") {
         $marzbandirectpay = panel_feature_enabled($user['Processing_value'], 'directbuy') ? "ondirectbuy" : "offdirectbuy";
         if ($marzbandirectpay == "offdirectbuy") {
@@ -2604,9 +2668,9 @@ $textonebuy
         if (isset($get_username_Check['username']) || rxTableValueExists('invoice', 'username', $username_acc)) {
             $username_acc = $random_number . "-" . $username_acc;
         }
-        $dataoutput = $ManagePanel->createUser($marzban_list_get['name_panel'], $info_product['code_product'], $username_acc, $datac);
+        $dataoutput = $ManagePanel->createUser($marzban_list_get['name_panel'], $info_product['code_product'], $username_acc, $datac, true);
         if ($dataoutput['username'] == null) {
-            $dataoutput['msg'] = json_encode($dataoutput['msg']);
+            $dataoutput['msg'] = rx_panel_error_text($dataoutput['msg'] ?? null, $dataoutput['detail'] ?? null);
             sendmessage($from_id, $textbotlang['users']['sell']['ErrorConfig'], $keyboard, 'HTML');
             $texterros = "
 ⭕️ خطا در ساخت اکانت در بخش انبوه
@@ -2626,6 +2690,8 @@ $textonebuy
             step('home', $from_id);
             return;
         }
+        $username_acc = rx_adopt_created_username($dataoutput, $username_acc);
+        rx_notify_username_renamed($from_id, $dataoutput, $marzban_list_get);
         $invoiceIpLimit = (string)(isset($info_product['ip_limit']) ? intval($info_product['ip_limit']) : 0);
         $invoiceHwidLimit = (string)(isset($info_product['hwid_limit']) ? intval($info_product['hwid_limit']) : 0);
         $invoiceSymbolicLimitEnabled = (string)($info_product['symbolic_limit_enabled'] ?? '0');
@@ -2656,7 +2722,7 @@ $textonebuy
 
 🧑‍🦯 شما میتوانید شیوه اتصال را  با فشردن دکمه زیر و انتخاب سیستم عامل خود را دریافت کنید";
         }
-        $textcreatuser = str_replace('{username}', "<code>{$dataoutput['username']}</code>", $datatextbot['textafterpay']);
+        $textcreatuser = str_replace('{username}', "<code>" . guardDisplayUsername($dataoutput['username'], $marzban_list_get) . "</code>", $datatextbot['textafterpay']);
         $textcreatuser = str_replace('{name_service}', $info_product['name_product'], $textcreatuser);
         $textcreatuser = str_replace('{location}', $marzban_list_get['name_panel'], $textcreatuser);
         $textcreatuser = str_replace('{day}', $info_product['Service_time'], $textcreatuser);
@@ -2701,12 +2767,12 @@ $textonebuy
 <blockquote>▫️تعداد کانفیگ : {$user['Processing_value_four']} عدد</blockquote>
 <blockquote>▫️زمان خرید : $timejalali</blockquote>";
     if (strlen($setting['Channel_Report'] ?? '') > 0) {
-        telegram('sendmessage', [
+        rx_sendTopicReport([
             'chat_id' => $setting['Channel_Report'],
             'message_thread_id' => $buyreport,
             'text' => $text_report,
             'parse_mode' => "HTML"
-        ]);
+        ], ['flow' => 'bulk_buy', 'order_id' => (string) ($randomString ?? ''), 'user_id' => (string) $from_id]);
     }
     if (function_exists('faoxima_public_purchase_log_event')) {
         faoxima_public_purchase_log_event('new_sub', [
@@ -3242,16 +3308,17 @@ $textonebuy
     if ($datain == "cart_to_offline") {
         $from_id_sql = (string) $from_id;
 
+        $_cc_keep_invoice = "{$user['Processing_value_tow']}|{$user['Processing_value_one']}";
         $stale_cutoff = date('Y/m/d H:i:s', time() - 15 * 60);
-        $_purge = $connect->prepare("DELETE FROM Payment_report WHERE id_user = ? AND payment_Status = 'Unpaid' AND Payment_Method = 'cart to cart' AND time < ?");
-        $_purge->bind_param("ss", $from_id_sql, $stale_cutoff);
-        $_purge->execute();
-        $_purge->close();
-
-        $_purge_ab = $connect->prepare("DELETE FROM Payment_report WHERE id_user = ? AND payment_Status IN ('Unpaid','pending') AND Payment_Method = 'cart to cart' AND (dec_not_confirmed IS NULL OR dec_not_confirmed = '')");
-        $_purge_ab->bind_param("s", $from_id_sql);
-        $_purge_ab->execute();
-        $_purge_ab->close();
+        rxCancelAbandonedCardPaymentsForUser($from_id_sql, 'stale_unpaid', [
+            'methods' => ['cart to cart'],
+            'created_before' => $stale_cutoff,
+            'preserve_invoice_key' => $_cc_keep_invoice,
+        ]);
+        rxCancelAbandonedCardPaymentsForUser($from_id_sql, 'superseded', [
+            'methods' => ['cart to cart'],
+            'preserve_invoice_key' => $_cc_keep_invoice,
+        ]);
 
         $_stmt = $connect->prepare("SELECT id FROM Payment_report WHERE id_user = ? AND (payment_Status = 'Unpaid' OR payment_Status = 'waiting' OR payment_Status = 'pending') AND Payment_Method = 'cart to cart' LIMIT 1");
         $_stmt->bind_param("s", $from_id_sql);
@@ -3332,11 +3399,33 @@ $textonebuy
         $invoice = "{$user['Processing_value_tow']}|{$user['Processing_value_one']}";
         $dateacc = date('Y/m/d H:i:s');
         $randomString = bin2hex(random_bytes(5));
-        $stmt = $connect->prepare("INSERT INTO Payment_report (id_user,id_order,time,price,payment_Status,Payment_Method,id_invoice) VALUES (?,?,?,?,?,?,?)");
         $payment_Status = "Unpaid";
         $Payment_Method = "cart to cart";
-        $stmt->bind_param("sssssss", $from_id, $randomString, $dateacc, $user['Processing_value'], $payment_Status, $Payment_Method, $invoice);
-        $stmt->execute();
+        $_cc_insert_ok = false;
+        try {
+            $stmt = $connect->prepare("INSERT INTO Payment_report (id_user,id_order,time,price,payment_Status,Payment_Method,id_invoice) VALUES (?,?,?,?,?,?,?)");
+            if ($stmt) {
+                $stmt->bind_param("sssssss", $from_id, $randomString, $dateacc, $user['Processing_value'], $payment_Status, $Payment_Method, $invoice);
+                $_cc_insert_ok = $stmt->execute() && $stmt->affected_rows === 1;
+                $_cc_insert_err = $stmt->error;
+                $stmt->close();
+            } else {
+                $_cc_insert_err = $connect->error;
+            }
+        } catch (Throwable $_cc_insert_e) {
+            $_cc_insert_ok = false;
+            $_cc_insert_err = $_cc_insert_e->getMessage();
+        }
+        if (!$_cc_insert_ok) {
+            if (function_exists('rx_log_event')) {
+                rx_log_event('CARD_PAYMENT_INSERT_FAILED', (string) ($_cc_insert_err ?? 'unknown'), [
+                    'id_user' => $from_id,
+                    'id_order' => $randomString,
+                ]);
+            }
+            sendmessage($from_id, faoxima_textbot_get('dyn_errors_purchase_or_payment_restart', '❌ خطایی رخ داده است لطفا مراحل خرید یا پرداخت  را مجدد انجام دهید'), $keyboard, 'HTML');
+            return;
+        }
 
         $_cv_active = !in_array($from_id, $admin_ids)
             && ($setting['card_verify_status'] ?? 'offcardverify') === 'oncardverify'
@@ -3895,7 +3984,7 @@ $textonebuy
         $Payment_Method = "tonpay";
         $stmt->bind_param("sssssss", $from_id, $randomString, $dateacc, $user['Processing_value'], $payment_Status, $Payment_Method, $invoice);
         $stmt->execute();
-        $payment = tonpayCreateInvoice($randomString, (int) $user['Processing_value']);
+        $payment = tonpayCreateInvoice($randomString, (int) $user['Processing_value'], (int) $from_id);
 
         $paymentErrorData = null;
         if (!is_array($payment)) {
@@ -3965,10 +4054,12 @@ $textonebuy
         }
         update("Payment_report", "tonpay_invoice_id", $invoiceId, "id_order", $randomString);
         update("Payment_report", "tonpay_invoice_url", $invoiceUrl, "id_order", $randomString);
+        tonpayStoreWebInvoiceUrl($randomString, $payment['web_invoice_url'] ?? '');
+        $tonpayPaymentUrl = tonpaySelectPaymentUrl($invoiceUrl, $payment['web_invoice_url'] ?? '', $randomString);
         $paymentkeyboard = json_encode([
             'inline_keyboard' => [
                 [
-                    ['text' => $textbotlang['users']['Balance']['payments'], 'url' => $invoiceUrl]
+                    ['text' => $textbotlang['users']['Balance']['payments'], 'url' => $tonpayPaymentUrl]
                 ]
             ]
         ]);

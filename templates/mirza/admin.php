@@ -6,7 +6,7 @@ if (!in_array($from_id, $admin_ids))
     return;
 if (in_array($text, $textadmin) || $datain == "PANEL") {
     if (!(function_exists('shell_exec') && is_callable('shell_exec'))) {
-        $cronCommandsendmessage = "*/1 * * * * curl " . mirzaCronUrl('sendmessage.php');
+        $cronCommandsendmessage = "*/1 * * * * curl https://$domainhosts/cron/sendmessage.php";
         sendmessage($from_id, sprintf($textbotlang['Admin']['cron']['active_manual_sendmessage'], $cronCommandsendmessage), null, 'HTML');
     }
     $text_admin = sprintf($textbotlang['Admin']['login-admin'], $version);
@@ -28,6 +28,7 @@ if ($text == $textbotlang['Admin']['Back-Adminment'] || $datain == "back_admin")
     $Check_filde = $connect->query("SHOW COLUMNS FROM channels LIKE 'Channel_lock'");
     if (mysqli_num_rows($Check_filde) == 1) {
         $connect->query("ALTER TABLE channels DROP COLUMN Channel_lock;");
+        $stmt->execute();
     }
     if ($channels_ch == 0) {
         $stmt = $pdo->prepare("INSERT INTO channels (link) VALUES (?)");
@@ -290,10 +291,8 @@ if ($text == $textbotlang['Admin']['keyboardadmin']['send_message']) {
         sendmessage($from_id, $textbotlang['Admin']['systemsms']['sendingmessage'], $Respuseronse, 'HTML');
     }
 } elseif ($datain == "cancel_sendmessage") {
-    if (is_file('cron/users.json'))
-        unlink('cron/users.json');
-    if (is_file('cron/info'))
-        unlink('cron/info');
+    unlink('cron/users.json');
+    unlink('cron/info');
     deletemessage($from_id, $message_id);
     sendmessage($from_id, $textbotlang['Admin']['systemsms']['canceledmessage'], null, 'HTML');
 } elseif ($text == $textbotlang['Admin']['systemsms']['forwardbulkbtn']) {
@@ -304,7 +303,7 @@ if ($text == $textbotlang['Admin']['keyboardadmin']['send_message']) {
     step('home', $from_id);
     $filename = 'user.txt';
     $stmt = $pdo->prepare("SELECT id FROM user");
-    $result = $stmt->execute();
+    $stmt->execute();
     if ($result) {
         $ids = array();
         while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
@@ -768,9 +767,7 @@ if (preg_match('/Confirm_pay_(\w+)/', $datain, $dataget)) {
         );
         return;
     }
-    if (DirectPayment($order_id) === false) {
-        return;
-    }
+    DirectPayment($order_id);
     $keyboard_accept = json_encode([
         'inline_keyboard' => [
             [
@@ -1723,7 +1720,6 @@ if ($text == $textbotlang['Admin']['affiliate']['giftstart']) {
 } elseif ($user['step'] == "getpricerequests") {
     if (!ctype_digit($text)) {
         sendmessage($from_id, $textbotlang['Admin']['invalidvalue'], null, 'HTML');
-        return;
     }
     $nameloc = select("invoice", "*", "username", $user['Processing_value'], "select");
     if ($nameloc['price_product'] < $text) {
@@ -1732,7 +1728,7 @@ if ($text == $textbotlang['Admin']['affiliate']['giftstart']) {
     }
     sendmessage($from_id, $textbotlang['users']['status']['acceptrequestnote'], $keyboardadmin, 'HTML');
     step("home", $from_id);
-    $marzban_list_get = mysqli_fetch_assoc(mysqli_query($connect, "SELECT * FROM marzban_panel WHERE name_panel = '" . mysqli_real_escape_string($connect, $nameloc['Service_location']) . "'"));
+    $marzban_list_get = mysqli_fetch_assoc(mysqli_query($connect, "SELECT * FROM marzban_panel WHERE name_panel = '{$nameloc['Service_location']}'"));
     $DataUserOut = $ManagePanel->DataUser($marzban_list_get['name_panel'], $user['Processing_value']);
     if (isset($DataUserOut['status'])) {
         $ManagePanel->RemoveUser($marzban_list_get['name_panel'], $user['Processing_value']);
@@ -1792,10 +1788,10 @@ if ($datain == "ononhold") {
 }
 if ($text == $textbotlang['Admin']['keyboardadmin']['settingscron']) {
     if (!(function_exists('shell_exec') && is_callable('shell_exec'))) {
-        $crontest = "*/15 * * * * curl " . mirzaCronUrl('configtest.php');
-        $cronvolume = "*/1 * * * * curl " . mirzaCronUrl('cronvolume.php');
-        $crontime = "*/1 * * * * curl " . mirzaCronUrl('cronday.php');
-        $cronremove = "*/1 * * * * curl " . mirzaCronUrl('removeexpire.php');
+        $crontest = "*/15 * * * * curl https://$domainhosts/cron/configtest.php";
+        $cronvolume = "*/1 * * * *  curl https://$domainhosts/cron/cronvolume.php";
+        $crontime = "*/1 * * * *  curl https://$domainhosts/cron/cronday.php";
+        $cronremove = "*/1 * * * *  curl https://$domainhosts/cron/removeexpire.php";
         sendmessage($from_id, sprintf($textbotlang['Admin']['cron']['active_manual'], $crontest, $cronvolume, $crontime, $cronremove), null, 'HTML');
         return;
     }
@@ -1803,79 +1799,80 @@ if ($text == $textbotlang['Admin']['keyboardadmin']['settingscron']) {
 }
 if ($text == $textbotlang['Admin']['cron']['test']['active']) {
     sendmessage($from_id, $textbotlang['Admin']['cron']['test']['dec'], null, 'HTML');
-    $cronUrl = mirzaCronUrl('configtest.php');
-    $cronCommand = "*/15 * * * * curl " . escapeshellarg($cronUrl);
-    $existingCronCommands = (string)shell_exec('crontab -l 2>/dev/null');
-    if (strpos($existingCronCommands, $cronUrl) === false) {
-        $command = "(crontab -l 2>/dev/null; echo " . escapeshellarg($cronCommand) . ") | crontab -";
+    $phpFilePath = escapeshellarg("https://$domainhosts/cron/configtest.php");
+    $cronCommand = "*/15 * * * * curl $phpFilePath";
+    $existingCronCommands = shell_exec('crontab -l');
+    if (strpos($existingCronCommands, $cronCommand) === false) {
+        $command = "(crontab -l ; echo '$cronCommand') | crontab -";
         shell_exec($command);
     }
 }
 if ($text == $textbotlang['Admin']['cron']['test']['disable']) {
     sendmessage($from_id, $textbotlang['Admin']['cron']['test']['disabled'], null, 'HTML');
-    $currentCronJobs = (string)shell_exec("crontab -l 2>/dev/null");
-    $jobToRemove = mirzaCronUrl('configtest.php');
+    $currentCronJobs = shell_exec("crontab -l");
+    $url = escapeshellarg("https://$domainhosts/cron/configtest.php");
+    $jobToRemove = "*/15 * * * * curl $url";
     $newCronJobs = preg_replace('/' . preg_quote($jobToRemove, '/') . '/', '', $currentCronJobs);
-    file_put_contents(sys_get_temp_dir() . '/crontab_' . md5(__DIR__) . '.txt', $newCronJobs);
-    shell_exec('crontab ' . sys_get_temp_dir() . '/crontab_' . md5(__DIR__) . '.txt');
-    unlink(sys_get_temp_dir() . '/crontab_' . md5(__DIR__) . '.txt');
+    file_put_contents('/tmp/crontab.txt', $newCronJobs);
+    shell_exec('crontab /tmp/crontab.txt');
+    unlink('/tmp/crontab.txt');
 }
 if ($text == $textbotlang['Admin']['cron']['volume']['active']) {
     sendmessage($from_id, $textbotlang['Admin']['cron']['volume']['dec'], null, 'HTML');
-    $cronUrl = mirzaCronUrl('cronvolume.php');
-    $cronCommand = "*/1 * * * * curl " . escapeshellarg($cronUrl);
-    $existingCronCommands = (string)shell_exec('crontab -l 2>/dev/null');
-    if (strpos($existingCronCommands, $cronUrl) === false) {
-        $command = "(crontab -l 2>/dev/null; echo " . escapeshellarg($cronCommand) . ") | crontab -";
+    $phpFilePath = escapeshellarg("https://$domainhosts/cron/cronvolume.php");
+    $cronCommand = "*/1 * * * * curl $phpFilePath";
+    $existingCronCommands = shell_exec('crontab -l');
+    if (strpos($existingCronCommands, $cronCommand) === false) {
+        $command = "(crontab -l ; echo '$cronCommand') | crontab -";
         shell_exec($command);
     }
 }
 if ($text == $textbotlang['Admin']['cron']['volume']['disable']) {
     sendmessage($from_id, $textbotlang['Admin']['cron']['test']['disabled'], null, 'HTML');
-    $currentCronJobs = (string)shell_exec("crontab -l 2>/dev/null");
-    $jobToRemove = mirzaCronUrl('cronvolume.php');
+    $currentCronJobs = shell_exec("crontab -l");
+    $jobToRemove = "*/1 * * * * curl https://$domainhosts/cron/cronvolume.php";
     $newCronJobs = preg_replace('/' . preg_quote($jobToRemove, '/') . '/', '', $currentCronJobs);
-    file_put_contents(sys_get_temp_dir() . '/crontab_' . md5(__DIR__) . '.txt', $newCronJobs);
-    shell_exec('crontab ' . sys_get_temp_dir() . '/crontab_' . md5(__DIR__) . '.txt');
-    unlink(sys_get_temp_dir() . '/crontab_' . md5(__DIR__) . '.txt');
+    file_put_contents('/tmp/crontab.txt', $newCronJobs);
+    shell_exec('crontab /tmp/crontab.txt');
+    unlink('/tmp/crontab.txt');
 }
 if ($text == $textbotlang['Admin']['cron']['time']['active']) {
     sendmessage($from_id, $textbotlang['Admin']['cron']['time']['dec'], null, 'HTML');
-    $cronUrl = mirzaCronUrl('cronday.php');
-    $cronCommand = "*/1 * * * * curl " . escapeshellarg($cronUrl);
-    $existingCronCommands = (string)shell_exec('crontab -l 2>/dev/null');
-    if (strpos($existingCronCommands, $cronUrl) === false) {
-        $command = "(crontab -l 2>/dev/null; echo " . escapeshellarg($cronCommand) . ") | crontab -";
+    $phpFilePath = escapeshellarg("https://$domainhosts/cron/cronday.php");
+    $cronCommand = "*/1 * * * * curl $phpFilePath";
+    $existingCronCommands = shell_exec('crontab -l');
+    if (strpos($existingCronCommands, $cronCommand) === false) {
+        $command = "(crontab -l ; echo '$cronCommand') | crontab -";
         shell_exec($command);
     }
 }
 if ($text == $textbotlang['Admin']['cron']['time']['disable']) {
     sendmessage($from_id, $textbotlang['Admin']['cron']['test']['disabled'], null, 'HTML');
-    $currentCronJobs = (string)shell_exec("crontab -l 2>/dev/null");
-    $jobToRemove = mirzaCronUrl('cronday.php');
+    $currentCronJobs = shell_exec("crontab -l");
+    $jobToRemove = "*/1 * * * * curl https://$domainhosts/cron/cronday.php";
     $newCronJobs = preg_replace('/' . preg_quote($jobToRemove, '/') . '/', '', $currentCronJobs);
-    file_put_contents(sys_get_temp_dir() . '/crontab_' . md5(__DIR__) . '.txt', $newCronJobs);
-    shell_exec('crontab ' . sys_get_temp_dir() . '/crontab_' . md5(__DIR__) . '.txt');
-    unlink(sys_get_temp_dir() . '/crontab_' . md5(__DIR__) . '.txt');
+    file_put_contents('/tmp/crontab.txt', $newCronJobs);
+    shell_exec('crontab /tmp/crontab.txt');
+    unlink('/tmp/crontab.txt');
 }
 if ($text == $textbotlang['Admin']['cron']['remove']['active']) {
     sendmessage($from_id, $textbotlang['Admin']['cron']['remove']['dec'], null, 'HTML');
-    $cronUrl = mirzaCronUrl('removeexpire.php');
-    $cronCommand = "*/1 * * * * curl " . escapeshellarg($cronUrl);
-    $existingCronCommands = (string)shell_exec('crontab -l 2>/dev/null');
-    if (strpos($existingCronCommands, $cronUrl) === false) {
-        $command = "(crontab -l 2>/dev/null; echo " . escapeshellarg($cronCommand) . ") | crontab -";
+    $phpFilePath = "https://$domainhosts/cron/removeexpire.php";
+    $cronCommand = "*/1 * * * * curl $phpFilePath";
+    $existingCronCommands = shell_exec('crontab -l');
+    if (strpos($existingCronCommands, $cronCommand) === false) {
+        $command = "(crontab -l ; echo '$cronCommand') | crontab -";
         shell_exec($command);
     }
 }
 if ($text == $textbotlang['Admin']['cron']['remove']['disable']) {
     sendmessage($from_id, $textbotlang['Admin']['cron']['test']['disabled'], null, 'HTML');
-    $currentCronJobs = (string)shell_exec("crontab -l 2>/dev/null");
-    $jobToRemove = mirzaCronUrl('removeexpire.php');
+    $currentCronJobs = shell_exec("crontab -l");
+    $jobToRemove = "*/1 * * * * curl https://$domainhosts/cron/removeexpire.php";
     $newCronJobs = preg_replace('/' . preg_quote($jobToRemove, '/') . '/', '', $currentCronJobs);
-    file_put_contents(sys_get_temp_dir() . '/crontab_' . md5(__DIR__) . '.txt', $newCronJobs);
-    shell_exec('crontab ' . sys_get_temp_dir() . '/crontab_' . md5(__DIR__) . '.txt');
-    unlink(sys_get_temp_dir() . '/crontab_' . md5(__DIR__) . '.txt');
+    file_put_contents('/tmp/crontab.txt', $newCronJobs);
+    shell_exec('crontab /tmp/crontab.txt');
+    unlink('/tmp/crontab.txt');
 }
 if ($text == $textbotlang['Admin']['keyboardadmin']['user_search']) {
     sendmessage($from_id, $textbotlang['Admin']['ManageUser']['BlockUserId'], $backadmin, 'HTML');
@@ -2064,12 +2061,12 @@ if ($text == $textbotlang['users']['status']['manageService']) {
     }
     if (!(function_exists('shell_exec') && is_callable('shell_exec'))) {
         $cronstatus = 1;
-        $cronCommand = "*/4 * * * * curl " . mirzaCronUrl('croncard.php');
+        $cronCommand = "*/4 * * * * curl https://$domainhosts/cron/croncard.php";
         sendmessage($from_id, sprintf($textbotlang['Admin']['cron']['active_manual_card'], $cronCommand), null, 'HTML');
     } else {
-        $cronCommandUrl = mirzaCronUrl('croncard.php');
-        $existingCronCommands = (string)shell_exec('crontab -l 2>/dev/null');
-        if (strpos($existingCronCommands, $cronCommandUrl) === false) {
+        $cronCommand = "*/4 * * * * curl https://$domainhosts/cron/croncard.php";
+        $existingCronCommands = shell_exec('crontab -l');
+        if (strpos($existingCronCommands, $cronCommand) === false) {
             $cronstatus = 0;
         } else {
             $cronstatus = 1;
@@ -2234,35 +2231,34 @@ if ($text == $textbotlang['users']['status']['manageService']) {
     } elseif ($type == "Automatic_confirmation") {
         if (!(function_exists('shell_exec') && is_callable('shell_exec'))) {
             $cronstatus = 1;
-            $cronCommand = "*/4 * * * * curl " . mirzaCronUrl('croncard.php');
+            $cronCommand = "*/4 * * * * curl https://$domainhosts/cron/croncard.php";
             sendmessage($from_id, sprintf($textbotlang['Admin']['cron']['active_manual_card'], $cronCommand), null, 'HTML');
         } else {
             if ($value == "1") {
-                $currentCronJobs = (string)shell_exec("crontab -l 2>/dev/null");
-                $jobToRemove = mirzaCronUrl('croncard.php');
+                $currentCronJobs = shell_exec("crontab -l");
+                $jobToRemove = "*/4 * * * * curl https://$domainhosts/cron/croncard.php";
                 $newCronJobs = preg_replace('/' . preg_quote($jobToRemove, '/') . '/', '', $currentCronJobs);
-                file_put_contents(sys_get_temp_dir() . '/crontab_' . md5(__DIR__) . '.txt', $newCronJobs);
-                shell_exec('crontab ' . sys_get_temp_dir() . '/crontab_' . md5(__DIR__) . '.txt');
-                unlink(sys_get_temp_dir() . '/crontab_' . md5(__DIR__) . '.txt');
+                file_put_contents('/tmp/crontab.txt', $newCronJobs);
+                shell_exec('crontab /tmp/crontab.txt');
+                unlink('/tmp/crontab.txt');
             } else {
-                $existingCronCommands = (string)shell_exec('crontab -l 2>/dev/null');
-                $cronUrl = mirzaCronUrl('croncard.php');
-                $cronCommand = "*/4 * * * * curl " . escapeshellarg($cronUrl);
-                if (strpos($existingCronCommands, $cronUrl) === false) {
-                    $command = "(crontab -l 2>/dev/null; echo " . escapeshellarg($cronCommand) . ") | crontab -";
+                $existingCronCommands = shell_exec('crontab -l');
+                $phpFilePath = escapeshellarg("https://$domainhosts/cron/croncard.php");
+                $cronCommand = "*/4 * * * * curl $phpFilePath";
+                if (strpos($existingCronCommands, $cronCommand) === false) {
+                    $command = "(crontab -l;  echo '$cronCommand') | crontab -";
                     error_log($command);
                     shell_exec($command);
                 }
             }
         }
     }
-    $cronCommandUrl = mirzaCronUrl('croncard.php');
-    $cronCommand = "*/4 * * * * curl " . escapeshellarg($cronCommandUrl);
+    $cronCommand = "*/4 * * * * curl https://$domainhosts/cron/croncard.php";
     if (!(function_exists('shell_exec') && is_callable('shell_exec'))) {
         $cronstatus = 1;
     } else {
-        $existingCronCommands = (string)shell_exec('crontab -l 2>/dev/null');
-        if (strpos($existingCronCommands, $cronCommandUrl) === false) {
+        $existingCronCommands = shell_exec('crontab -l');
+        if (strpos($existingCronCommands, $cronCommand) === false) {
             $cronstatus = 0;
         } else {
             $cronstatus = 1;
@@ -2371,7 +2367,7 @@ if ($text == $textbotlang['users']['status']['manageService']) {
 } elseif (preg_match('/verifyun_(\w+)/', $datain, $dataget)) {
     $iduser = $dataget[1];
     $userunverify = select("user", "*", "id", $iduser, "select");
-    if ($userunverify['verify'] == "0") {
+    if ($userunblock['verify'] == "0") {
         sendmessage($from_id, $textbotlang['Admin']['ManageUser']['verifyed'], $backadmin, 'HTML');
         return;
     }

@@ -10,6 +10,205 @@ require_once __DIR__ . '/WGDashboard.php';
 require_once __DIR__ . '/remnawave.php';
 require_once __DIR__ . '/rebecca.php';
 
+if (!function_exists('rx_panel_http_status_fa')) {
+    function rx_panel_http_status_fa($code)
+    {
+        $code = (int) $code;
+        $map = [
+            0   => 'اتصال به پنل برقرار نشد؛ پنل خاموش است، آدرس اشتباه است یا فایروال/SSL جلوی اتصال را گرفته',
+            400 => 'درخواست نامعتبر؛ پنل داده‌های ارسالی ربات را نپذیرفت',
+            401 => 'احراز هویت ناموفق؛ API Key یا نام کاربری/رمز پنل در ربات اشتباه یا منقضی است',
+            403 => 'دسترسی غیرمجاز؛ ادمین پنل غیرفعال است، مجوز ساخت کاربر ندارد یا به سقف حجم/تعداد کاربر رسیده',
+            404 => 'پیدا نشد؛ آدرس پنل، مسیر API یا گروه/اینباند انتخاب‌شده روی پنل وجود ندارد',
+            405 => 'متد مجاز نیست؛ احتمالاً نوع یا نسخهٔ پنل در ربات اشتباه انتخاب شده',
+            408 => 'پنل در زمان مقرر پاسخ نداد (Timeout)',
+            409 => 'نام کاربری تکراری است؛ این یوزرنیم از قبل روی پنل وجود دارد',
+            413 => 'حجم درخواست بیش از حد مجاز پنل است',
+            422 => 'دادهٔ نامعتبر؛ فرمت نام کاربری، گروه/اینباند، حجم یا تاریخ انقضا مورد قبول پنل نیست',
+            429 => 'تعداد درخواست‌ها زیاد است؛ پنل موقتاً درخواست‌ها را محدود کرده',
+            500 => 'خطای داخلی پنل؛ لاگ پنل را بررسی کنید',
+            502 => 'Bad Gateway؛ وب‌سرور/پروکسی جلوی پنل به خود پنل دسترسی ندارد',
+            503 => 'سرویس پنل در دسترس نیست؛ پنل در حال ری‌استارت یا از کار افتاده است',
+            504 => 'Gateway Timeout؛ پنل دیر پاسخ داد',
+        ];
+        if (isset($map[$code])) {
+            return $map[$code];
+        }
+        if ($code >= 520 && $code <= 530) {
+            return 'خطای Cloudflare؛ سرور پنل پشت Cloudflare پاسخ نداد یا در دسترس نیست';
+        }
+        if ($code >= 500) {
+            return 'خطای سمت سرور پنل';
+        }
+        if ($code >= 400) {
+            return 'پنل درخواست را رد کرد';
+        }
+        if ($code >= 300) {
+            return 'ریدایرکت؛ آدرس پنل اشتباه است (http/https یا مسیر را بررسی کنید)';
+        }
+        if ($code >= 200) {
+            return 'پنل عملیات را با موفقیت انجام داد اما پاسخ آن با انتظار ربات جور نبود؛ نوع پنل انتخاب‌شده در ربات را بررسی کنید';
+        }
+        return '';
+    }
+}
+
+if (!function_exists('rx_panel_error_hint_fa')) {
+    function rx_panel_error_hint_fa($text)
+    {
+        $text = (string) $text;
+        $patterns = [
+            '/already\s+exist|duplicate|\bexists\b|تکراری/iu'              => 'نام کاربری تکراری است؛ این یوزرنیم از قبل روی پنل وجود دارد',
+            '/timed?\s*out|timeout/i'                                     => 'پنل در زمان مقرر پاسخ نداد (Timeout)',
+            '/could not resolve host|name or service not known/i'         => 'دامنهٔ پنل پیدا نشد (خطای DNS)',
+            '/connection refused|failed to connect|couldn\'t connect/i'   => 'اتصال به پنل رد شد؛ پنل خاموش است یا پورت بسته است',
+            '/ssl|certificate/i'                                          => 'خطای SSL؛ گواهی پنل نامعتبر یا منقضی است',
+            '/unauthori[sz]ed|invalid username or password|login failed|not authenticated/i' => 'احراز هویت ناموفق؛ اطلاعات ورود یا API Key پنل را بررسی کنید',
+            '/^panel not found$/i'                                        => 'پنل در دیتابیس ربات پیدا نشد',
+            '/^user not found$/i'                                         => 'کاربر روی پنل پیدا نشد',
+            '/manualsale stock not found/i'                               => 'موجودی فروش دستی این محصول تمام شده است',
+            '/panel configuration not found/i'                            => 'تنظیمات پنل در ربات پیدا نشد',
+        ];
+        foreach ($patterns as $pattern => $hint) {
+            if (preg_match($pattern, $text)) {
+                return $hint;
+            }
+        }
+        return '';
+    }
+}
+
+if (!function_exists('rx_panel_error_detail_text')) {
+    function rx_panel_error_detail_text($detail)
+    {
+        if ($detail === null || $detail === '' || $detail === []) {
+            return '';
+        }
+        if (is_array($detail)) {
+            $parts = [];
+            foreach ($detail as $key => $item) {
+                if (is_array($item) && isset($item['msg'])) {
+                    $loc = isset($item['loc']) && is_array($item['loc']) ? implode('.', array_map('strval', $item['loc'])) : '';
+                    $parts[] = ($loc !== '' ? $loc . ': ' : '') . (string) $item['msg'];
+                } elseif (is_scalar($item)) {
+                    $parts[] = (is_string($key) ? $key . ': ' : '') . (string) $item;
+                } else {
+                    $parts[] = json_encode($item, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+                }
+            }
+            $text = implode(' | ', $parts);
+        } else {
+            $text = (string) $detail;
+        }
+        $text = trim(preg_replace('/\s+/u', ' ', $text));
+        if (function_exists('mb_strlen') && mb_strlen($text, 'UTF-8') > 300) {
+            $text = mb_substr($text, 0, 300, 'UTF-8') . '…';
+        }
+        return $text;
+    }
+}
+
+if (!function_exists('rx_panel_error_text')) {
+    function rx_panel_error_text($msg, $detail = null, $html = true)
+    {
+        if (is_array($msg) || is_object($msg)) {
+            $raw = json_encode($msg, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        } else {
+            $raw = trim((string) $msg);
+        }
+        $hint = '';
+        if ($raw === '' || $raw === 'null') {
+            $raw = 'نامشخص';
+        } elseif (preg_match('/^\d{1,3}$/', $raw)) {
+            $hint = rx_panel_http_status_fa((int) $raw);
+        } else {
+            $hint = rx_panel_error_hint_fa($raw);
+        }
+        $detailText = rx_panel_error_detail_text($detail);
+        if ($hint === '' && $detailText !== '') {
+            $hint = rx_panel_error_hint_fa($detailText);
+        }
+        $text = $hint !== '' ? $raw . ' — ' . $hint : $raw;
+        if ($detailText !== '' && $detailText !== $raw) {
+            $text .= "\nپاسخ پنل: " . $detailText;
+        }
+        return $html ? htmlspecialchars($text, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : $text;
+    }
+}
+
+if (!function_exists('rx_panel_username_variant')) {
+    function rx_panel_username_variant($base)
+    {
+        $alphabet = 'abcdefghijkmnpqrstuvwxyz23456789';
+        $suffix = '';
+        for ($i = 0; $i < 4; $i++) {
+            $suffix .= $alphabet[random_int(0, strlen($alphabet) - 1)];
+        }
+        $base = trim((string) $base);
+        if (strlen($base) > 27) {
+            $base = substr($base, 0, 27);
+        }
+        $base = rtrim($base, '_-.');
+        if ($base === '') {
+            $base = 'u';
+        }
+        return $base . '_' . $suffix;
+    }
+}
+
+if (!function_exists('rx_adopt_created_username')) {
+    function rx_adopt_created_username($output, $requestedUsername, $idInvoice = null)
+    {
+        $requestedUsername = (string) $requestedUsername;
+        if (!is_array($output) || empty($output['username'])) {
+            return $requestedUsername;
+        }
+        $created = (string) $output['username'];
+        if ($created === $requestedUsername || empty($output['renamed_from'])) {
+            return $created;
+        }
+        if ($idInvoice !== null && $idInvoice !== '' && function_exists('update')) {
+            try {
+                update('invoice', 'username', $created, 'id_invoice', (string) $idInvoice);
+                if (function_exists('clearSelectCache')) {
+                    clearSelectCache('invoice');
+                }
+            } catch (Throwable $e) {
+                error_log('[rx_adopt_created_username] invoice update failed: ' . $e->getMessage());
+            }
+        }
+        return $created;
+    }
+}
+
+if (!function_exists('rx_notify_username_renamed')) {
+    function rx_notify_username_renamed($chatId, $output, $panel = null)
+    {
+        if (!is_array($output) || empty($output['renamed_from']) || empty($output['username']) || !function_exists('sendmessage')) {
+            return;
+        }
+        $old = (string) $output['renamed_from'];
+        $new = (string) $output['username'];
+        if (is_array($panel) && function_exists('guardDisplayUsername')) {
+            $old = guardDisplayUsername($old, $panel);
+            $new = guardDisplayUsername($new, $panel);
+        }
+        $template = "⚠️ نام کاربری «<code>{old}</code>» از قبل روی پنل وجود داشت؛ سرویس شما با نام کاربری «<code>{new}</code>» ساخته شد.";
+        if (function_exists('faoxima_textbot_get')) {
+            $template = faoxima_textbot_get('dyn_username_renamed_notice', $template);
+        }
+        $text = strtr($template, [
+            '{old}' => htmlspecialchars($old, ENT_QUOTES, 'UTF-8'),
+            '{new}' => htmlspecialchars($new, ENT_QUOTES, 'UTF-8'),
+        ]);
+        try {
+            sendmessage($chatId, $text, null, 'HTML');
+        } catch (Throwable $e) {
+            error_log('[rx_notify_username_renamed] ' . $e->getMessage());
+        }
+    }
+}
+
 class ManagePanel
 {
     public $pdo, $domainhosts, $name_panel;
@@ -70,7 +269,64 @@ class ManagePanel
         $onlineTs = strtotime($onlineAt);
         return $onlineTs !== false && $onlineTs > 0;
     }
-    function createUser($name_panel, $code_product, $usernameC, array $Data_Config)
+    private function isDuplicateUsernameFailure($output): bool
+    {
+        if (!is_array($output) || !empty($output['username'])) {
+            return false;
+        }
+        if ((int) ($output['http_code'] ?? 0) === 409) {
+            return true;
+        }
+        $msg = $output['msg'] ?? '';
+        if (is_scalar($msg) && preg_match('/^\s*409\s*$/', (string) $msg)) {
+            return true;
+        }
+        $text = is_scalar($msg) ? (string) $msg : (string) json_encode($msg, JSON_UNESCAPED_UNICODE);
+        if (isset($output['detail'])) {
+            $text .= ' ' . (is_scalar($output['detail']) ? (string) $output['detail'] : (string) json_encode($output['detail'], JSON_UNESCAPED_UNICODE));
+        }
+        return (bool) preg_match('/already\s+exist|duplicate|\bexists\b|تکراری/iu', $text);
+    }
+
+    private function supportsUsernameRename($name_panel): bool
+    {
+        $panel = $this->loadPanel((string) $name_panel, 'name_panel');
+        return is_array($panel) && in_array((string) ($panel['type'] ?? ''), ['marzban', 'pasarguard', 'x-ui_single', 'guard', 'remnawave', 'rebecca'], true);
+    }
+
+    private function panelResponseDetail($response)
+    {
+        if (!is_array($response) || !isset($response['body']) || !is_string($response['body']) || $response['body'] === '') {
+            return null;
+        }
+        $decoded = json_decode($response['body'], true);
+        if (is_array($decoded)) {
+            return $decoded['detail'] ?? ($decoded['message'] ?? ($decoded['msg'] ?? null));
+        }
+        return function_exists('mb_substr') ? mb_substr(strip_tags($response['body']), 0, 300, 'UTF-8') : substr(strip_tags($response['body']), 0, 300);
+    }
+
+    function createUser($name_panel, $code_product, $usernameC, array $Data_Config, $allowRename = false)
+    {
+        $requested = (string) $usernameC;
+        $Output = $this->createUserOnce($name_panel, $code_product, $requested, $Data_Config, $requested);
+        if (!$allowRename || !$this->isDuplicateUsernameFailure($Output) || !$this->supportsUsernameRename($name_panel)) {
+            return $Output;
+        }
+        for ($attempt = 1; $attempt <= 3; $attempt++) {
+            $candidate = rx_panel_username_variant($requested);
+            $Output = $this->createUserOnce($name_panel, $code_product, $candidate, $Data_Config, $requested);
+            if (!$this->isDuplicateUsernameFailure($Output)) {
+                break;
+            }
+        }
+        if (is_array($Output) && !empty($Output['username'])) {
+            $Output['renamed_from'] = $requested;
+        }
+        return $Output;
+    }
+
+    private function createUserOnce($name_panel, $code_product, $usernameC, array $Data_Config, $invoiceUsername)
     {
         $Output = [];
         global $pdo, $domainhosts;
@@ -89,7 +345,7 @@ class ManagePanel
             return $Output;
         }
         if ($Get_Data_Panel['subvip'] == "onsubvip") {
-            $inoice = select("invoice", "*", "username", $usernameC, "select");
+            $inoice = select("invoice", "*", "username", $invoiceUsername, "select");
         } else {
             $inoice = false;
         }
@@ -117,7 +373,8 @@ class ManagePanel
             if (!empty($ConnectToPanel['status']) && (int)$ConnectToPanel['status'] !== 200) {
                 return array(
                     'status' => 'Unsuccessful',
-                    'msg' => $ConnectToPanel['status']
+                    'msg' => $ConnectToPanel['status'],
+                    'detail' => $this->panelResponseDetail($ConnectToPanel)
                 );
             }
             if (!empty($ConnectToPanel['error'])) {
@@ -158,7 +415,8 @@ class ManagePanel
             if (!empty($ConnectToPanel['status']) && (int)$ConnectToPanel['status'] !== 201) {
                 return array(
                     'status' => 'Unsuccessful',
-                    'msg' => $ConnectToPanel['status']
+                    'msg' => $ConnectToPanel['status'],
+                    'detail' => $this->panelResponseDetail($ConnectToPanel)
                 );
             }
             if (!empty($ConnectToPanel['error'])) {
@@ -271,8 +529,7 @@ class ManagePanel
                 "username" => $usernameC,
                 "limit_usage" => $data_limit,
                 "service_ids" => $serviceResult['service_ids'],
-                "note" => $note,
-                "telegram_id" => null
+                "note" => $note
             );
             if ($guardOnHoldEnabled && $expire != 0) {
                 $guardOnHoldSeconds = max(60, $expire - time());
@@ -285,7 +542,8 @@ class ManagePanel
             if ($createResponse['status'] === false) {
                 return array(
                     'status' => 'Unsuccessful',
-                    'msg' => $createResponse['msg']
+                    'msg' => $createResponse['msg'],
+                    'http_code' => $createResponse['http_code'] ?? null
                 );
             }
             $subscriptionUrl = '';
@@ -329,9 +587,51 @@ class ManagePanel
             $Output['subscription_url'] = $subscriptionUrl;
             $Output['configs'] = $configs;
         } elseif ($Get_Data_Panel['type'] == "Manualsale") {
-            $statement = $pdo->prepare("SELECT * FROM manualsell WHERE codepanel = :code_panel AND status = 'active' AND codeproduct = '$code_product' ORDER BY RAND() LIMIT 1");
-            $statement->execute(array(':code_panel' => $Get_Data_Panel['code_panel']));
-            $configman = $statement->fetch(PDO::FETCH_ASSOC);
+            $configman = null;
+            $manualClaimedRows = array();
+            $pickStock = $pdo->prepare("SELECT * FROM manualsell WHERE codepanel = ? AND status = 'active' AND codeproduct = ? ORDER BY RAND() LIMIT 1");
+            for ($claimAttempt = 0; $claimAttempt < 5 && $configman === null; $claimAttempt++) {
+                $pickStock->execute(array((string) $Get_Data_Panel['code_panel'], (string) $code_product));
+                $candidate = $pickStock->fetch(PDO::FETCH_ASSOC);
+                $pickStock->closeCursor();
+                if (!is_array($candidate) || empty($candidate['id'])) {
+                    break;
+                }
+                if (!empty($candidate['group_id'])) {
+                    $claimGroup = $pdo->prepare("UPDATE manualsell SET status = 'selled', username = ? WHERE group_id = ? AND status = 'active'");
+                    $claimGroup->execute(array($usernameC, $candidate['group_id']));
+                    if ($claimGroup->rowCount() < 1) {
+                        continue;
+                    }
+                    $groupFetch = $pdo->prepare("SELECT * FROM manualsell WHERE group_id = ? AND username = ? AND status = 'selled' ORDER BY id ASC");
+                    $groupFetch->execute(array($candidate['group_id'], $usernameC));
+                    $groupRows = $groupFetch->fetchAll(PDO::FETCH_ASSOC);
+                    if (empty($groupRows)) {
+                        continue;
+                    }
+                    $manualClaimedRows = $groupRows;
+                    $configman = $groupRows[0];
+                    foreach ($groupRows as $groupRow) {
+                        if ((string) $groupRow['id'] === (string) $candidate['id']) {
+                            $configman = $groupRow;
+                            break;
+                        }
+                    }
+                } else {
+                    $claimOne = $pdo->prepare("UPDATE manualsell SET status = 'selled', username = ? WHERE id = ? AND status = 'active'");
+                    $claimOne->execute(array($usernameC, $candidate['id']));
+                    if ($claimOne->rowCount() !== 1) {
+                        continue;
+                    }
+                    $candidate['status'] = 'selled';
+                    $candidate['username'] = $usernameC;
+                    $configman = $candidate;
+                    $manualClaimedRows = array($candidate);
+                }
+            }
+            if (function_exists('clearSelectCache')) {
+                clearSelectCache('manualsell');
+            }
             if (!is_array($configman) || empty($configman['id'])) {
                 return array(
                     'status' => 'Unsuccessful',
@@ -344,20 +644,6 @@ class ManagePanel
             $Output['configs'] = "";
             $Output['file_ext'] = $configman['file_ext'];
             $Output['sub_link'] = $configman['sub_link'] ?? '';
-            $manualClaimedRows = array($configman);
-            if (!empty($configman['group_id'])) {
-                $claimGroup = $pdo->prepare("UPDATE manualsell SET status = 'selled', username = :username WHERE group_id = :group_id AND status = 'active'");
-                $claimGroup->execute(array(':username' => $usernameC, ':group_id' => $configman['group_id']));
-                $groupFetch = $pdo->prepare("SELECT * FROM manualsell WHERE group_id = :group_id AND username = :username ORDER BY id ASC");
-                $groupFetch->execute(array(':group_id' => $configman['group_id'], ':username' => $usernameC));
-                $groupRows = $groupFetch->fetchAll(PDO::FETCH_ASSOC);
-                if (!empty($groupRows)) {
-                    $manualClaimedRows = $groupRows;
-                }
-            } else {
-                update("manualsell", "status", "selled", "id", $configman['id']);
-                update("manualsell", "username", $usernameC, "id", $configman['id']);
-            }
             $manualItemsOut = array();
             $manualUnifiedSubOut = '';
             foreach ($manualClaimedRows as $mRow) {
@@ -484,6 +770,7 @@ class ManagePanel
             if ($createResponse['status'] === false) {
                 $Output['status'] = 'Unsuccessful';
                 $Output['msg'] = $createResponse['msg'];
+                $Output['http_code'] = $createResponse['http_code'] ?? null;
             } else {
                 $createdData = $createResponse['data'];
                 $subscriptionUrl = is_array($createdData) ? ($createdData['subscription_url'] ?? '') : '';
@@ -1945,7 +2232,7 @@ class ManagePanel
             );
         }
     }
-    function extend($Method_extend, $new_limit, $time_day, $username, $code_product, $name_panel)
+    function extend($Method_extend, $new_limit, $time_day, $username, $code_product, $name_panel, $rxTarget = null)
     {
         $panel = $this->loadPanel($name_panel, "code_panel");
         $product = select("product", "*", "code_product", $code_product, "select");
@@ -1965,7 +2252,22 @@ class ManagePanel
                 'msg' => $data_user['msg']
             );
         }
-        if ($Method_extend == "رزرو اشتراک") {
+        $rxMode = rxRenewalMode($Method_extend);
+        if ($rxMode === null) {
+            if (function_exists('rx_log_event')) {
+                rx_log_event('RENEWAL_UNKNOWN_METHOD', 'Unknown Methodextend; renewal refused without panel mutation', array(
+                    'method' => (string) $Method_extend,
+                    'username' => (string) $username,
+                    'panel' => (string) $panel['name_panel'],
+                ));
+            }
+            return array(
+                'status' => false,
+                'code' => 'unsupported_renewal_method',
+                'msg' => 'unsupported renewal method: ' . (string) $Method_extend
+            );
+        }
+        if (!empty($rxMode['queued'])) {
             global $pdo;
             $existingQueuedStmt = $pdo->prepare("SELECT * FROM queued_renewal WHERE username = :username AND status = 'pending' LIMIT 1");
             $existingQueuedStmt->execute([':username' => $username]);
@@ -2061,19 +2363,39 @@ class ManagePanel
                 'file_ext' => $newConfig['file_ext']
             );
         }
+        if (is_array($rxTarget) && array_key_exists('data_limit', $rxTarget) && array_key_exists('expire', $rxTarget)) {
+            $rxPlan = $rxTarget;
+        } else {
+            $rxPlan = rxBuildRenewalTarget(time(), $Method_extend, array(
+                'data_limit' => $data_user['data_limit'] ?? 0,
+                'expire' => $data_user['expire'] ?? 0,
+                'used_traffic' => $data_user['used_traffic'] ?? 0,
+                'status' => $data_user['status'] ?? '',
+            ), $new_limit, $time_day);
+            if (empty($rxPlan['ok'])) {
+                if (function_exists('rx_log_event')) {
+                    rx_log_event('RENEWAL_REFUSED', 'Renewal target could not be built safely; no panel mutation', array(
+                        'reason' => (string) ($rxPlan['reason'] ?? ''),
+                        'method' => (string) $Method_extend,
+                        'username' => (string) $username,
+                        'panel' => (string) $panel['name_panel'],
+                    ));
+                }
+                return array(
+                    'status' => false,
+                    'code' => (string) ($rxPlan['reason'] ?? 'renewal_refused'),
+                    'msg' => 'renewal refused: ' . (string) ($rxPlan['reason'] ?? '')
+                );
+            }
+        }
         $notifctions = json_encode(array(
             'volume' => false,
             'time' => false,
         ));
         update("invoice", "notifctions", $notifctions, 'id_invoice', $invoice['id_invoice']);
-        $data_limit_old = $data_user['data_limit'];
-        $time_old = $data_user['expire'];
-        $time_old = time() - $time_old > 0 ? time() : $time_old;
-        $data_limit_new = $new_limit == 0 ? 0 : $new_limit * pow(1024, 3);
-        $data_limit_new_add = $new_limit == 0 ? 0 : $data_limit_old + ($new_limit * pow(1024, 3));
-        $time_new = $time_day == 0 ? 0 : time() + $time_day * 86400;
-        $time_old = $time_old == 0 ? time() : $time_old;
-        $time_new_add = $time_day == 0 ? 0 : $time_old + ($time_day * 86400);
+        $data_limit_new = (int) $rxPlan['data_limit'];
+        $time_new = (int) $rxPlan['expire'];
+        $rxResetUsage = array_key_exists('reset_usage', $rxPlan) ? !empty($rxPlan['reset_usage']) : !empty($rxMode['reset_usage']);
 
         $inbound_id = isset($panel['inboundid']) ? $panel['inboundid'] : 1;
         $inbounds = is_string($panel['inbounds']) ? json_decode($panel['inbounds']) : "{}";
@@ -2083,7 +2405,7 @@ class ManagePanel
         }
         update("invoice", 'uuid', null, "username", $username);
         update("invoice", 'Status', "active", "username", $username);
-        if ($Method_extend == "ریست حجم و زمان") {
+        if ($rxResetUsage) {
             $reset = $this->ResetUserDataUsage($username, $panel['name_panel']);
             if ($reset['status'] == false) {
                 return array(
@@ -2091,32 +2413,6 @@ class ManagePanel
                     'msg' => 'error reset : ' . $reset['msg']
                 );
             }
-        } elseif ($Method_extend == "اضافه شدن زمان و حجم به ماه بعد") {
-            $data_limit_new = $data_limit_new_add;
-            $time_new = $time_new_add;
-        } elseif ($Method_extend == "ریست زمان و اضافه کردن حجم قبلی") {
-            $data_limit_new = $data_limit_new_add;
-        } elseif ($Method_extend == "ریست شدن حجم و اضافه شدن زمان") {
-            $reset = $this->ResetUserDataUsage($username, $panel['name_panel']);
-            if ($reset['status'] == false) {
-                return array(
-                    'status' => false,
-                    'msg' => 'error reset : ' . $reset['msg']
-                );
-            }
-            $time_new = $time_new_add;
-        } elseif ($Method_extend == "اضافه شدن زمان و تبدیل حجم کل به حجم باقی مانده") {
-            $reset = $this->ResetUserDataUsage($username, $panel['name_panel']);
-            if ($reset['status'] == false) {
-                return array(
-                    'status' => false,
-                    'msg' => 'error reset : ' . $reset['msg']
-                );
-            }
-            $time_new = $time_new_add;
-            $data_limit_last = $data_user['data_limit'] - $data_user['used_traffic'];
-            $data_limit_last = $data_limit_last < 0 ? 0 : $data_limit_last;
-            $data_limit_new = $data_limit_new + $data_limit_last;
         }
         if ($panel['type'] == "remnawave") {
             global $pdo;
@@ -2137,7 +2433,7 @@ class ManagePanel
             if (empty($res['ok'])) {
                 return array('status' => false, 'msg' => 'remnawave extend failed');
             }
-            return array('status' => true);
+            return $this->rxWithRenewalOutcome(array('status' => true), $panel['name_panel'], $username, $rxPlan);
         }
         if ($this->isPasarGuardDialect($panel)) {
             $configuredGroups = is_array($inbounds) ? $inbounds : (is_string($inbounds) ? json_decode($inbounds, true) : []);
@@ -2250,8 +2546,9 @@ class ManagePanel
                     'msg' => isset($deleteJob['msg']) ? $deleteJob['msg'] : ''
                 );
             }
+            $rxTimeNewTs = (int) $time_new;
             $time_new = date("Y-m-d H:i:s", $time_new);
-            if ($time_day != 0) {
+            if ($time_day != 0 && $rxTimeNewTs > 0) {
                 $setJob = setjob($panel['name_panel'], "date", $time_new, $datauser['id']);
                 if (isset($setJob['status']) && $setJob['status'] === false) {
                     return array(
@@ -2260,7 +2557,7 @@ class ManagePanel
                     );
                 }
             }
-            if ($new_limit != 0) {
+            if ($new_limit != 0 && $data_limit_new > 0) {
                 $setJob = setjob($panel['name_panel'], "total_data", $data_limit_new / pow(1024, 3), $datauser['id']);
                 if (isset($setJob['status']) && $setJob['status'] === false) {
                     return array(
@@ -2269,9 +2566,9 @@ class ManagePanel
                     );
                 }
             }
-            return array(
+            return $this->rxWithRenewalOutcome(array(
                 'status' => true
-            );
+            ), $panel['name_panel'], $username, $rxPlan);
         } elseif ($panel['type'] == "guard") {
             $limitExpire = guardNormalizeExpire($time_new);
             $serviceIdsSource = isset($data_user['service_ids']) ? $data_user['service_ids'] : ($panel['guard_service_ids'] ?? null);
@@ -2300,9 +2597,44 @@ class ManagePanel
                 'msg' => $extend['msg']
             );
         }
-        return $extend;
+        return $this->rxWithRenewalOutcome($extend, $panel['name_panel'], $username, $rxPlan);
     }
-    function extra_volume($username_account, $code_panel, $limit_volume_new)
+
+    private function rxWithRenewalOutcome($result, $name_panel, $username, array $plan)
+    {
+        if (!is_array($result)) {
+            $result = array('status' => true, 'panel_output' => $result);
+        }
+        $before = array(
+            'data_limit' => $plan['before_data_limit'] ?? null,
+            'expire' => $plan['before_expire'] ?? null,
+            'used_traffic' => $plan['before_used_traffic'] ?? 0,
+        );
+        $target = array(
+            'data_limit' => $plan['data_limit'] ?? 0,
+            'expire' => $plan['expire'] ?? 0,
+        );
+        $after = null;
+        $verified = false;
+        try {
+            $snapshot = rx_pf_snapshot_from_datauser($this->DataUser($name_panel, $username));
+            if (!empty($snapshot['ok']) && !empty($snapshot['exists'])) {
+                $after = rx_pf_limits($snapshot);
+                $verified = rx_pf_state_matches($snapshot, $target);
+            }
+        } catch (Throwable $e) {
+            $after = null;
+        }
+        $result['rx_renewal'] = array(
+            'plan' => $plan,
+            'before' => $before,
+            'target' => $target,
+            'after' => $after,
+            'verified' => $verified,
+        );
+        return $result;
+    }
+    function extra_volume($username_account, $code_panel, $limit_volume_new, $rxTarget = null)
     {
         $panel = $this->loadPanel($code_panel, "code_panel");
         $invoice = select("invoice", "*", "username", $username_account, "select");
@@ -2327,6 +2659,9 @@ class ManagePanel
         }
         $old_limit_volume = $user_info['data_limit'];
         $new_limit = $limit_volume_new == 0 ? 0 : ($limit_volume_new * pow(1024, 3)) + $old_limit_volume;
+        if (is_array($rxTarget) && array_key_exists('data_limit', $rxTarget)) {
+            $new_limit = (int) $rxTarget['data_limit'];
+        }
         $inbound_id = isset($panel['inboundid']) ? $panel['inboundid'] : 1;
         $inbounds = is_string($panel['inbounds']) ? json_decode($panel['inbounds']) : "{}";
         if ($panel['type'] != "WGDashboard") {
@@ -2474,7 +2809,7 @@ class ManagePanel
         }
         return $extra_volume;
     }
-    function extra_time($username_account, $code_panel, $limit_time_new)
+    function extra_time($username_account, $code_panel, $limit_time_new, $rxTarget = null)
     {
         $panel = $this->loadPanel($code_panel, "code_panel");
         $invoice = select("invoice", "*", "username", $username_account, "select");
@@ -2500,6 +2835,9 @@ class ManagePanel
         $old_limit_time = $user_info['expire'];
         $old_limit_time = time() - $old_limit_time > 0 ? time() : $old_limit_time;
         $new_limit = $limit_time_new == 0 ? 0 : $limit_time_new * 86400 + $old_limit_time;
+        if (is_array($rxTarget) && array_key_exists('expire', $rxTarget)) {
+            $new_limit = (int) $rxTarget['expire'];
+        }
         $inbound_id = isset($panel['inboundid']) ? $panel['inboundid'] : 1;
         $inbounds = is_string($panel['inbounds']) ? json_decode($panel['inbounds']) : "{}";
         if ($panel['type'] != "WGDashboard") {
