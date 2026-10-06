@@ -126,6 +126,24 @@ class SelfUpdate
         return DIRECTORY_SEPARATOR === '\\';
     }
 
+    /**
+     * اگر اجرای فعلی با مالکِ پوشهٔ سورس برابر است، '' برمی‌گرداند؛
+     * وگرنه پیشوندِ `sudo -n -u <owner>` تا از داخل وب دقیقاً همان
+     * کاری اجرا شود که کاربر مالک روی سرور می‌زند (وگرنه git reset
+     * با «Permission denied» می‌شکند و آپدیت نیمه‌کاره می‌ماند).
+     */
+    private static function asOwnerPrefix(string $dir): string
+    {
+        if (!function_exists('posix_geteuid') || !function_exists('posix_getpwuid')) return '';
+        $uid = @fileowner($dir);
+        if ($uid === false) return '';
+        if (posix_geteuid() === $uid) return '';
+        $pw = @posix_getpwuid($uid);
+        $user = is_array($pw) && !empty($pw['name']) ? (string)$pw['name'] : (string)$uid;
+        $sudo = trim((string)@shell_exec('command -v sudo 2>/dev/null'));
+        return $sudo !== '' ? 'sudo -n -u ' . escapeshellarg($user) . ' ' : '';
+    }
+
     /** آیا gitِ این نصب از --no-optional-locks پشتیبانی می‌کند؟ (git ≥ 2.15) */
     private static $noOptLocks = null;
 
@@ -526,7 +544,7 @@ class SelfUpdate
         $env['GIT_CONFIG_VALUE_0'] = str_replace('\\', '/', $src);
         $env['BOTSAZ_LIVE_DIR'] = str_replace('\\', '/', $live);
 
-        $cmd = $bash . ' tools/update.sh --templates-only 2>&1';
+        $cmd = self::asOwnerPrefix($src) . $bash . ' tools/update.sh --templates-only 2>&1';
         $res = self::runCmd($cmd, $src, $timeoutSec, $env);
         $res['problems'] = [];
         return $res;
@@ -661,10 +679,14 @@ class SelfUpdate
         $bash = is_executable('/usr/bin/bash') ? '/usr/bin/bash' : (is_executable('/bin/bash') ? '/bin/bash' : 'bash');
         $runner = Manager::runnerAvailable();
         $pathGuess = dirname(PHP_BINARY);
-        $cmd = 'cd ' . escapeshellarg($src)
+        $ownerPrefix = self::asOwnerPrefix($src);
+        $inner = 'cd ' . escapeshellarg($src)
             . ' && PATH="' . $pathGuess . ':/usr/local/bin:/usr/bin:/bin:$PATH" ' . $gitEnv
             . ' BOTSAZ_LIVE_DIR=' . escapeshellarg($live)
             . ' nohup ' . $bash . ' tools/update.sh --web >> ' . escapeshellarg($log) . ' 2>&1 & echo started';
+        $cmd = $ownerPrefix !== ''
+            ? $ownerPrefix . 'bash -lc ' . escapeshellarg($inner)
+            : $inner;
         $out = '';
         try {
             if ($runner === 'shell_exec') { $out = (string)@shell_exec($cmd); }

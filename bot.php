@@ -2587,6 +2587,42 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
             return;
         }
 
+        if ($action === 'apply') {
+            $bots = $store->allBots();
+            $pending = 0;
+            foreach ($bots as $b) {
+                $plan = SourceUpdate::plan((string)($b['type'] ?? ''), (string)($b['folder'] ?? ''));
+                if ($plan['ok'] && !empty($plan['out_of_date'])) $pending++;
+            }
+            if ($pending === 0) {
+                $t = "✅ همهٔ ربات‌های ساخته‌شده با قالب‌های فعلی هم‌ترازند؛ چیزی برای اعمال نیست.";
+                $kb = BotApi::ikb([[['text' => '🔄 پنل سورس', 'callback_data' => 'src:refresh']]]);
+                if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, $t, ['reply_markup' => $kb]);
+                else BotApi::send($TOKEN, $chatId, $t, ['reply_markup' => $kb]);
+                return;
+            }
+            $text = "🚀 <b>اعمالِ سورسِ تازه روی ربات‌های ساخته‌شده</b>\n\n"
+                . "تعداد ربات‌هایی که سورسشان از قالب عقب است: <b>{$pending}</b>\n\n"
+                . "🛡 حفاظت‌ها:\n"
+                . "• <code>config.php</code> و دیتابیسِ هر ربات هرگز دست نمی‌خورد\n"
+                . "• فقط فایل‌های سورسِ عوض‌شده/تازه کپی می‌شوند\n"
+                . "• برای هر ربات قبل از اعمال بکاپِ کامل گرفته می‌شود\n"
+                . "• در صورت خطای نحوی فایل‌های بازنویسی‌شده برگردانده می‌شوند\n\n"
+                . "ممکن است چند دقیقه طول بکشد. ادامه بدهم؟";
+            $kb = BotApi::ikb([
+                [['text' => '✅ بله، اعمال کن', 'callback_data' => 'src:applygo']],
+                [['text' => '❌ انصراف', 'callback_data' => 'src:refresh']],
+            ]);
+            if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, $text, ['reply_markup' => $kb]);
+            else BotApi::send($TOKEN, $chatId, $text, ['reply_markup' => $kb]);
+            return;
+        }
+
+        if ($action === 'applygo') {
+            applySourceToAllBots($cfg, $store, $TOKEN, $chatId, $uid);
+            return;
+        }
+
         if ($action === 'go') {
             runTemplatesUpdate($TOKEN, $chatId);
             return;
@@ -3635,6 +3671,7 @@ function showSourcePanel(array $cfg, Store $store, string $TOKEN, $chatId, int $
     if ($probs === []) $rows[] = [['text' => '⬇️ دریافت سورس تازه', 'callback_data' => 'src:ask']];
     $rows[] = [['text' => '🔄 بررسی (git fetch)', 'callback_data' => 'src:check']];
     $rows[] = [['text' => '📜 آخرین لاگ', 'callback_data' => 'src:log']];
+    if ((int)$outdated > 0) $rows[] = [['text' => '🚀 اعمال سورس بروز روی ربات‌های ساخته‌شده', 'callback_data' => 'src:apply']];
     $rows[] = [['text' => '🏠 منو', 'callback_data' => Nav::CB_BACK_MAIN]];
     $kb = BotApi::ikb($rows);
     if ($msgId > 0) {
@@ -3841,6 +3878,62 @@ function runTemplatesUpdate(string $TOKEN, $chatId): void
     try {
         Logger::getInstance()->info('source', 'templates updated from own repos: ' . $totalApplied
             . ' file(s) in ' . count($doneTpl) . ' template(s)');
+    } catch (Throwable $e) { /* لاگر خاموش */ }
+}
+
+function applySourceToAllBots(array $cfg, Store $store, string $TOKEN, $chatId, int $uid): void
+{
+    @set_time_limit(0);
+    @ignore_user_abort(true);
+
+    $waiting = BotApi::send($TOKEN, $chatId, "⏳ در حال بررسی و اعمالِ سورسِ تازه روی ربات‌های ساخته‌شده…");
+    $msgId = !empty($waiting['result']['message_id']) ? (int)$waiting['result']['message_id'] : 0;
+    $report = function (string $t) use ($TOKEN, $chatId, $msgId): void {
+        $kb = BotApi::ikb([
+            [['text' => '🔄 پنل سورس', 'callback_data' => 'src:refresh']],
+            [['text' => '📜 لاگ کامل', 'callback_data' => 'src:log']],
+        ]);
+        if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, $t, ['reply_markup' => $kb]);
+        else BotApi::send($TOKEN, $chatId, $t, ['reply_markup' => $kb]);
+    };
+
+    $bots = $store->allBots();
+    $updated = 0;
+    $skipped = 0;
+    $failed = 0;
+    $lines = [];
+    foreach ($bots as $b) {
+        $type = (string)($b['type'] ?? '');
+        $folder = (string)($b['folder'] ?? '');
+        $plan = SourceUpdate::plan($type, $folder);
+        if (!$plan['ok']) {
+            $failed++;
+            $lines[] = "• <code>{$folder}</code> — ⚠️ " . htmlspecialchars(mb_substr((string)$plan['error'], 0, 120), ENT_QUOTES, 'UTF-8');
+            continue;
+        }
+        if (empty($plan['out_of_date'])) {
+            $skipped++;
+            continue;
+        }
+        $res = SourceUpdate::apply($plan, $uid);
+        if (!empty($res['ok'])) {
+            $updated++;
+            $appliedN = (int)($res['applied'] ?? 0);
+            $revertedN = (int)($res['reverted'] ?? 0);
+            $lines[] = "• <code>{$folder}</code> — ✅ {$appliedN} فایل" . ($revertedN > 0 ? " ({$revertedN} برگردانده شد)" : "");
+        } else {
+            $failed++;
+            $lines[] = "• <code>{$folder}</code> — ❌ " . htmlspecialchars(mb_substr((string)($res['error'] ?? '?'), 0, 120), ENT_QUOTES, 'UTF-8');
+        }
+    }
+
+    $txt = "🚀 <b>تغییراتِ سورس اعمال شد</b>\n\n"
+        . "✅ بروزشده: {$updated} | 🟢 از قبل به‌روز: {$skipped} | ❌ ناموفق: {$failed}\n\n";
+    $txt .= $lines !== [] ? implode("\n", array_slice($lines, 0, 30)) . (count($lines) > 30 ? "\n• …" : "") : "هیچ فایلی تغییر نکرد.";
+    $txt .= "\n\n🛡 config.php و دیتابیس‌ها هرگز لمس نشدند؛ برای هر اپدیت بکاپ گرفته شد.";
+    $report($txt);
+    try {
+        Logger::getInstance()->info('source', "apply-to-bots: updated={$updated}, skipped={$skipped}, failed={$failed}");
     } catch (Throwable $e) { /* لاگر خاموش */ }
 }
 
