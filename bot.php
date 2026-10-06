@@ -394,11 +394,11 @@ function mainMenu(array $u, array $supers, Store $store = null): string {
         $payText = $payPending > 0 ? " (🧾{$payPending})" : "";
         $rows = [
             [['text' => '🤖 ساخت ربات جدید'], ['text' => '📦 ربات‌های من']],
-            [['text' => '📊 آمار'], ['text' => '📣 همگانی']],
-            [['text' => '⏰ کرون'], ['text' => '👥 کاربران مجاز']],
-            [['text' => '💾 بکاپ دیتابیس'], ['text' => "📋 درخواست‌های جدید{$pendingText}"]],
-            [['text' => "💳 پرداخت‌ها{$payText}"], ['text' => 'ℹ️ راهنما']],
-            [['text' => '🔍 دیاگنوز'], ['text' => '📋 همه ربات‌ها']],
+            [['text' => '📊 آمار'], ['text' => '⏰ کرون']],
+            [['text' => '👥 کاربران مجاز'], ['text' => "📋 درخواست‌های جدید{$pendingText}"]],
+            [['text' => "💳 پرداخت‌ها{$payText}"], ['text' => '💾 بکاپ دیتابیس']],
+            [['text' => 'ℹ️ راهنما'], ['text' => '🔍 دیاگنوز']],
+            [['text' => '📋 همه ربات‌ها']],
         ];
         // بروزرسانی (سورس یا خودِ ربات‌ساز) فقط در دسترسِ «سوپرادمین» است، نه هر ادمینی
         if (isSuper($supers, (int)($u['user_id'] ?? 0))) {
@@ -1466,8 +1466,16 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
             case '📊 آمار':
                 $bots = $store->allBots();
                 $totalChildUsers = 0;
+                $active = 0; $disabled = 0;
+                $byType = [];
+                $ownerIds = [];
                 foreach ($bots as $b) {
-                    if ($b['status'] !== 'active') continue;
+                    if (($b['status'] ?? '') === 'active') $active++; else $disabled++;
+                    $t = (string)($b['type'] ?? '?');
+                    $byType[$t] = ($byType[$t] ?? 0) + 1;
+                    $oid = (int)($b['owner_id'] ?? 0);
+                    if ($oid > 0) $ownerIds[$oid] = true;
+                    if (($b['status'] ?? '') !== 'active') continue;
                     // فقط قالب‌هایی که جدول کاربر تلگرامی دارند شمرده می‌شوند
                     if (!botHasUserTable($b)) continue;
                     $pdo = childPdo($cfg, $b);
@@ -1478,13 +1486,27 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
                         $pdo = null;
                     }
                 }
-                BotApi::send($TOKEN, $chatId,
-                    "📊 <b>آمار ربات‌ساز</b>\n\n👥 کاربران: {$store->countUsers()}\n🤖 ربات‌ها: {$store->countBots()}\n👤 مجموع کاربران ربات‌ها: {$totalChildUsers}");
+                try { $pendingReqs = $store->countPendingRequests(); } catch (Throwable $e) { $pendingReqs = 0; }
+                try { $payPending = Payments::pendingAdminCount($store); } catch (Throwable $e) { $payPending = 0; }
+                $msg = "📊 <b>آمار ربات‌ساز</b>\n\n"
+                    . "👥 کاربران: {$store->countUsers()}\n"
+                    . "🤖 ربات‌ها: " . count($bots) . " (🟢 فعال: {$active} | 🔴 غیرفعال: {$disabled})\n"
+                    . "👤 مجموع کاربران ربات‌ها: {$totalChildUsers}\n"
+                    . "⏳ درخواست‌های در انتظار: {$pendingReqs}\n"
+                    . "💳 پرداخت‌های در انتظار: {$payPending}\n";
+                if ($byType !== []) {
+                    $parts = [];
+                    foreach ($byType as $k => $n) $parts[] = htmlspecialchars((string)$k, ENT_QUOTES, 'UTF-8') . ": {$n}";
+                    $msg .= "🧩 بر حسب قالب: " . implode('، ', $parts) . "\n";
+                }
+                if (isSuper($SUPERS, $uid)) {
+                    $msg .= "👑 صاحبانِ ربات‌ها: <code>" . htmlspecialchars(implode(', ', array_map('strval', array_keys($ownerIds))), ENT_QUOTES, 'UTF-8') . "</code>\n";
+                }
+                BotApi::send($TOKEN, $chatId, $msg);
                 return;
 
             case '📣 همگانی':
-                $store->setStep($uid, 'await_broadcast');
-                BotApi::send($TOKEN, $chatId, Texts::get($store, 'broadcast_prompt'), ['reply_markup' => Nav::stepKb()]);
+                BotApi::send($TOKEN, $chatId, "ℹ️ دکمهٔ همگانی حذف شده است.");
                 return;
 
             case '👥 کاربران مجاز':
