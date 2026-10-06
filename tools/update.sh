@@ -515,22 +515,40 @@ if [ "$DO_RESET" -eq 1 ]; then
           *'File exists'*)
             die "git could not create .git/index.lock (another git run left it behind). Remove it manually: rm -f $SRC_DIR/.git/index.lock" ;;
           *Permission*|*permission*|*'Read-only'*|*denied*)
-            die "No write permission on the source tree ($SRC_DIR). Run once as a user that owns it: sudo bash tools/update.sh" ;;
+            warn "Permission denied on $SRC_DIR — trying to self-heal ownership"
+            if command -v sudo >/dev/null 2>&1 && sudo -n chown -R "$(id -u):$(id -g)" "$SRC_DIR" 2>/dev/null; then
+              info "Ownership of $SRC_DIR set to $(id -un) — retrying reset"
+              _reset_err2="$(git reset --hard "origin/$CUR_BRANCH" 2>&1)"
+              if [ $? -eq 0 ]; then
+                RESET_OCCURRED=1
+                _self_heal_done=1
+                ok "Source tree reset to clean origin/$CUR_BRANCH (after self-heal)"
+              else
+                printf '%s\n' "$_reset_err2" | sed 's/^/   \/'
+                die "git reset --hard still failed after self-heal"
+              fi
+            else
+              warn "sudo -n chown not allowed — run once as root: sudo bash tools/fix_source_update_permissions.sh"
+              die "No write permission on the source tree ($SRC_DIR). Run once as root: sudo bash tools/update.sh"
+            fi
+            ;;
         esac
         # اگر محتوای فایل‌ها از قبل دقیقاً با origin یکی است، نوشتنِ فایل‌ها لازم
         # نیست؛ کافی است HEAD و index جلو بروند (reset معمولی بدون --hard).
-        if git diff --quiet "origin/$CUR_BRANCH" 2>/dev/null; then
-          info "Working tree already matches origin/$CUR_BRANCH – only fast-forwarding HEAD"
-          _ff_err="$(git reset "origin/$CUR_BRANCH" 2>&1)"
-          if [ $? -ne 0 ]; then
-            fail "git reset (mixed) also failed:"
-            printf '%s\n' "$_ff_err" | sed 's/^/   /'
-            die "git reset failed"
+        if [ "${_self_heal_done:-0}" -eq 0 ]; then
+          if git diff --quiet "origin/$CUR_BRANCH" 2>/dev/null; then
+            info "Working tree already matches origin/$CUR_BRANCH – only fast-forwarding HEAD"
+            _ff_err="$(git reset "origin/$CUR_BRANCH" 2>&1)"
+            if [ $? -ne 0 ]; then
+              fail "git reset (mixed) also failed:"
+              printf '%s\n' "$_ff_err" | sed 's/^/   /'
+              die "git reset failed"
+            fi
+            RESET_OCCURRED=1
+            ok "Source HEAD fast-forwarded to origin/$CUR_BRANCH (no file had to be rewritten)"
+          else
+            die "git reset --hard failed: ${_first_err:-unknown git error}"
           fi
-          RESET_OCCURRED=1
-          ok "Source HEAD fast-forwarded to origin/$CUR_BRANCH (no file had to be rewritten)"
-        else
-          die "git reset --hard failed: ${_first_err:-unknown git error}"
         fi
       else
         RESET_OCCURRED=1
