@@ -234,12 +234,35 @@ class BotApi
 
     public static function kb(array $rows, bool $oneTime = false): string
     {
-        return json_encode(['keyboard' => $rows, 'resize_keyboard' => true, 'one_time_keyboard' => $oneTime]);
+        return json_encode(['keyboard' => self::circleButtonTexts($rows), 'resize_keyboard' => true, 'one_time_keyboard' => $oneTime]);
     }
 
     public static function ikb(array $rows): string
     {
-        return json_encode(['inline_keyboard' => $rows]);
+        return json_encode(['inline_keyboard' => self::circleButtonTexts($rows)]);
+    }
+
+    /**
+     * هر دکمه با نشانِ گرد یکدست می‌شود (ظاهرِ گرد در همهٔ کیبوردها).
+     * ایموجیِ شروعینِ قبلی حذف و «⭕ » اول متن گذاشته می‌شود.
+     */
+    private static function circleButtonTexts(array $rows): array
+    {
+        $out = [];
+        foreach ($rows as $row) {
+            if (!is_array($row)) { $out[] = $row; continue; }
+            $newRow = [];
+            foreach ($row as $cell) {
+                if (!is_array($cell)) { $newRow[] = $cell; continue; }
+                if (isset($cell['text']) && is_string($cell['text'])) {
+                    $t = preg_replace('/^\s*[\x{2139}\x{2600}-\x{27BF}\x{1F300}-\x{1FAFF}\x{2B00}-\x{2BFF}\x{FE0F}\x{200D}\x{20E3}]+\s*/u', '', $cell['text'], 1) ?? $cell['text'];
+                    $cell['text'] = '⭕ ' . trim($t);
+                }
+                $newRow[] = $cell;
+            }
+            $out[] = $newRow;
+        }
+        return $out;
     }
 
     public static function removeKb(): string
