@@ -369,6 +369,9 @@ class Manager
             'faxima' => [
                 'label' => 'فاکسیما (فروش VPN)',
                 'icon' => '✨',
+                // ریپوی مبدأ: دکمهٔ «🔄 دریافت سورس بروز» هر قالب را با لینک خودش
+                // چک می‌کند، نه با origin ریپوی ربات‌ساز (که فقط یک کپیِ ثابت است).
+                'repo' => 'https://github.com/Mmd-Amir/Faoxima',
                 'db' => 'mysql',
                 'entry' => 'index.php',
                 'autoload' => 'vendor/autoload.php',
@@ -384,6 +387,7 @@ class Manager
             'mirza' => [
                 'label' => 'میرزا (فروش VPN)',
                 'icon' => '🌙',
+                'repo' => 'https://github.com/NewMreza/botmirzapanel',
                 'db' => 'mysql',
                 'entry' => 'index.php',
                 'autoload' => 'vendor/autoload.php',
@@ -401,6 +405,7 @@ class Manager
                 'dir' => 'uptime-bot-telegram',
                 'label' => 'آپ‌تایم (پایش سایت)',
                 'icon' => '📡',
+                'repo' => 'https://github.com/alisystemit/uptime-bot-telegram',
                 'db' => 'mysql',
                 'entry' => 'index.php',
                 'autoload' => 'vendor/autoload.php',
@@ -424,6 +429,7 @@ class Manager
                 'dir' => "Pasargad Representatives' Bot Telegram",
                 'label' => 'نمایندگان پاسارگاد',
                 'icon' => '🏦',
+                'repo' => 'https://github.com/alisystemit/Pasargad-Representatives-Bot-Telegram',
                 'db' => 'sqlite',
                 'entry' => 'bot.php',
                 // این قالب composer ندارد؛ خودش autoloader دستی دارد

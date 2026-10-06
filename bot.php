@@ -3519,13 +3519,14 @@ function sendPendingRequests(Store $store, string $TOKEN, $chatId): void
 // نرسد.
 //
 // کارِ این بخش فقط یک چیز است: کشیدنِ آخرین سورس از گیت و کپیِ «templates/»
-// روی زنده، تا هرکس بعداً ربات بسازد نسخهٔ تازهٔ قالب را بگیرد:
+// روی زنده، تا هرکس بعداً ربات بسازد نسخهٔ تازهٔ قالب را بگیرد. هر قالب با
+// لینکِ گیتهابِ خودش (کلید repo در رجیستری) چک و از همان‌جا هم تازه می‌شود:
 //
 //   • دسترسی: فقط سوپرادمین (نه ادمین معمولی) و همیشه با تأیید صریح.
 //   • بکاپِ قالب‌هایی که قرار است عوض شوند قبل از اجرا ساخته و «فقط» برای همان
 //     سوپرادمینی که دکمه را زده فرستاده می‌شود.
-//   • اجرا با tools/update.sh --templates-only: بدون دست‌زدن به کدِ ربات‌ساز،
-//     دیتابیس، وبهوک و وی‌هوست و بدون ری‌استارت سرویس.
+//   • بدون دست‌زدن به کدِ ربات‌ساز، دیتابیس، وبهوک و وی‌هوست و بدون ری‌استارت سرویس.
+//   • config.php و دیتابیس‌های قالب‌ها هرگز بازنویسی نمی‌شوند.
 //   • ربات‌های ساخته‌شده، bots/*/config.php و دیتابیس‌ها هرگز تغییر نمی‌کنند.
 
 /** پنل «⬆️ آپدیت ربات‌ساز»: وضعیت نصب فعلی + لاگ کوتاه */
@@ -3576,16 +3577,11 @@ function showSelfUpdatePanel(array $cfg, Store $store, string $TOKEN, $chatId, i
  */
 function sourceNothingText(array $st): string
 {
-    $branch = (string)($st['branch'] ?? 'main');
-    $behind = (int)($st['behind'] ?? -1);
+    $behind = (int)($st['behind'] ?? 0);
     if ($behind > 0) {
-        return "✅ تغییری در <code>templates/</code> نیست — {$behind} کامیت تازه روی <code>origin/{$branch}</code> هست"
-            . " ولی هیچ‌کدام پوشهٔ قالب‌ها را عوض نکرده‌اند؛ چیزی برای دریافت نیست.";
+        return "🟡 {$behind} قالب از مخازن گیتهابِ خودشان عقب است؛ روی «بررسی (git fetch)» بزن تا فهرست دقیق فایل‌ها دوباره محاسبه شود.";
     }
-    if ($behind === 0) {
-        return "✅ سورسِ تازه‌ای برای <code>templates/</code> نیست — همه‌چیز با <code>origin/{$branch}</code> هم‌تراز است.";
-    }
-    return "✅ تغییری در <code>templates/</code> دیده نمی‌شود؛ چیزی برای دریافت نیست.";
+    return "✅ همهٔ قالب‌ها با مخازن گیتهابِ خودشان هم‌ترازند؛ چیزی برای دریافت نیست.";
 }
 
 /**
@@ -3598,13 +3594,14 @@ function sourceNothingText(array $st): string
 function showSourcePanel(array $cfg, Store $store, string $TOKEN, $chatId, int $msgId = 0, string $note = ''): void
 {
     $st = SelfUpdate::templatesStatus();
-    $behind = $st['behind'] >= 0
-        ? ($st['behind'] > 0 ? "🟡 {$st['behind']} کامیت عقب" : '🟢 هم‌تراز با origin')
-        : '؟';
+    $outdated = count((array)$st['templates']);
+    $behind = $outdated > 0
+        ? "🟡 {$outdated} قالب نیاز به بروزرسانی"
+        : '🟢 همهٔ قالب‌ها هم‌ترازند';
 
     $txt = "🔄 <b>دریافت سورس بروز (قالب‌ها)</b>\n"
         . Manager::versionLine() . "\n\n"
-        . "شاخه: <code>{$st['branch']}</code> | کامیت نصب‌شده: <code>{$st['commit']}</code>\n"
+        . "شاخهٔ ربات‌ساز: <code>{$st['branch']}</code> | کامیت: <code>{$st['commit']}</code>\n"
         . "وضعیت: {$behind}\n\n"
         . "📥 با این دکمه فقط <code>templates/</code> تازه می‌شود:\n"
         . "• ربات‌های ساخته‌شده هیچ تغییری نمی‌بینند؛ <code>config.php</code> و دیتابیس‌شان دست‌نخورده می‌ماند\n"
@@ -3614,17 +3611,16 @@ function showSourcePanel(array $cfg, Store $store, string $TOKEN, $chatId, int $
 
     $files = (array)$st['files'];
     if ($files !== []) {
-        $txt .= "\n🟡 در راه است (" . count($files) . " فایل):\n";
+        $txt .= "\n🟡 در راه است (" . count($files) . " قالب):\n";
         $i = 0;
         foreach ((array)$st['templates'] as $name => $n) {
-            $txt .= "• <code>" . htmlspecialchars((string)$name, ENT_QUOTES, 'UTF-8') . "</code> — {$n} فایل\n";
+            $txt .= "• <code>" . htmlspecialchars((string)$name, ENT_QUOTES, 'UTF-8') . "</code> — " . ($n > 1 ? "{$n} فایل" : 'نیاز به بروزرسانی') . "\n";
             if (++$i >= 8) { $txt .= "• …\n"; break; }
         }
     } elseif ($st['behind'] === 0 && SelfUpdate::sourceDir() !== null) {
         $txt .= "\n✅ همه‌چیز به‌روز است؛ چیزی برای دریافت نیست.\n";
     } elseif ($st['behind'] > 0 && SelfUpdate::sourceDir() !== null) {
-        // کامیت تازه هست ولی هیچ‌کدام templates/ را عوض نکرده‌اند: باید صریح
-        // گفته شود، وگرنه خطِ «۲ کامیت عقب» بدون هیچ فهرستی بی‌نتیجه به نظر می‌رسد.
+        // قالب‌های عقب‌مانده هست ولی فایل‌های دقیق محاسبه نشد: صریح گفته شود
         $txt .= "\n" . sourceNothingText($st) . "\n";
     }
 
@@ -3663,11 +3659,11 @@ function showSourceConfirm(array $cfg, Store $store, string $TOKEN, $chatId, int
     $list = '';
     $i = 0;
     foreach ((array)$st['templates'] as $name => $n) {
-        $list .= "• <code>" . htmlspecialchars((string)$name, ENT_QUOTES, 'UTF-8') . "</code> — {$n} فایل\n";
+        $list .= "• <code>" . htmlspecialchars((string)$name, ENT_QUOTES, 'UTF-8') . "</code> — " . ($n > 1 ? "{$n} فایل" : 'نیاز به بروزرسانی') . "\n";
         if (++$i >= 10) { $list .= "• …\n"; break; }
     }
     $text = "🔄 <b>دریافت سورس تازهٔ قالب‌ها</b>\n\n"
-        . "شاخه: <code>{$st['branch']}</code> | مجموع: " . count($files) . " فایل\n"
+        . "تعداد قالب‌های منتظر: " . count((array)$st['templates']) . "\n"
         . $list . "\n"
         . "🛡 ربات‌های ساخته‌شده، <code>config.php</code>‌ها و دیتابیس‌ها دست‌نخورده می‌مانند.\n"
         . "🗂 پیش از تغییر، از هر قالبِ در حال عوض‌شدن بکاپ گرفته و فقط برای شما فرستاده می‌شود.\n"
@@ -3714,9 +3710,8 @@ function sendTemplatesBackup(string $TOKEN, $chatId, array $backup, string $tplN
 
 /**
  * اجرای واقعیِ «دریافت سورس بروز»:
- *   fetch → محاسبهٔ قالب‌های در حال تغییر → بکاپ (فقط برای همین سوپرادمین)
- *   → tools/update.sh --templates-only → گزارش.
- * خروجیِ اسکریپت هم در لاگِ selfupdate.log می‌ماند تا بعداً قابل بررسی باشد.
+ *   fetch (هر قالب از ریپوی خودش) → قالب‌های در حال تغییر → بکاپ (فقط برای همین
+ *   سوپرادمین) → SelfUpdate::updateTemplates (کپیِ امن؛ config/دیتابیس دست‌نخورده) → گزارش.
  */
 function runTemplatesUpdate(string $TOKEN, $chatId): void
 {
@@ -3748,11 +3743,20 @@ function runTemplatesUpdate(string $TOKEN, $chatId): void
     };
 
     $t0 = microtime(true);
+    $fetchWarn = '';
     $fetch = SelfUpdate::fetchSource();
     if (!$fetch['ok']) {
-        $report("❌ fetch از گیت‌هاب ناموفق بود:\n<pre>"
-            . htmlspecialchars(mb_substr((string)$fetch['out'], -700), ENT_QUOTES, 'UTF-8') . "</pre>");
-        return;
+        $fetchWarn = "⚠️ fetch از برخی مخازن کامل نشد (با نسخهٔ کش‌شده ادامه می‌دم):\n<pre>"
+            . htmlspecialchars(mb_substr((string)$fetch['out'], -700), ENT_QUOTES, 'UTF-8') . "</pre>\n";
+        // اگر هیچ مخزنی به‌روز نشد و اصلاً کلنی نداریم، ادامه معنی ندارد
+        $anyClone = false;
+        foreach (array_keys(Manager::templates()) as $k) {
+            if (is_dir(SelfUpdate::templateCloneDir($k))) { $anyClone = true; break; }
+        }
+        if (!$anyClone && trim((string)$fetch['out']) !== '') {
+            BotApi::send($TOKEN, $chatId, "❌ دسترسی به گیتهاب ندارم و کلون محلی هم نیست؛ بروزرسانی امکان‌پذیر نیست.");
+            return;
+        }
     }
 
     $st = SelfUpdate::templatesStatus();
@@ -3767,10 +3771,11 @@ function runTemplatesUpdate(string $TOKEN, $chatId): void
     if (!@mkdir($bakDir, 0755, true) && !is_dir($bakDir)) $bakDir = '';
     $baks = [];
     $bakErr = [];
-    foreach (array_keys((array)$st['templates']) as $name) {
-        $name = (string)$name;
-        $dir = SelfUpdate::rootDir() . '/templates/' . $name;
+    foreach (array_keys((array)$st['templates']) as $tkey) {
+        $tkey = (string)$tkey;
+        $dir = Manager::templateDir($tkey);
         if (!is_dir($dir)) continue;
+        $name = basename(rtrim(str_replace('\\', '/', $dir), '/'));
         if ($bakDir === '') { $bakErr[] = $name . ': پوشهٔ بکاپ ساخته نشد'; continue; }
         // نامِ فایلِ آرشیو باید با همان قانونِ safeName ساخته شود تا pruneBackups
         // (که templates_<key>_* را جست‌وجو می‌کند) بتواند نسخه‌های قدیمی را پاک کند
@@ -3789,31 +3794,35 @@ function runTemplatesUpdate(string $TOKEN, $chatId): void
     }
     foreach ($baks as $b) sendTemplatesBackup($TOKEN, $chatId, (array)$b['res'], (string)$b['name']);
 
-    // اجرای update.sh --templates-only (بدون ری‌استارت، بدون تغییر ربات‌ها)
-    $run = SelfUpdate::runTemplatesOnly(600);
+    // همگام‌سازیِ هر قالب از مخزنِ گیتهابِ خودش (بدون لمس config/دیتابیس)
+    $run = SelfUpdate::updateTemplates(600);
     $ms = (int)round((microtime(true) - $t0) * 1000);
 
-    if (!$run['ok']) {
-        $txt = "❌ <b>بروزرسانی سورس انجام نشد</b>";
-        if ((int)($run['rc'] ?? -1) !== -1) $txt .= " (خروج: " . (int)$run['rc'] . ")";
-        $txt .= "\n";
-        if (!empty($run['problems'])) {
-            $txt .= "\n• " . htmlspecialchars(implode("\n• ", (array)$run['problems']), ENT_QUOTES, 'UTF-8') . "\n";
-        }
-        $tail = trim((string)($run['out'] ?? ''));
-        if ($tail !== '') $txt .= "\n<pre>" . htmlspecialchars(mb_substr($tail, -1200), ENT_QUOTES, 'UTF-8') . "</pre>";
+    $failedTpl = [];
+    $doneTpl = [];
+    foreach ((array)$run['results'] as $key => $res) {
+        if (empty($res['ok'])) { $failedTpl[] = $key . ': ' . (string)($res['error'] ?? '?'); continue; }
+        if (!empty($res['skipped'])) continue;
+        $doneTpl[] = ['key' => (string)$key, 'applied' => (int)($res['applied'] ?? 0)];
+    }
+
+    if ($failedTpl !== [] && $doneTpl === []) {
+        $txt = "❌ <b>بروزرسانی سورس انجام نشد</b>\n• "
+            . htmlspecialchars(implode("\n• ", $failedTpl), ENT_QUOTES, 'UTF-8');
         $txt .= "\n⏱ " . SourceUpdate::fmtMs($ms);
         $report($txt);
-        try { Logger::getInstance()->warning('source', 'templates update failed rc=' . ($run['rc'] ?? '?')); } catch (Throwable $e) { /* لاگر خاموش */ }
+        try { Logger::getInstance()->warning('source', 'templates update failed: ' . implode(' | ', $failedTpl)); } catch (Throwable $e) { /* لاگر خاموش */ }
         return;
     }
 
     $lines = [];
-    foreach ((array)$st['templates'] as $name => $n) {
-        $lines[] = "• <code>" . htmlspecialchars((string)$name, ENT_QUOTES, 'UTF-8') . "</code> — {$n} فایل";
+    $totalApplied = 0;
+    foreach ($doneTpl as $d) {
+        $totalApplied += $d['applied'];
+        $lines[] = "• <code>" . htmlspecialchars($d['key'], ENT_QUOTES, 'UTF-8') . "</code> — {$d['applied']} فایل";
     }
-    $txt = "✅ <b>سورس تازه شد</b>\n\n"
-        . "📥 " . count($files) . " فایل در " . count((array)$st['templates']) . " قالب به‌روز شد:\n"
+    $txt = $fetchWarn . "✅ <b>سورس تازه شد</b>\n\n"
+        . "📥 " . $totalApplied . " فایل در " . count($doneTpl) . " قالب به‌روز شد:\n"
         . implode("\n", $lines) . "\n\n"
         . "🛡 ربات‌های ساخته‌شده تغییری نکردند؛ <code>config.php</code>‌ها و دیتابیس‌ها دست‌نخورده ماندند.\n"
         . "🧩 کدِ ربات‌ساز، وبهوک و وی‌هوست هم تغییر نکردند (فقط <code>templates/</code>).\n"
@@ -3823,11 +3832,15 @@ function runTemplatesUpdate(string $TOKEN, $chatId): void
         $txt .= "\n⚠️ بکاپ ساخته نشد (بروزرسانی ادامه یافت):\n• "
             . htmlspecialchars(implode("\n• ", $bakErr), ENT_QUOTES, 'UTF-8') . "\n";
     }
+    if ($failedTpl !== []) {
+        $txt .= "\n⚠️ این قالب‌ها آپدیت نشدند:\n• "
+            . htmlspecialchars(implode("\n• ", $failedTpl), ENT_QUOTES, 'UTF-8') . "\n";
+    }
     $txt .= "\n⏱ " . SourceUpdate::fmtMs($ms);
     $report($txt);
     try {
-        Logger::getInstance()->info('source', 'templates updated: ' . count($files)
-            . ' file(s) in ' . count((array)$st['templates']) . ' template(s)');
+        Logger::getInstance()->info('source', 'templates updated from own repos: ' . $totalApplied
+            . ' file(s) in ' . count($doneTpl) . ' template(s)');
     } catch (Throwable $e) { /* لاگر خاموش */ }
 }
 

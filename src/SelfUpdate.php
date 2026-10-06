@@ -218,12 +218,126 @@ class SelfUpdate
     }
 
     // ===== وضعیتِ پوشهٔ قالب‌ها (templates/) =====
+    //
+    // هر قالب ریپوی گیتهابِ مخصوصِ خودش را در Manager::templates()['repo'] دارد.
+    // این بخش وضعیتِ templates/ را با «همان ریپو» می‌سنجد نه با originِ ریپوی
+    // خودِ ربات‌ساز: فاکسیما با ریپوی فاکسیما، میرزا با ریپوی میرزا و… وقتی
+    // کسی دکمهٔ «دریافت سورس بروز» را می‌زند باید سورسِ هر قالب از لینکِ
+    // گیتهابِ خودش بیاید، نه از یک کپیِ قدیمیِ داخلِ ریپوی ربات‌ساز.
+
+    /** فایل ثبتِ کامیتِ آخرین نسخه‌ای که از هر ریپو روی templates/ کپی شده */
+    public static function templateStateFile(): string
+    {
+        return self::rootDir() . '/data/template_sources.json';
+    }
+
+    public static function templateSourceState(): array
+    {
+        $f = self::templateStateFile();
+        if (!is_file($f)) return [];
+        $j = json_decode((string)@file_get_contents($f), true);
+        return is_array($j) ? $j : [];
+    }
+
+    public static function saveTemplateSourceState(array $state): void
+    {
+        $f = self::templateStateFile();
+        @mkdir(dirname($f), 0755, true);
+        @file_put_contents($f, json_encode($state, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE), LOCK_EX);
+    }
+
+    private static function rsafeKey(string $key): string
+    {
+        return preg_replace('/[^A-Za-z0-9._-]+/', '_', $key) ?: 'tpl';
+    }
+
+    /** پوشهٔ کشِ کلون‌های bare قالب‌ها (برای diff و archive) */
+    private static function tplCacheDir(): string
+    {
+        $d = self::rootDir() . '/data/tpl_repos';
+        if (!is_dir($d)) @mkdir($d, 0755, true);
+        return $d;
+    }
+
+    /** مسیر کلونِ bare هر قالب */
+    public static function templateCloneDir(string $key): string
+    {
+        return self::tplCacheDir() . '/' . self::rsafeKey($key) . '.git';
+    }
+
+    /** محیطِ git برای دستورهای وابسته به کلونِ bare (safe.directory را آزاد می‌کند) */
+    private static function tplEnv(): array
+    {
+        $env = getenv();
+        if (!is_array($env)) $env = [];
+        $env['PATH'] = dirname(PHP_BINARY) . PATH_SEPARATOR . ($env['PATH'] ?? '');
+        $env['GIT_CONFIG_COUNT'] = '1';
+        $env['GIT_CONFIG_KEY_0'] = 'safe.directory';
+        $env['GIT_CONFIG_VALUE_0'] = '*';
+        return $env;
+    }
+
+    /** خروجی یک git با --git-dir=<bare> */
+    private static function gitDir(string $bare, string $args, int $timeout = 20): string
+    {
+        $r = self::runCmd('git --git-dir=' . escapeshellarg($bare) . ' --no-pager ' . $args . ' 2>&1',
+            self::rootDir(), $timeout, self::tplEnv());
+        return trim((string)($r['out'] ?? ''));
+    }
+
+    /** شناسهٔ HEADِ ریپوی ریموت (بدون کلون) */
+    private static function lsRemoteHead(string $repo, int $timeout = 20): string
+    {
+        $r = self::runCmd('git ls-remote ' . escapeshellarg($repo) . ' HEAD 2>&1',
+            self::rootDir(), $timeout, self::tplEnv());
+        $out = trim((string)($r['out'] ?? ''));
+        if (preg_match('/^([0-9a-f]{40})/', $out, $m)) return $m[1];
+        return '';
+    }
 
     /**
-     * چه چیزی در origin برای templates/ تازه‌تر از نسخهٔ نصب‌شده است؟
+     * کلونِ bare قالبی را تازه می‌کند و شناسهٔ آخرین کامیتش را برمی‌گرداند.
+     * روی هر به‌روزرسانی یک fetch عمیق‌۱ اجرا می‌شود؛ اگر اول‌بار باشد، کلون می‌سازد.
+     *
+     * @return array{ok:bool, sha:string, out:string}
+     */
+    public static function refreshTemplateClone(string $key, int $timeoutSec = 90): array
+    {
+        $spec = Manager::templateSpec($key);
+        $repo = (string)($spec['repo'] ?? '');
+        if ($repo === '') return ['ok' => false, 'sha' => '', 'out' => 'این قالب لینک گیتهاب ندارد'];
+        $bare = self::templateCloneDir($key);
+        if (!is_dir($bare)) {
+            $cmd = 'git clone --bare --depth 1 --no-tags ' . escapeshellarg($repo) . ' ' . escapeshellarg($bare) . ' 2>&1';
+        } else {
+            $cmd = 'git --git-dir=' . escapeshellarg($bare) . ' fetch --depth 1 --no-tags origin HEAD 2>&1';
+        }
+        $r = self::runCmd($cmd, self::rootDir(), $timeoutSec, self::tplEnv());
+        $sha = '';
+        if (!is_dir($bare)) {
+            return ['ok' => false, 'sha' => '', 'out' => (string)($r['out'] ?? 'clone ناموفق')];
+        }
+        // بعد از clone اول، rev-parse HEAD؛ بعد از fetch مکرر، FETCH_HEAD
+        $sha = trim(self::gitDir($bare, 'rev-parse FETCH_HEAD', 10));
+        if (!preg_match('/^[0-9a-f]{7,40}$/i', $sha)) {
+            $sha = trim(self::gitDir($bare, 'rev-parse HEAD', 10));
+        }
+        if (!preg_match('/^[0-9a-f]{7,40}$/i', $sha)) {
+            return ['ok' => false, 'sha' => '', 'out' => (string)($r['out'] ?? 'sha پیدا نشد')];
+        }
+        return ['ok' => true, 'sha' => $sha, 'out' => (string)($r['out'] ?? '')];
+    }
+
+    /**
+     * چه چیزی در هر ریپوی قالب تازه‌تر از نسخهٔ نصب‌شده است؟
      * هیچ تغییری نمی‌دهد؛ فقط می‌گوید دکمهٔ «دریافت سورس بروز» چه خواهد کرد.
      *
-     * @return array{branch:string, commit:string, behind:int, files:array<string>, templates:array<string,int>}
+     * behind   تعداد قالب‌هایی که مخزنِ خودشان جلوتر است
+     * files    مسیرهای templates/ که عوض می‌شوند (تقریبی؛ وقتی diffِ محلی در دست است)
+     * templates کلید قالب ⇒ تعداد فایلِ در حال تغییر (یا ۱: فقط «نیاز به بروزرسانی»)
+     * repos    وضعیتِ تفکیکی برای هر قالب
+     *
+     * @return array{branch:string, commit:string, behind:int, files:array<string>, templates:array<string,int>, repos:array<string,array>}
      */
     public static function templatesStatus(): array
     {
@@ -233,39 +347,147 @@ class SelfUpdate
         $out = [
             'branch'    => $branch !== '' ? $branch : '?',
             'commit'    => $commit !== '' ? $commit : '?',
-            'behind'    => -1,
+            'behind'    => 0,
             'files'     => [],
             'templates' => [],
+            'repos'     => [],
         ];
-        if ($branch === '' || self::sourceDir() === null) return $out;
-
-        $n = self::git("rev-list --count HEAD..origin/{$branch}", 20);
-        if (is_numeric(trim($n))) $out['behind'] = (int)trim($n);
-
-        $diff = self::git("diff --name-only HEAD..origin/{$branch} -- templates/", 30);
-        if ($diff === '' || preg_match('/\bfatal\b|unknown revision/i', $diff)) return $out;
-        foreach (preg_split('/\r\n|\r|\n/', $diff) ?: [] as $f) {
-            $f = trim(str_replace('\\', '/', $f));
-            if ($f === '') continue;
-            $out['files'][] = $f;
-            $p = explode('/', $f);
-            if (isset($p[1]) && $p[1] !== '') {
-                $name = $p[1];
-                $out['templates'][$name] = ($out['templates'][$name] ?? 0) + 1;
+        $state = self::templateSourceState();
+        $now = time();
+        foreach (Manager::templates() as $key => $spec) {
+            $repo = (string)($spec['repo'] ?? '');
+            if ($repo === '') continue;
+            $dir = Manager::templateDir($key);
+            if (!is_dir($dir)) continue;
+            // نتیجهٔ ls-remote را ۲ دقیقه کش می‌کنیم تا باز شدن پنل کند نشود
+            $cachedSha = (string)($state['_remote'][$key]['sha'] ?? '');
+            $cachedAt = (int)($state['_remote'][$key]['at'] ?? 0);
+            if ($cachedSha !== '' && $cachedAt > $now - 120) {
+                $remoteSha = $cachedSha;
+            } else {
+                $remoteSha = self::lsRemoteHead($repo, 20);
+                if ($remoteSha !== '') {
+                    $state['_remote'][$key] = ['sha' => $remoteSha, 'at' => $now];
+                    self::saveTemplateSourceState($state);
+                }
+            }
+            $old = (string)($state[$key]['sha'] ?? '');
+            $changed = ($remoteSha !== '') && ($old === '' || $old !== $remoteSha);
+            $files = [];
+            if ($changed && $old !== '') {
+                $diff = self::gitDir(self::templateCloneDir($key), "diff --name-only {$old} {$remoteSha}", 20);
+                foreach (preg_split('/\r\n|\r|\n/', $diff) ?: [] as $f) {
+                    $f = trim(str_replace('\\', '/', $f));
+                    if ($f !== '' && !preg_match('/\bfatal\b|unknown revision|ambiguous/i', $f)) $files[] = $f;
+                }
+            }
+            $out['repos'][$key] = [
+                'repo' => $repo, 'ok' => $remoteSha !== '',
+                'changed' => $changed, 'old' => $old, 'new' => $remoteSha, 'files' => $files,
+            ];
+            if ($changed) {
+                $out['behind']++;
+                $out['files'][] = 'templates/' . basename(rtrim(str_replace('\\', '/', $dir), '/'));
+                $out['templates'][$key] = $files !== [] ? count($files) : 1;
             }
         }
         return $out;
     }
 
-    /** fetch ایمن برای همین بخش (قبل از محاسبهٔ وضعیت قالب‌ها) */
+    /** fetch ایمن برای همین بخش (قبل از محاسبهٔ وضعیت قالب‌ها)؛ bare clone هر قالب را تازه می‌کند */
     public static function fetchSource(): array
     {
-        if (self::sourceDir() === null) return ['ok' => false, 'out' => self::sourceHint()];
-        $out = self::git('fetch --prune origin 2>&1', 60);
-        $ok = stripos((string)$out, 'fatal:') === false
-           && stripos((string)$out, 'could not read') === false
-           && stripos((string)$out, 'unable to access') === false;
-        return ['ok' => $ok, 'out' => $out];
+        $errors = [];
+        $seen = 0;
+        foreach (Manager::templates() as $key => $spec) {
+            $repo = (string)($spec['repo'] ?? '');
+            if ($repo === '') continue;
+            $seen++;
+            $r = self::refreshTemplateClone($key, 90);
+            if (!$r['ok']) $errors[] = $key . ': ' . mb_substr((string)$r['out'], -200);
+        }
+        if ($seen === 0) return ['ok' => false, 'out' => 'هیچ قالبی لینک گیتهاب ندارد'];
+        // چکِ زندهٔ ls-remote را هم به‌روز کن تا پنل عددِ درست نشان دهد
+        $state = self::templateSourceState();
+        foreach (Manager::templates() as $key => $spec) {
+            $repo = (string)($spec['repo'] ?? '');
+            if ($repo === '') continue;
+            $sha = self::lsRemoteHead($repo, 20);
+            if ($sha !== '') $state['_remote'][$key] = ['sha' => $sha, 'at' => time()];
+        }
+        self::saveTemplateSourceState($state);
+        return ['ok' => $errors === [], 'out' => implode("\n", $errors)];
+    }
+
+    /**
+     * دانلودِ تازه‌ترین سورسِ هر قالب از ریپوی گیتهابِ خودش و کپی‌کردنش روی
+     * templates/ زنده — بدون touch شدنِ config.php، .env، دیتابیس‌ها، پوشه‌های
+     * data/ و logs/ و بدون هیچ migrate یا ری‌استارتی.
+     *
+     * فایل‌هایی که دیگر در نسخهٔ تازه نیستند حذف نمی‌شوند (امن؛ فقط گزارش می‌شوند).
+     *
+     * @return array{ok:bool, results:array<string,array>, out:string}
+     */
+    public static function updateTemplates(int $timeoutSec = 600): array
+    {
+        $out = ['ok' => true, 'results' => [], 'out' => ''];
+        $state = self::templateSourceState();
+        foreach (Manager::templates() as $key => $spec) {
+            $repo = (string)($spec['repo'] ?? '');
+            $dir = Manager::templateDir($key);
+            if ($repo === '' || !is_dir($dir)) continue;
+            $r = self::refreshTemplateClone($key, 120);
+            if (!$r['ok']) {
+                $out['ok'] = false;
+                $out['results'][$key] = ['ok' => false, 'applied' => 0, 'error' => 'fetch ناموفق: ' . mb_substr((string)$r['out'], -200)];
+                continue;
+            }
+            $old = (string)($state[$key]['sha'] ?? '');
+            if ($old !== '' && $old === $r['sha']) {
+                $out['results'][$key] = ['ok' => true, 'skipped' => true, 'applied' => 0, 'files' => []];
+                continue;
+            }
+            // استخراجِ کامیتِ تازه به پوشهٔ موقت (بدون .git)
+            $work = self::tplCacheDir() . '/.work_' . self::rsafeKey($key);
+            try { Manager::removeDir($work); } catch (Throwable $e) { /* بی‌اهمیت */ }
+            @mkdir($work, 0755, true);
+            $cmd = 'git --git-dir=' . escapeshellarg(self::templateCloneDir($key))
+                . ' --no-pager archive --format=tar ' . escapeshellarg($r['sha'])
+                . ' | tar -x 2>&1';
+            $res = self::runCmd($cmd, $work, $timeoutSec, self::tplEnv());
+            if (!$res['ok']) {
+                $out['ok'] = false;
+                $out['results'][$key] = ['ok' => false, 'applied' => 0, 'error' => 'استخراج سورس ناموفق: ' . mb_substr((string)$res['out'], -300)];
+                try { Manager::removeDir($work); } catch (Throwable $e) { /* بی‌اهمیت */ }
+                continue;
+            }
+            $applied = [];
+            foreach (SourceUpdate::walk($work) as $rel => $abs) {
+                $relN = ltrim(str_replace('\\', '/', $rel), '/');
+                if ($relN === '.git' || str_starts_with($relN, '.git/')) continue;
+                // config.php، .env، دیتابیس‌ها، data/، logs/ : هرگز بازنویسی نمی‌شوند
+                if (SourceUpdate::isProtected($relN)) continue;
+                $dst = rtrim(str_replace('\\', '/', $dir), '/') . '/' . $relN;
+                $need = !is_file($dst) || SourceUpdate::hashFile($abs) !== SourceUpdate::hashFile($dst);
+                if (!$need) continue;
+                $ddir = dirname($dst);
+                if (!is_dir($ddir) && !@mkdir($ddir, 0755, true) && !is_dir($ddir)) continue;
+                $tmp = $dst . '.botsaztmp';
+                if (!@copy($abs, $tmp)) { continue; }
+                if (!@rename($tmp, $dst)) {
+                    @unlink($dst);
+                    if (!@rename($tmp, $dst)) { @unlink($tmp); continue; }
+                }
+                @chmod($dst, 0644);
+                $applied[] = $relN;
+            }
+            try { Manager::removeDir($work); } catch (Throwable $e) { /* بی‌اهمیت */ }
+            $state[$key] = ['sha' => $r['sha'], 'at' => date('Y-m-d H:i:s'), 'applied' => count($applied)];
+            unset($state['_remote'][$key]);
+            $out['results'][$key] = ['ok' => true, 'skipped' => false, 'applied' => count($applied), 'files' => $applied];
+        }
+        self::saveTemplateSourceState($state);
+        return $out;
     }
 
     // ===== اجرای همزمانِ بروزرسانی سورس =====
