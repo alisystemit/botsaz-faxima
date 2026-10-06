@@ -1520,7 +1520,12 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
                 return;
 
             case '📋 همه ربات‌ها':
-                showAllBotsPanel($store, $TOKEN, $chatId, (int)($msg['message_id'] ?? 0));
+                // در هندلر پیام (کیبورد ثابت) $msg['message_id'] شناسهٔ پیامِ
+                // خودِ کاربر است و ربات نمی‌تواند آن را ویرایش کند (۴۰۰:
+                // message can't be edited). مثل بقیهٔ پنل‌ها، پیام تازه
+                // ارسال می‌شود؛ ویرایش فقط در هندلر کال‌بک (allbots:refresh)
+                // مجاز است چون آن‌جا $msgId پیام خود ربات است.
+                showAllBotsPanel($store, $TOKEN, $chatId);
                 return;
         }
     }
