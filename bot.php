@@ -1556,6 +1556,10 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
             ['command' => 'cancel', 'description' => '❌ انصراف از مرحلهٔ فعلی'],
             ['command' => 'help', 'description' => 'ℹ️ راهنما'],
         ]);
+        // ===== دکمهٔ مینی‌اپ پنل مدیریت (فقط برای ادمین‌ها) =====
+        if ($admin && !empty($cfg['base_url'])) {
+            BotApi::setChatMenuButton($TOKEN, rtrim((string)$cfg['base_url'], '/') . '/app/', '🖥 پنل مدیریت', $chatId);
+        }
         $role = $admin ? "مدیر 👑" : "کاربر مجاز ✅";
         $deepNote = $deepLink !== null
             ? "🔗 <b>لینک شما:</b> " . Ui::code($deepLink) . "\n\n"

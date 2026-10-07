@@ -232,6 +232,17 @@ class BotApi
         return self::call($token, 'deleteMyCommands');
     }
 
+    /** دکمهٔ منوی آبی کنار فیلد پیام — مخصوص مینی‌اپ */
+    public static function setChatMenuButton(string $token, ?string $url, string $text = 'پنل مدیریت', $chatId = null): array
+    {
+        $btn = ($url === null || $url === '')
+            ? ['type' => 'commands']
+            : ['type' => 'web_app', 'text' => $text, 'web_app' => ['url' => $url]];
+        $params = ['menu_button' => $btn];
+        if ($chatId !== null) $params['chat_id'] = $chatId;
+        return self::call($token, 'setChatMenuButton', $params);
+    }
+
     public static function kb(array $rows, bool $oneTime = false): string
     {
         return json_encode(['keyboard' => $rows, 'resize_keyboard' => true, 'one_time_keyboard' => $oneTime]);
