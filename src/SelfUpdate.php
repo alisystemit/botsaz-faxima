@@ -10,6 +10,12 @@
 // جدا (nohup) و با --no-restart است؛ ری‌استارت سرویس عمداً کارِ اجرای
 // معمولیِ دستی یا کرون هفتگی باقی می‌ماند.
 
+// Manager و SourceUpdate در این فایل استفاده می‌شوند ولی require نمی‌شدند؛
+// در bot.php شانسی کار می‌کرد و در هر ورودی دیگر (مثل app/api.php مینی‌اپ)
+// با «Class not found» می‌مرد. وابستگی باید داخل خودِ ماژول باشد.
+require_once __DIR__ . '/Manager.php';
+require_once __DIR__ . '/SourceUpdate.php';
+
 class SelfUpdate
 {
     public static function rootDir(): string

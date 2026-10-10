@@ -19,6 +19,12 @@
 // در PROTECTED* می‌مانند و حتی اگر اشتباهی به فهرست کپی برسند، apply()
 // دوباره قبل از نوشتن چکشان می‌کند.
 
+// Logger در این فایل استفاده می‌شود ولی هیچ‌جا require نمی‌شد. در bot.php
+// شانسی کار می‌کرد (چون آنجا از قبل include است) اما هر مصرف‌کنندهٔ دیگر —
+// مثلاً app/api.php مینی‌اپ — با «Class Logger not found» می‌مرد.
+require_once __DIR__ . '/Logger.php';
+require_once __DIR__ . '/Manager.php';
+
 class SourceUpdate
 {
     public const MANIFEST_VERSION = 1;
