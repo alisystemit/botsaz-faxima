@@ -246,8 +246,34 @@ try {
             out(200, ['ok' => true]);
         }
 
-        case 'templates':
-            out(200, ['ok' => true, 'templates' => Manager::templates(), 'types' => Manager::availableTypes()]);
+        case 'templates': {
+            // نکته: Manager::templates() یک آرایهٔ «کلید ⇒ مشخصات» است، نه لیست.
+            // قبلاً همین ساختار خام به کلاینت می‌رفت و JS با ‎.map‎ روی آبجکت
+            // می‌شکست (TypeError: .map is not a function) ⇒ صفحهٔ «قالب‌ها»
+            // همیشه «خطا در دریافت» نشان می‌داد. اینجا به لیستِ استاندارد تبدیل
+            // می‌شود و فیلدهای لازم برای UI هم اضافه می‌گردد.
+            $installed = Manager::availableTypes();
+            $minPhp = [];
+            foreach (array_keys(Manager::templates()) as $type) {
+                try { $minPhp[$type] = Manager::templateMinPhp($type); } catch (Throwable $e) { $minPhp[$type] = null; }
+            }
+            $list = [];
+            foreach (Manager::templates() as $type => $spec) {
+                $list[] = [
+                    'type'      => $type,
+                    'label'     => (string)($spec['label'] ?? $type),
+                    'icon'      => (string)($spec['icon'] ?? '🧩'),
+                    'dir'       => (string)($spec['dir'] ?? $type),
+                    'db'        => (string)($spec['db'] ?? ''),
+                    'schema'    => (string)($spec['schema'] ?? ''),
+                    'cron'      => (string)($spec['cron'] ?? ''),
+                    'repo'      => (string)($spec['repo'] ?? ''),
+                    'min_php'   => $minPhp[$type] ?? null,
+                    'installed' => isset($installed[$type]),
+                ];
+            }
+            out(200, ['ok' => true, 'templates' => $list, 'types' => $installed]);
+        }
 
         case 'revenue_daily': {
             $pdo = $store->getPdo();
@@ -374,7 +400,7 @@ try {
                 'version' => Manager::APP_VERSION,
                 'users' => (int)$store->countUsers(),
                 'bots' => (int)$store->countBots(),
-                'disk_free' => @disk_free_space(__DIR__ . '/..'),
+                'disk_free' => diskFree(),
                 'fx_rate' => (string)($store->getSetting('fx_rate', '') ?? ''),
                 'maintenance' => BuildSettings::maintenanceOn($store),
                 'maintenance_eta' => BuildSettings::maintenanceEta($store),
@@ -424,6 +450,24 @@ function auth(string $initData, string $token, array $supers, Store $store): int
 function deny(): void
 {
     out(403, ['ok' => false, 'msg' => 'دسترسی غیرمجاز']);
+}
+
+/**
+ * فضای آزاد دیسک به بایت.
+ *
+ * disk_free_space روی مسیرهایی که وجود ندارند false برمی‌گرداند و مقدار
+ * false در JSON می‌شود «0» — که برای ادمین یعنی «دیسک پر است». برای همین
+ * چند مسیر امتحان می‌شود و اگر هیچ‌کدام جواب نداد null برمی‌گردد تا UI
+ * بتواند «نامشخص» نشان دهد به‌جای عدد گمراه‌کننده.
+ */
+function diskFree(): ?int
+{
+    $root = dirname(__DIR__);
+    foreach ([$root, __DIR__, $root . '/data', sys_get_temp_dir(), '.'] as $p) {
+        $free = @disk_free_space($p);
+        if ($free !== false && $free > 0) return (int)$free;
+    }
+    return null;
 }
 
 function out(int $code, array $payload): void

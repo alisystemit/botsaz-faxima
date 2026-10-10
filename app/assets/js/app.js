@@ -119,6 +119,17 @@ function daysAgo(n){
   var d = new Date(); d.setDate(d.getDate() - n); return isoDate(d);
 }
 
+/* ===== قالب‌بندی حجم دیسک (خواناتر از «۱۹۶۸۴ مگابایت») ===== */
+function humanSize(bytes){
+  var b = Number(bytes) || 0;
+  if (b <= 0) return 'نامشخص';
+  var units = ['بایت','کیلوبایت','مگابایت','گیگابایت','ترابایت'];
+  var i = Math.floor(Math.log(b) / Math.log(1024));
+  if (i > units.length - 1) i = units.length - 1;
+  var v = b / Math.pow(1024, i);
+  return (Math.round(v * 10) / 10).toLocaleString('fa-IR', {maximumFractionDigits: 1}) + ' ' + units[i];
+}
+
 var TABS = {dashboard:'داشبورد', bots:'ربات‌ها', pending:'درخواست‌ها', payments:'پرداخت‌ها', users:'کاربران', templates:'قالب‌ها', settings:'تنظیمات'};
 var SUBS = {
   dashboard:'نمای کلی ربات‌ساز',
@@ -273,8 +284,8 @@ function vDashboard(){
       '<div class="card"><h3>📈 درآمد ۱۴ روز اخیر</h3><div id="revChart" style="color:var(--muted);font-size:12px">…</div></div>' +
       '<div class="card"><h3>👥 کاربران جدید ۱۴ روز اخیر</h3><div id="userChart" style="color:var(--muted);font-size:12px">…</div></div>' +
       '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px">' +
-        '<button class="btn btn-acc" onclick="goTab(\'pending\')">📥 درخواست‌ها</button>' +
-        '<button class="btn btn-ghost" onclick="goTab(\'payments\')">💳 پرداخت‌ها</button>' +
+        '<button class="btn btn-acc" onclick="MX.goTab(\'pending\')">📥 درخواست‌ها</button>' +
+        '<button class="btn btn-ghost" onclick="MX.goTab(\'payments\')">💳 پرداخت‌ها</button>' +
       '</div>' +
       '<div class="card"><h3>📊 توزیع قالب‌ها</h3>'+byType+'</div>' +
       '<div class="card"><h3>⏳ پرداخت‌های منتظر تأیید</h3>'+pays+'</div>' +
@@ -526,16 +537,47 @@ function drawUsers(q){
 
 /* ---------- قالب‌ها ---------- */
 function vTemplates(){
+  loading();
   call('templates').then(function(d){
-    if (!d.ok) return err(d.msg);
-    var rows = (d.templates||[]).map(function(t){
-      var label = t.label || t.type || t;
-      return '<div class="tpl"><div class="avatar">🧩</div><div style="flex:1"><b>'+esc(label)+'</b>' +
-        '<div class="s" style="color:var(--muted);font-size:11px;margin-top:3px">'+esc(t.type||t)+(t.min_php?(' • PHP '+t.min_php):'')+'</div></div>' +
-        '<span class="badge b-ok"><span class="badge-dot"></span>آماده</span></div>';
+    if (!d || !d.ok) return err((d && d.msg) || 'خطا');
+    // بک‌اند لیست برمی‌گرداند؛ برای اطمینان، اگر آبجکت بود به لیست تبدیل می‌شود
+    var list = d.templates || [];
+    if (!Array.isArray(list)) {
+      list = Object.keys(list).map(function(k){
+        var v = list[k] || {};
+        v.type = k;
+        return v;
+      });
+    }
+    if (!list.length) {
+      $('#view').innerHTML = '<div class="empty"><div class="em-ic">🧩</div><div>هیچ قالبی روی سرور نصب نیست</div>' +
+        '<div style="font-size:11px">از بخش «🔄 دریافت سورس بروز» قالب‌ها را نصب کنید</div></div>';
+      return;
+    }
+    var ready = 0;
+    var rows = list.map(function(t){
+      var okk = t.installed !== false;
+      if (okk) ready++;
+      return '<div class="tpl"><div class="avatar">' + esc(t.icon || '🧩') + '</div>' +
+        '<div style="flex:1;min-width:0"><b>' + esc(t.label || t.type) + '</b>' +
+        '<div class="s" style="color:var(--muted);font-size:11px;margin-top:3px">' +
+          esc(t.type) +
+          (t.db ? ' • ' + esc(String(t.db).toUpperCase()) : '') +
+          (t.min_php ? ' • PHP ' + esc(t.min_php) : '') +
+          (t.cron ? ' • کرون' : '') +
+        '</div></div>' +
+        '<span class="badge ' + (okk ? 'b-ok' : 'b-bad') + '">' + (okk ? 'آماده' : 'نصب نشده') + '</span>' +
+        '</div>';
     }).join('');
-    $('#view').innerHTML = '<div class="card"><h3>🧩 قالب‌های در دسترس ('+fmt((d.templates||[]).length)+')</h3>' + (rows || '<div class="empty">قالبی تعریف نشده</div>') + '</div>';
-  }).catch(function(){ err('خطا در دریافت'); });
+    $('#view').innerHTML =
+      '<div class="card"><h3>🧩 قالب‌ها (' + fmt(ready) + ' آماده از ' + fmt(list.length) + ')</h3>' + rows + '</div>' +
+      '<div class="card"><h3>ℹ️ راهنما</h3>' +
+        '<div class="kv"><b>هر قالب</b><span>یک ربات کامل مستقل</span></div>' +
+        '<div class="kv"><b>آیکون + نام</b><span>همان‌طور که در منوی ربات دیده می‌شود</span></div>' +
+        '<div class="kv"><b>SQLite / MySQL</b><span>نوع دیتابیس قالب</span></div>' +
+        '<div class="kv"><b>«نصب نشده»</b><span>پوشهٔ قالب روی سرور نیست</span></div>' +
+      '</div>';
+  }).catch(function(){ err('خطا در دریافت اطلاعات قالب‌ها'); });
 }
 
 /* ---------- تنظیمات ---------- */
@@ -650,7 +692,7 @@ function logInit(){
             '<div class="kv"><b>PHP</b><span>' + esc(s.php) + '</span></div>' +
             '<div class="kv"><b>دیتابیس</b><span>' + esc(s.driver) + '</span></div>' +
             '<div class="kv"><b>ربات‌ها / کاربران</b><span>' + fmt(s.bots) + ' / ' + fmt(s.users) + '</span></div>' +
-            (s.disk_free ? '<div class="kv"><b>فضای آزاد دیسک</b><span>' + fmt(Math.round(s.disk_free/1048576)) + ' مگابایت</span></div>' : '') +
+            (s.disk_free ? '<div class="kv"><b>فضای آزاد دیسک</b><span>' + humanSize(s.disk_free) + '</span></div>' : '') +
             fxHtml + '</div>';
         }
         var host = $('#settingsHost');

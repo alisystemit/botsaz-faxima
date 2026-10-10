@@ -69,6 +69,6 @@ if (is_array($cfg) && !empty($cfg['base_url'])) {
   </div>
 </div>
 <script>window.__MINIAPP_API__ = 'api.php';</script>
-<script src="assets/js/app.js?v=4.1.0"></script>
+<script src="assets/js/app.js?v=4.3.0"></script>
 </body>
 </html>
