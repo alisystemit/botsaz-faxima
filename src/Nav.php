@@ -146,6 +146,7 @@ class Nav
             [['text' => '⏳ زمان تقریبی بازگشت', 'callback_data' => 'set:maintaineta']],
             [['text' => '🔄 بروزرسانی نرخ دلار از API', 'callback_data' => 'payadmin:fxrefresh']],
             [['text' => '💳 مدیریت پرداخت‌ها و درگاه‌ها', 'callback_data' => 'payadmin:panel']],
+            [['text' => '🏢 اکانت سازندهٔ پنل', 'callback_data' => 'set:childowner']],
             [['text' => '📝 متن‌های ربات', 'callback_data' => 'texts:g:general']],
             [['text' => self::BACK, 'callback_data' => self::CB_BACK_MAIN]],
         ]);
@@ -180,6 +181,7 @@ class Nav
             // ===== پنل تنظیمات (کلیدهای روشن/خاموش و متن تعمیرات) =====
             case 'await_maintenance_text':
             case 'await_maintenance_eta': return ['kind' => 'settings'];
+            case 'await_child_owner':     return ['kind' => 'settings'];
             case 'await_user_add':
             case 'await_user_remove': return ['kind' => 'users'];
             case 'await_backup_times': return ['kind' => 'backup'];

@@ -89,6 +89,20 @@ try {
             $off  = ($page - 1) * $per;
             $total = (int)$pdo->query("SELECT COUNT(*) FROM users")->fetchColumn();
             $rows = $pdo->query("SELECT user_id, first_name, username, is_admin, is_allowed, bot_limit, build_count, created_at FROM users ORDER BY user_id DESC LIMIT $per OFFSET $off")->fetchAll(PDO::FETCH_ASSOC);
+            // سوپرادمین‌ها همیشه مجازند، حتی اگر رکوردشان در جدول نباشد (مثلاً
+            // قبل از اولین پیام). بدون این، پنل به ادمینِ خودش «معلق» نشان می‌داد
+            // و سقفش هم بی‌معنا بود — در حالی که در ربات کاملاً ادمین است.
+            foreach ($rows as &$r) {
+                $r['is_super'] = in_array((int)$r['user_id'], $SUPERS, true);
+                if ($r['is_super']) {
+                    $r['is_admin'] = 1;
+                    $r['is_allowed'] = 1;
+                    if ((int)($r['bot_limit'] ?? 0) < 1) $r['bot_limit'] = 1;
+                } else {
+                    $r['is_super'] = false;
+                }
+            }
+            unset($r);
             out(200, ['ok' => true, 'users' => $rows, 'total' => $total, 'page' => $page, 'per' => $per]);
         }
 
@@ -217,6 +231,16 @@ try {
                 case 'nowpay_ipn':
                     $store->setSetting('pay_nowpay_ipn_secret', trim($v));
                     break;
+                case 'child_owner_username':
+                    $store->setSetting('child_owner_username', trim($v));
+                    break;
+                case 'child_owner_password':
+                    $store->setSetting('child_owner_password', trim($v));
+                    break;
+                case 'child_owner_reset':
+                    $store->setSetting('child_owner_username', '');
+                    $store->setSetting('child_owner_password', '');
+                    break;
                 default: out(400, ['ok' => false, 'msg' => 'کلید نامعتبر']);
             }
             out(200, ['ok' => true]);
@@ -331,6 +355,15 @@ try {
             fclose($fh);
             $tail = array_values(array_filter(array_slice(explode("\n", $buf), -50)));
             out(200, ['ok' => true, 'file' => basename($files[0]), 'lines' => array_map('rtrim', $tail)]);
+        }
+
+        case 'child_owner_get': {
+            // اکانت سازندهٔ پنل برای قالب‌هایی که «پنل نمایندگی» دارند (پاسارگاد).
+            // اگر خالی باشد، هنگام ساخت ربات خودکار ساخته می‌شود.
+            out(200, ['ok' => true,
+                'username' => (string)($store->getSetting('child_owner_username', '') ?? ''),
+                'password' => (string)($store->getSetting('child_owner_password', '') ?? ''),
+            ]);
         }
 
         case 'system_status': {

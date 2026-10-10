@@ -16,7 +16,7 @@ if (is_array($cfg) && !empty($cfg['base_url'])) {
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="robots" content="noindex, nofollow">
 <title>پنل مدیریتی ربات‌ساز</title>
-<link rel="stylesheet" href="assets/css/app.css?v=4.0.0">
+<link rel="stylesheet" href="assets/css/app.css?v=4.1.0">
 <script src="js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -69,6 +69,6 @@ if (is_array($cfg) && !empty($cfg['base_url'])) {
   </div>
 </div>
 <script>window.__MINIAPP_API__ = 'api.php';</script>
-<script src="assets/js/app.js?v=4.0.0"></script>
+<script src="assets/js/app.js?v=4.1.0"></script>
 </body>
 </html>

@@ -335,6 +335,7 @@ function stepLabel(string $step): string
         'await_edit_admin_id' => 'ویرایش آیدی ادمین ربات',
         'await_maintenance_text' => 'متن پیام تعمیرات',
         'await_maintenance_eta'  => 'زمان تقریبی بازگشت',
+        'await_child_owner'      => 'اکانت سازندهٔ پنل',
     ];
     return $map[$step] ?? $step;
 }
@@ -1333,7 +1334,17 @@ function showSettingsPanel(Store $store, string $TOKEN, $chatId, int $msgId = 0,
     $t .= Ui::kv('📝', 'متن تعمیرات', Texts::hasCustom($store, 'maintenance') ? 'دلخواه (✍️)' : 'پیش‌فرض (📌)') . "\n\n";
 
     $t .= Ui::sep() . "\n";
-    $t .= "💵 <b>نرخ دلار</b>\n" . implode("\n", FxRate::statusLines($store)) . "\n";
+    $t .= "💵 <b>نرخ دلار</b>\n" . implode("\n", FxRate::statusLines($store)) . "\n\n";
+
+    // اکانت سازندهٔ پنل — فقط قالب‌هایی که «پنل نمایندگی» دارند به آن نیاز
+    // دارند. اگر خالی باشد خودکار ساخته می‌شود، ولی بهتر است ادمین بداند.
+    $ownerU = trim((string)($store->getSetting('child_owner_username', '') ?? ''));
+    if ($ownerU !== '') {
+        $t .= "🏢 <b>اکانت سازندهٔ پنل:</b> " . Ui::e($ownerU) . " ✅\n";
+        $t .= "<i>در ربات‌های تازه‌ساخته نوشته می‌شود.</i>\n\n";
+    } else {
+        $t .= "🏢 <b>اکانت سازندهٔ پنل:</b> <i>تنظیم نشده — هنگام ساخت ربات خودکار ساخته می‌شود</i>\n\n";
+    }
 
     if ($note !== '') $t = $note . "\n\n" . $t;
 
@@ -2344,7 +2355,43 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
                 ['reply_markup' => Nav::botPanelKb($fresh, $admin)]);
             return;
         }
-    case 'await_backup_times': {
+    case 'await_child_owner': {
+            if (!$admin) { $store->clearStep($uid); return; }
+            $name = trim($text);
+            if ($name === '') {
+                BotApi::send($TOKEN, $chatId, "⛔️ نام کاربری خالی است.\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
+                return;
+            }
+            if (mb_strtolower($name) === 'auto') {
+                $store->setSetting('child_owner_username', '');
+                $store->setSetting('child_owner_password', '');
+                $store->clearStep($uid);
+                BotApi::send($TOKEN, $chatId,
+                    "✅ <b>به حالت خودکار برگشت.</b>\n\n"
+                    . "از این به بعد هر ربات، هنگام نصب یک اکانت تصادفیِ امن می‌گیرد\n"
+                    . "و نام کاربری + رمزش یک‌بار در همین گفتگو به شما نشان داده می‌شود.",
+                    ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
+                return;
+            }
+            if (!preg_match('/^[A-Za-z0-9_.@\-]{3,64}$/', $name)) {
+                BotApi::send($TOKEN, $chatId, "⛔️ نام کاربری معتبر نیست.\nفقط حروف انگلیسی، عدد و <code>_ . - @</code> (۳ تا ۶۴ کاراکتر).\nبرای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL, ['reply_markup' => Nav::stepKb()]);
+                return;
+            }
+            $store->setSetting('child_owner_username', $name);
+            // رمز را خودمان می‌سازیم تا کاربر مجبور نباشد یکی را از پیش داشته باشد
+            $store->setSetting('child_owner_password', Manager::randomToken(16));
+            $store->clearStep($uid);
+            BotApi::send($TOKEN, $chatId,
+                "✅ <b>اکانت سازندهٔ پنل ثبت شد.</b>\n\n"
+                . Ui::kv('👤', 'نام کاربری', Ui::code($name), true)
+                . "\n" . Ui::kv('🔒', 'رمز عبور', Ui::code((string)$store->getSetting('child_owner_password', '')), true)
+                . "\n\nℹ️ این‌ها در هر رباتِ تازه‌ساخته نوشته می‌شود.\n"
+                . "⚠️ ربات‌هایی که قبلاً ساخته شده‌اند تغییر نمی‌کنند.",
+                ['reply_markup' => mainMenu($user, $SUPERS, $store)]);
+            return;
+        }
+
+        case 'await_backup_times': {
             if (!$admin) { $store->clearStep($uid); return; }
             $parsed = DbBackup::parseTimes($text);
             if (!$parsed['ok']) {
@@ -2475,6 +2522,16 @@ function handleStep(array $cfg, Store $store, string $TOKEN, array $SUPERS, arra
                         'slug'     => $slug,
                         'db'       => (string)($result['db'] ?? ''),
                     ]);
+                // اگر قالب اکانت owner را خودش ساخته، یک‌بار نشانش می‌دهیم:
+                // «پنل نمایندگی» با همین اکانت کار می‌کند و رمزش جای دیگری نیست.
+                if (!empty($result['owner_cred']['generated'])) {
+                    $oc = $result['owner_cred'];
+                    $doneMsg .= "\n\n" . Ui::sep()
+                        . "\n🔑 <b>اکانت سازندهٔ پنل (خودکار ساخته شد)</b>"
+                        . "\n" . Ui::kv('👤', 'نام کاربری', $oc['username'], true)
+                        . "\n" . Ui::kv('🔒', 'رمز عبور', $oc['password'], true)
+                        . "\n\nℹ️ این اکانت برای فروش «پنل نمایندگی» لازم است و در تنظیمات هم ذخیره شد.";
+                }
                 BotApi::send($TOKEN, $chatId, $doneMsg,
                     ['reply_markup' => mainMenu($store->user($uid), $SUPERS, $store)]);
             } catch (Throwable $e) {
@@ -2716,6 +2773,7 @@ function buildBot(array $cfg, Store $store, string $TOKEN, int $owner, string $t
 
         // ===== ۳) پچ config.php =====
         $staticSecret = '';
+        $ownerCred = [];   // اگر قالب پاسارگاد اکانت owner را خودش ساخت
         switch ($type) {
             case 'faxima':
                 Manager::patchFaximaConfig($botDir, $cfg, $dbName, $plainToken, $adminId, $botUsername, $domainPath);
@@ -2727,8 +2785,29 @@ function buildBot(array $cfg, Store $store, string $TOKEN, int $owner, string $t
                 Manager::patchUptimeConfig($botDir, $cfg, $dbName, $plainToken, $adminId, $botUsername, $domainPath, $baseUrl);
                 break;
             case 'pasargad':
-                $res = Manager::writePasargadConfig($botDir, $plainToken, $adminId, $botUsername, $baseUrl);
+                $res = Manager::writePasargadConfig(
+                    $botDir,
+                    $plainToken,
+                    $adminId,
+                    $botUsername,
+                    $baseUrl,
+                    (string)($store->getSetting('child_owner_username', '') ?? ''),
+                    (string)($store->getSetting('child_owner_password', '') ?? '')
+                );
                 $staticSecret = $res['secret'];
+                if (!empty($res['owner_generated'])) {
+                    // ادمین اکانتی نداده ⇒ یک اکانت امن ساخته شد. هم ذخیره‌اش
+                    // می‌کنیم (برای ربات‌های بعدی) و هم به ادمین می‌گوییم، چون
+                    // بدون این اطلاع، «پنل نمایندگی» با اکانتی ساخته می‌شود
+                    // که خودش رمزش را نمی‌داند.
+                    $store->setSetting('child_owner_username', $res['owner_username']);
+                    $store->setSetting('child_owner_password', $res['owner_password']);
+                    $ownerCred = [
+                        'generated' => true,
+                        'username' => $res['owner_username'],
+                        'password' => $res['owner_password'],
+                    ];
+                }
                 break;
             default:
                 throw new Exception("نصب قالب «{$type}» پیاده‌سازی نشده است");
@@ -2813,7 +2892,15 @@ function buildBot(array $cfg, Store $store, string $TOKEN, int $owner, string $t
         }
         foreach ($notes as $n) $lines[] = 'ℹ️ ' . htmlspecialchars($n, ENT_QUOTES, 'UTF-8');
 
-        return ['bot_username' => $botUsername, 'db' => $dbName, 'custom_message' => implode("\n", $lines)];
+        if (!empty($ownerCred)) {
+            $lines[] = '🔑 اکانت سازندهٔ پنل: ' . $ownerCred['username'] . ' (خودکار ساخته شد)';
+        }
+        return [
+            'bot_username' => $botUsername,
+            'db' => $dbName,
+            'custom_message' => implode("\n", $lines),
+            'owner_cred' => $ownerCred,
+        ];
     } catch (Throwable $e) {
         // ===== ROLLBACK =====
         // Throwable (نه فقط Exception) تا TypeErrorها و خطاهای هسته هم rollback شوند؛
@@ -3185,6 +3272,21 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
                 . "مثال: ‎<code>تا پایان امروز</code> یا ‎<code>فردا صبح</code>\n\n"
                 . "زمان فعلی: " . ($eta !== '' ? '<b>' . Ui::e($eta) . '</b>' : '<i>تعیین نشده</i>') . "\n"
                 . "برای پاک‌کردن، کلمهٔ " . Ui::code('reset') . " را بفرستید.\n"
+                . "برای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL,
+                ['reply_markup' => Nav::stepKb()]);
+            return;
+        }
+
+        if ($action === 'childowner') {
+            $store->setStep($uid, 'await_child_owner');
+            $cu = trim((string)($store->getSetting('child_owner_username', '') ?? ''));
+            BotApi::send($TOKEN, $chatId,
+                "🏢 <b>اکانت سازندهٔ پنل</b>\n\n"
+                . "این اکانت داخل <code>config.php</code> هر ربات تازه نوشته می‌شود\n"
+                . "و برای فروش «پنل نمایندگی» لازم است.\n\n"
+                . "📌 <b>متن فعلی:</b> " . ($cu !== '' ? Ui::code($cu) : '<i>تنظیم نشده (خودکار ساخته می‌شود)</i>') . "\n\n"
+                . "<b>حالا نام کاربری را بفرستید.</b>\n"
+                . "برای ساخت خودکارِ یک اکانت تصادفی، کلمهٔ " . Ui::code('auto') . " را بفرستید.\n"
                 . "برای برگشت: " . Nav::BACK . " | برای انصراف: " . Nav::CANCEL,
                 ['reply_markup' => Nav::stepKb()]);
             return;
