@@ -16,6 +16,8 @@ require_once $ROOT . '/src/Payment/Pricing.php';
 require_once $ROOT . '/src/Payment/ZarinPal.php';
 require_once $ROOT . '/src/Payment/AqaPay.php';
 require_once $ROOT . '/src/Payment/NowPayments.php';
+require_once $ROOT . '/src/SelfUpdate.php';
+require_once $ROOT . '/src/SourceUpdate.php';
 
 $cfg = @include $ROOT . '/config.php';
 if (!is_array($cfg)) {
@@ -383,6 +385,119 @@ try {
             out(200, ['ok' => true, 'file' => basename($files[0]), 'lines' => array_map('rtrim', $tail)]);
         }
 
+        // ===== بروزرسانی سورس قالب‌ها =====
+        case 'src_status': {
+            try {
+                $st = SelfUpdate::templatesStatus();
+                $rows = [];
+                foreach ((array)($st['repos'] ?? []) as $key => $r) {
+                    $rows[] = [
+                        'type'    => $key,
+                        'label'   => Manager::templateLabel($key),
+                        'repo'    => (string)($r['repo'] ?? ''),
+                        'ok'      => !empty($r['ok']),
+                        'changed' => !empty($r['changed']),
+                        'old'     => substr((string)($r['old'] ?? ''), 0, 7),
+                        'new'     => substr((string)($r['new'] ?? ''), 0, 7),
+                        'files'   => (int)($st['templates'][$key] ?? 0),
+                    ];
+                }
+                out(200, ['ok' => true, 'rows' => $rows, 'behind' => (int)($st['behind'] ?? 0),
+                          'branch' => (string)($st['branch'] ?? '?')]);
+            } catch (Throwable $e) {
+                out(500, ['ok' => false, 'msg' => 'خطا در خواندن وضعیت: ' . $e->getMessage()]);
+            }
+        }
+
+        case 'src_update': {
+            // اجرای همگام‌سازی قالب‌ها (git pull هر ریپو). کاری به ربات‌های
+            // ساخته‌شده ندارد — آن‌ها جداگانه با bot_update به‌روز می‌شوند.
+            if (!isSuper($SUPERS, $uid)) out(403, ['ok' => false, 'msg' => 'فقط سوپرادمین']);
+            @set_time_limit(0);
+            try {
+                $r = SelfUpdate::runTemplatesOnly(600);
+                out(200, ['ok' => !empty($r['ok']),
+                          'out' => mb_substr(trim((string)($r['out'] ?? '')), -1200),
+                          'queued' => !empty($r['queued'])]);
+            } catch (Throwable $e) {
+                out(500, ['ok' => false, 'msg' => $e->getMessage()]);
+            }
+        }
+
+        // ===== بروزرسانی ربات‌های ساخته‌شده =====
+        case 'bot_plan': {
+            // plan می‌گوید چه فایل‌هایی از قالب عوض شده‌اند و چه‌ها «محافظت‌شده»
+            // (config.php و دیتابیس) هستند و دست‌نخورده می‌مانند.
+            $out = [];
+            foreach ($store->allBots() as $bot) {
+                $folder = (string)($bot['folder'] ?? '');
+                if ($folder === '') continue;
+                try {
+                    $p = SourceUpdate::plan((string)$bot['type'], $folder);
+                    $out[] = [
+                        'id'        => (int)$bot['id'],
+                        'folder'    => $folder,
+                        'username'  => (string)($bot['bot_username'] ?? ''),
+                        'type'      => (string)$bot['type'],
+                        'label'     => Manager::templateLabel((string)$bot['type']),
+                        'ok'        => !empty($p['ok']),
+                        'error'     => (string)($p['error'] ?? ''),
+                        'new'       => (int)($p['counts']['new'] ?? 0),
+                        'changed'   => (int)($p['counts']['changed'] ?? 0),
+                        'obsolete'  => (int)($p['counts']['obsolete'] ?? 0),
+                        'skipped'   => (int)($p['counts']['skipped'] ?? 0),
+                        'config_new'=> !empty($p['config_new']),
+                        'outdated'  => !empty($p['out_of_date']),
+                    ];
+                } catch (Throwable $e) {
+                    $out[] = ['id' => (int)$bot['id'], 'folder' => $folder, 'ok' => false,
+                              'error' => $e->getMessage(), 'username' => (string)($bot['bot_username'] ?? '')];
+                }
+            }
+            out(200, ['ok' => true, 'bots' => $out]);
+        }
+
+        case 'bot_update': {
+            if (!isSuper($SUPERS, $uid)) out(403, ['ok' => false, 'msg' => 'فقط سوپرادمین']);
+            $id = (int)($_POST['id'] ?? 0);
+            $bot = $store->botById($id);
+            if (!$bot) out(404, ['ok' => false, 'msg' => 'ربات یافت نشد']);
+            $folder = (string)$bot['folder'];
+            try {
+                $plan = SourceUpdate::plan((string)$bot['type'], $folder);
+                if (empty($plan['ok'])) out(400, ['ok' => false, 'msg' => (string)($plan['error'] ?? 'برنامه‌ریزی ناموفق')]);
+                if (empty($plan['new']) && empty($plan['changed'])) {
+                    out(200, ['ok' => true, 'msg' => 'این ربات با قالبش هماهنگ است ✅', 'applied' => 0]);
+                }
+                @set_time_limit(0);
+                $res = SourceUpdate::apply($plan, $uid);
+                $note = trim(implode(' • ', array_map('strval', (array)($res['notes'] ?? []))));
+                out(200, ['ok' => !empty($res['ok']),
+                          'msg' => mb_substr($note !== '' ? $note : (string)($res['error'] ?? ''), -600),
+                          'applied' => (int)($res['applied'] ?? 0),
+                          'skipped' => (int)($res['skipped'] ?? 0),
+                          'config_new' => !empty($res['config_new'])]);
+            } catch (Throwable $e) {
+                out(500, ['ok' => false, 'msg' => $e->getMessage()]);
+            }
+        }
+
+        case 'bot_update_all': {
+            if (!isSuper($SUPERS, $uid)) out(403, ['ok' => false, 'msg' => 'فقط سوپرادمین']);
+            @set_time_limit(0);
+            $done = 0; $skip = 0; $errs = [];
+            foreach ($store->allBots() as $bot) {
+                try {
+                    $plan = SourceUpdate::plan((string)$bot['type'], (string)$bot['folder']);
+                    if (empty($plan['ok'])) { $skip++; continue; }
+                    if (empty($plan['new']) && empty($plan['changed'])) { $skip++; continue; }
+                    $res = SourceUpdate::apply($plan, $uid);
+                    if (!empty($res['ok'])) $done++; else $errs[] = $bot['folder'];
+                } catch (Throwable $e) { $errs[] = ($bot['folder'] ?? '?') . ': ' . $e->getMessage(); }
+            }
+            out(200, ['ok' => true, 'updated' => $done, 'skipped' => $skip, 'errors' => $errs]);
+        }
+
         case 'child_owner_get': {
             // اکانت سازندهٔ پنل برای قالب‌هایی که «پنل نمایندگی» دارند (پاسارگاد).
             // اگر خالی باشد، هنگام ساخت ربات خودکار ساخته می‌شود.
@@ -450,6 +565,11 @@ function auth(string $initData, string $token, array $supers, Store $store): int
 function deny(): void
 {
     out(403, ['ok' => false, 'msg' => 'دسترسی غیرمجاز']);
+}
+
+function isSuper(array $supers, int $uid): bool
+{
+    return in_array((string)$uid, array_map('strval', $supers), true);
 }
 
 /**

@@ -16,7 +16,7 @@ if (is_array($cfg) && !empty($cfg['base_url'])) {
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="robots" content="noindex, nofollow">
 <title>پنل مدیریتی ربات‌ساز</title>
-<link rel="stylesheet" href="assets/css/app.css?v=4.1.0">
+<link rel="stylesheet" href="assets/css/app.css?v=4.4.0">
 <script src="js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -51,6 +51,7 @@ if (is_array($cfg) && !empty($cfg['base_url'])) {
         <button class="tab" data-tab="payments" id="tabPay">💳<span>پرداخت‌ها</span><i class="dot" id="dotPay"></i></button>
         <button class="tab" data-tab="users">👥<span>کاربران</span></button>
         <button class="tab" data-tab="templates">🧩<span>قالب‌ها</span></button>
+        <button class="tab" data-tab="update">🔄<span>بروزرسانی</span></button>
         <button class="tab" data-tab="settings">⚙️<span>تنظیمات</span></button>
     </nav>
 </div>
@@ -69,6 +70,6 @@ if (is_array($cfg) && !empty($cfg['base_url'])) {
   </div>
 </div>
 <script>window.__MINIAPP_API__ = 'api.php';</script>
-<script src="assets/js/app.js?v=4.3.0"></script>
+<script src="assets/js/app.js?v=4.4.0"></script>
 </body>
 </html>

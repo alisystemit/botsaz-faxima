@@ -130,7 +130,7 @@ function humanSize(bytes){
   return (Math.round(v * 10) / 10).toLocaleString('fa-IR', {maximumFractionDigits: 1}) + ' ' + units[i];
 }
 
-var TABS = {dashboard:'داشبورد', bots:'ربات‌ها', pending:'درخواست‌ها', payments:'پرداخت‌ها', users:'کاربران', templates:'قالب‌ها', settings:'تنظیمات'};
+var TABS = {dashboard:'داشبورد', bots:'ربات‌ها', pending:'درخواست‌ها', payments:'پرداخت‌ها', users:'کاربران', templates:'قالب‌ها', update:'بروزرسانی', settings:'تنظیمات'};
 var SUBS = {
   dashboard:'نمای کلی ربات‌ساز',
   bots:'مدیریت ربات‌های ساخته‌شده',
@@ -138,6 +138,7 @@ var SUBS = {
   payments:'مالی و تراکنش‌ها',
   users:'کاربران و دسترسی‌ها',
   templates:'قالب‌های نصب‌شده روی سرور',
+  update:'بروزرسانی سورس قالب‌ها و ربات‌ها',
   settings:'پیکربندی کلی ربات'
 };
 var current = 'dashboard';
@@ -252,7 +253,7 @@ function render(){
   if (t) t.textContent = TABS[current] || '';
   if (s) s.textContent = SUBS[current] || '';
   loading();
-  var map = {dashboard:vDashboard, bots:vBots, pending:vPending, payments:vPayments, users:vUsers, templates:vTemplates, settings:vSettings};
+  var map = {dashboard:vDashboard, bots:vBots, pending:vPending, payments:vPayments, users:vUsers, templates:vTemplates, update:vUpdate, settings:vSettings};
   (map[current] || vDashboard)();
   if (!SUBS_LOADED[current]) { refreshDots(); SUBS_LOADED[current] = true; }
 }
@@ -578,6 +579,84 @@ function vTemplates(){
         '<div class="kv"><b>«نصب نشده»</b><span>پوشهٔ قالب روی سرور نیست</span></div>' +
       '</div>';
   }).catch(function(){ err('خطا در دریافت اطلاعات قالب‌ها'); });
+}
+
+/* ---------- بروزرسانی سورس قالب‌ها و ربات‌ها ---------- */
+var srcRows = [], botRows = [], updBusy = false;
+
+function vUpdate(){
+  loading();
+  $('#view').innerHTML =
+    '<div class="card"><h3>🔄 سورس قالب‌ها</h3><div id="srcCard" style="color:var(--muted);font-size:12px">…</div></div>' +
+    '<div class="card"><h3>🤖 ربات‌های ساخته‌شده</h3><div id="botCard" style="color:var(--muted);font-size:12px">…</div></div>';
+  loadSrcStatus();
+  loadBotPlan();
+}
+
+function loadSrcStatus(){
+  call('src_status').then(function(d){
+    var el = $('#srcCard');
+    if (!el) return;
+    if (!d || !d.ok) { el.innerHTML = '<div style="color:#f87171">' + esc((d && d.msg) || 'خطا') + '</div>'; return; }
+    srcRows = d.rows || [];
+    var changed = srcRows.filter(function(r){ return r.changed; });
+    var html = '<div class="kv"><b>شاخهٔ ریپو</b><span>' + esc(d.branch || '?') + '</span></div>' +
+      '<div class="kv"><b>قالب‌های دارای تغییر</b><span>' + (changed.length ? '<b style="color:#fbbf24">' + fmt(changed.length) + '</b>' : '✅ همه به‌روز') + '</span></div>';
+    html += srcRows.length ? srcRows.map(function(r){
+      return '<div class="tpl"><div class="avatar">📦</div>' +
+        '<div style="flex:1;min-width:0"><b>' + esc(r.label || r.type) + '</b>' +
+        '<div class="s" style="color:var(--muted);font-size:11px;margin-top:3px">' +
+          esc(r.old || '—') + ' ← ' + esc(r.new || '—') +
+          (r.files ? ' • ' + fmt(r.files) + ' فایل' : '') +
+        '</div></div>' +
+        '<span class="badge ' + (r.changed ? 'b-warn' : (r.ok ? 'b-ok' : 'b-bad')) + '">' +
+          (r.changed ? 'بروزرسانی' : (r.ok ? 'به‌روز' : 'قطع')) + '</span></div>';
+    }).join('') : '<div style="color:var(--muted);font-size:12px">قالبی با ریپو ثبت نشده</div>';
+    html += '<button class="btn btn-acc" style="width:100%;margin-top:12px" id="srcGo" onclick="MX.updateSrc()">⬇️ دریافت سورس بروز قالب‌ها</button>';
+    html += '<div id="srcOut" style="margin-top:10px"></div>';
+    el.innerHTML = html;
+  }).catch(function(){
+    var el = $('#srcCard'); if (el) el.innerHTML = '<div style="color:#f87171">ارتباط برقرار نشد</div>';
+  });
+}
+
+function loadBotPlan(){
+  call('bot_plan').then(function(d){
+    var el = $('#botCard');
+    if (!el) return;
+    if (!d || !d.ok) { el.innerHTML = '<div style="color:#f87171">' + esc((d && d.msg) || 'خطا') + '</div>'; return; }
+    botRows = d.bots || [];
+    if (!botRows.length) {
+      el.innerHTML = '<div style="color:var(--muted);font-size:12px">هنوز رباتی ساخته نشده است</div>';
+      return;
+    }
+    var outdated = botRows.filter(function(b){ return b.ok && (b.new || b.changed); });
+    var html = '<div style="background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.3);border-radius:12px;padding:10px;margin-bottom:12px;font-size:11.5px;line-height:2">' +
+      '<b>🛡 config.php و دیتابیس هرگز دست نمی‌خورند.</b><br>' +
+      'تنها فایل‌های «کدِ قالب» کپی می‌شوند و پیش از هر تغییر، بکاپ گرفته می‌شود.' +
+      '</div>';
+    html += botRows.map(function(b){
+      var pending = b.ok && (b.new || b.changed);
+      return '<div class="card" style="margin-bottom:10px"><div style="display:flex;justify-content:space-between;align-items:center">' +
+        '<div style="min-width:0"><b>@' + esc(b.username || b.folder) + '</b>' +
+        '<div class="s" style="color:var(--muted);font-size:11px;margin-top:3px">' + esc(b.label || b.type) + '</div></div>' +
+        '<span class="badge ' + (!b.ok ? 'b-bad' : (pending ? 'b-warn' : 'b-ok')) + '">' +
+          (!b.ok ? 'خطا' : (pending ? 'دارای تغییر' : 'به‌روز')) + '</span></div>' +
+        (b.ok
+          ? '<div class="s" style="color:var(--muted);font-size:11px;margin-top:8px">➕ ' + fmt(b.new || 0) +
+            ' جدید • ✏️ ' + fmt(b.changed || 0) + ' تغییر • 🔒 ' + fmt(b.skipped || 0) + ' محافظت‌شده</div>'
+          : '<div class="s" style="color:#f87171;font-size:11px;margin-top:8px">' + esc(b.error || '') + '</div>') +
+        (pending ? '<button class="btn btn-acc btn-sm" style="margin-top:10px" onclick="MX.updateBot(' + b.id + ')">⬇️ بروزرسانی این ربات</button>' : '') +
+        '</div>';
+    }).join('');
+    if (outdated.length > 1) {
+      html += '<button class="btn btn-acc" style="width:100%;margin-top:6px" onclick="MX.updateAllBots()">⬇️ بروزرسانی همه (' + fmt(outdated.length) + ' ربات)</button>';
+    }
+    html += '<div id="botOut" style="margin-top:10px"></div>';
+    el.innerHTML = html;
+  }).catch(function(){
+    var el = $('#botCard'); if (el) el.innerHTML = '<div style="color:#f87171">ارتباط برقرار نشد</div>';
+  });
 }
 
 /* ---------- تنظیمات ---------- */
@@ -908,6 +987,51 @@ window.MX = {
       });
     });
     chain.then(function(){ ok(fmt(n) + ' قیمت ذخیره شد ✅'); });
+  },
+  updateSrc: function(){
+    if (updBusy) return;
+    var b = $('#srcGo');
+    if (b) { b.disabled = true; b.textContent = '⏳ در حال دریافت…'; }
+    updBusy = true;
+    toast('در حال همگام‌سازی سورس قالب‌ها…');
+    call('src_update', {method:'POST'}).then(function(d){
+      updBusy = false;
+      if (b) { b.disabled = false; b.textContent = '⬇️ دریافت سورس بروز قالب‌ها'; }
+      var o = $('#srcOut');
+      if (o) {
+        o.innerHTML = '<pre style="white-space:pre-wrap;font-size:10.5px;line-height:1.7;background:rgba(148,163,184,.08);padding:10px;border-radius:12px;max-height:220px;overflow:auto;direction:ltr;text-align:left">'
+          + esc((d && d.out) || 'بدون خروجی') + '</pre>';
+      }
+      if (d && d.ok) { ok('سورس قالب‌ها بروزرسانی شد ✅'); loadSrcStatus(); loadBotPlan(); }
+      else bad((d && d.msg) || 'بروزرسانی ناموفق');
+    }).catch(function(){
+      updBusy = false;
+      var b2 = $('#srcGo');
+      if (b2) { b2.disabled = false; b2.textContent = '⬇️ دریافت سورس بروز قالب‌ها'; }
+      bad('ارتباط برقرار نشد');
+    });
+  },
+  updateBot: function(id){
+    var b = $('#srcGo'); // قفل موقت
+    toast('در حال بروزرسانی… ⏳');
+    call('bot_update', {method:'POST', data:{id:id}}).then(function(d){
+      var o = $('#botOut');
+      if (o) {
+        o.innerHTML = '<div class="alert-box ' + (d && d.ok ? 'ok' : 'bad') + '">' +
+          esc((d && d.msg) || (d && d.ok ? 'بروزرسانی شد ✅' : 'خطا')) + '</div>';
+      }
+      if (d && d.ok) { ok('✅ ' + fmt(d.applied || 0) + ' فایل بروزرسانی شد'); loadBotPlan(); }
+      else bad((d && d.msg) || 'بروزرسانی ناموفق');
+    }).catch(function(){ bad('ارتباط برقرار نشد'); });
+  },
+  updateAllBots: function(){
+    askConfirm('بروزرسانی همهٔ ربات‌ها؟', 'فقط کدِ قالب کپی می‌شود. config.php و دیتابیس هر ربات دست‌نخورده می‌ماند و پیش از هر تغییر بکاپ گرفته می‌شود.', function(){
+      toast('در حال بروزرسانی همه… ⏳');
+      call('bot_update_all', {method:'POST'}).then(function(d){
+        if (d && d.ok) { ok(fmt(d.updated) + ' ربات بروزرسانی شد، ' + fmt(d.skipped) + ' بدون تغییر'); loadBotPlan(); }
+        else bad('ناموفق');
+      }).catch(function(){ bad('ارتباط برقرار نشد'); });
+    });
   },
   copyText: function(t){ copyText(t); },
   copyUserOwner: function(){ var el = $('#in_own_u'); if (el && el.value) copyText(el.value, 'نام کاربری کپی شد ✅'); },

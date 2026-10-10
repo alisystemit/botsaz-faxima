@@ -68,7 +68,7 @@ input:focus{border-color:var(--acc)}
 label.lbl{font-size:11px;color:var(--muted);display:block;margin:12px 0 5px}
 
 .tabbar{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:600px;z-index:10;
-  display:grid;grid-template-columns:repeat(7,1fr);background:rgba(13,20,38,.94);backdrop-filter:blur(16px);border-top:1px solid var(--line);padding:7px 4px calc(7px + env(safe-area-inset-bottom))}
+  display:grid;grid-template-columns:repeat(8,1fr);background:rgba(13,20,38,.94);backdrop-filter:blur(16px);border-top:1px solid var(--line);padding:7px 4px calc(7px + env(safe-area-inset-bottom))}
 .tab{background:none;border:none;color:var(--muted);font-family:inherit;font-size:18px;display:flex;flex-direction:column;align-items:center;gap:2px;padding:7px 0;cursor:pointer;border-radius:12px;transition:.15s}
 .tab span{font-size:10px}
 .tab.active{color:#c4b5fd}
@@ -213,6 +213,12 @@ body.light .logbox{background:#f1f5f9}
 .dlg-box p{font-size:13px;color:var(--muted);line-height:1.9;margin-bottom:18px}
 .dlg-acts{display:flex;gap:9px}
 .dlg-acts button{flex:1}
+
+/* ===== نتیجهٔ بروزرسانی ===== */
+.alert-box{font-size:12px;padding:10px 12px;border-radius:12px;line-height:1.9;margin-top:10px;
+  border:1px solid var(--line);background:rgba(148,163,184,.1);word-break:break-word}
+.alert-box.ok{background:rgba(34,197,94,.12);border-color:rgba(34,197,94,.4);color:#86efac}
+.alert-box.bad{background:rgba(239,68,68,.12);border-color:rgba(239,68,68,.4);color:#fca5a5}
 
 /* ===== ردیف کپی ===== */
 .copyable{cursor:pointer;position:relative}
