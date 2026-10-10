@@ -1,0 +1,16 @@
+# ===== پنل مینی‌اپ — محافظت و هدرها =====
+Options -Indexes
+
+<IfModule mod_headers.c>
+    Header set X-Content-Type-Options "nosniff"
+    Header set X-Frame-Options "SAMEORIGIN"
+    Header set Referrer-Policy "no-referrer"
+</IfModule>
+
+# api.php فقط با initData معتبر کار می‌کند؛ فایل‌های استاتیک کش می‌شوند
+<IfModule mod_expires.c>
+    ExpiresActive On
+    <FilesMatch "\.(css|js|woff2)$">
+        ExpiresDefault "access plus 7 days"
+    </FilesMatch>
+</IfModule>

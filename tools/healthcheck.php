@@ -268,7 +268,18 @@ try {
     $testPdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
     $ok[] = "MySQL connection OK";
 } catch (Exception $e) {
-    $errors[] = "MySQL connection failed: " . $e->getMessage();
+    // MySQL فقط «اختیاری» است وقتی هنوز هیچ رباتی با دیتابیس ساخته نشده باشد؛
+    // در آن حالت قطع بودن سرویس خطای واقعی نیست، فقط یک یادآوری است.
+    $mysqlDown = stripos($e->getMessage(), '2002') !== false
+        || stripos($e->getMessage(), 'refused') !== false
+        || stripos($e->getMessage(), 'no connection') !== false
+        || stripos($e->getMessage(), 'could not connect') !== false;
+    if ($mysqlDown && empty($dbBots)) {
+        $warnings[] = 'MySQL is not reachable right now, but no built bot uses MySQL yet '
+            . '(needed only when building bots) - start the service to silence this';
+    } else {
+        $errors[] = "MySQL connection failed: " . $e->getMessage();
+    }
 }
 
 // ===== ۱۱. بررسی فایل‌های اضافی در کپی ساخته‌شدهٔ ربات‌ها =====
@@ -344,8 +355,10 @@ unset($_bstate, $_bstateFile, $_bbots, $_bb, $_bf, $_last);
 // بدون این چک، توکن باطل/placeholder فقط با خطای 404 مبهم خودش را نشان می‌داد.
 echo "[13] بررسی زندهٔ توکن (getMe)...\n";
 $liveToken = (string)($cfg['main_token'] ?? '');
-if ($liveToken === '' || $liveToken === 'PUT_MAIN_BOT_TOKEN_HERE') {
-    $errors[] = 'getMe skipped: main_token is empty/placeholder (set a real token from @BotFather)';
+$tokenPlaceholders = ['', 'PUT_MAIN_BOT_TOKEN_HERE', 'YOUR_BOT_TOKEN_FROM_BOTFATHER'];
+if (in_array($liveToken, $tokenPlaceholders, true)) {
+    // توکنِ نمونه در فایل مانده ⇒ این «خطای کد» نیست، فقط تنظیم‌نشدن است
+    $errors[] = 'main_token is still the placeholder - open config.php and paste the real token from @BotFather';
 } elseif (!function_exists('curl_init')) {
     $warnings[] = 'getMe skipped: curl not available';
 } else {
@@ -355,10 +368,18 @@ if ($liveToken === '' || $liveToken === 'PUT_MAIN_BOT_TOKEN_HERE') {
             $ok[] = 'Telegram getMe OK: @' . ($me['result']['username'] ?? '?');
         } else {
             $code = (int)($me['error_code'] ?? 0);
+            $desc = (string)($me['description'] ?? 'unknown');
+            $isNetwork = $code === 0
+                || stripos($desc, 'timed out') !== false
+                || stripos($desc, 'Max retries') !== false
+                || stripos($desc, 'connection') !== false;
             if ($code === 404) {
                 $errors[] = 'getMe 404: token is invalid or revoked - request a fresh /token from @BotFather';
+            } elseif ($isNetwork) {
+                // قطع اینترنت/timeout یعنی «نمی‌دانیم»، نه «خراب است» ⇒ هشدار نه خطا
+                $warnings[] = 'getMe could not reach api.telegram.org (' . $desc . ') - check internet/proxy, token itself is fine';
             } else {
-                $errors[] = 'getMe failed: ' . ($me['description'] ?? 'unknown');
+                $errors[] = 'getMe failed: ' . $desc;
             }
         }
     } catch (Throwable $e) {

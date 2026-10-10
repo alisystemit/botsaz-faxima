@@ -47,6 +47,7 @@ require_once __DIR__ . '/src/Store.php';
 require_once __DIR__ . '/src/Manager.php';
 require_once __DIR__ . '/src/Logger.php';
 require_once __DIR__ . '/src/DbBackup.php';
+require_once __DIR__ . '/src/AdminNotify.php';
 require_once __DIR__ . '/src/Nav.php';
 require_once __DIR__ . '/src/Ui.php';
 require_once __DIR__ . '/src/BuildSettings.php';
@@ -927,6 +928,7 @@ function gateBuildPayment(array $cfg, Store $store, string $TOKEN, array $SUPERS
             return true;
         } else {
             $pid = Payments::createBuildPayment($store, $uidP, $type, $req, '');
+            AdminNotify::notify($cfg, "🧾 فاکتور جدید\nکاربر: {$uidP}\nقالب: {$type}\nمبلغ: {$req['amount']} تومان");
         }
     }
     $t = "💰 <b>برای ساخت این ربات پرداخت لازم است</b>\n" . Ui::sep() . "\n\n"
@@ -1662,6 +1664,7 @@ function handleMessage(array $cfg, Store $store, string $TOKEN, array $SUPERS, a
                 return;
             }
             $store->addPendingRequest($uid, 'bot');
+            AdminNotify::notify($cfg, "📥 درخواست جدید ساخت ربات\nکاربر: {$uid}");
             BotApi::send($TOKEN, $chatId, Texts::get($store, 'request_pending'));
             return;
 
@@ -3008,6 +3011,7 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
                 BotApi::send($TOKEN, $chatId, Texts::get($store, 'request_pending_again'));
             } else {
                 $store->addPendingRequest($uid, 'bot');
+                AdminNotify::notify($cfg, "📥 درخواست جدید ساخت ربات\nکاربر: {$uid}");
                 BotApi::send($TOKEN, $chatId, Texts::get($store, 'request_pending'));
             }
             return;
@@ -3496,6 +3500,7 @@ function handlePayCallback(array $cfg, Store $store, string $TOKEN, array $SUPER
             if ($unit <= 0) { $fail("قیمت اسلات توسط ادمین تعیین نشده است."); return; }
             $amount = $unit * $slots;
             $pid = Payments::createPayment($store, $uid, Payments::KIND_LIMIT, '', $slots, $amount, '');
+            AdminNotify::notify($cfg, "🧾 خرید اسلات\nکاربر: {$uid}\nتعداد: {$slots}\nمبلغ: {$amount} تومان");
             $t = "➕ <b>خرید {$slots} اسلات</b>\n\n"
                 . "قیمت هر اسلات: " . PaymentPricing::formatToman($unit) . "\n"
                 . "مبلغ کل: <b>" . number_format($amount) . " تومان</b>\n\n"
@@ -3518,6 +3523,7 @@ function handlePayCallback(array $cfg, Store $store, string $TOKEN, array $SUPER
             }
             $amount = PaymentPricing::templatePrice($store, $type);
             $pid = Payments::createPayment($store, $uid, Payments::KIND_TEMPLATE, $type, 0, $amount, '');
+            AdminNotify::notify($cfg, "🧾 خرید قالب\nکاربر: {$uid}\nقالب: {$type}\nمبلغ: {$amount} تومان");
             $note = PaymentGateways::note($store, PaymentGateways::TEMPLATE, [
                 'amount' => PaymentPricing::formatToman($amount),
                 'type' => $type,
