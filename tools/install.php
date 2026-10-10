@@ -1,10 +1,28 @@
 <?php
 // نصب اولیه: php tools/install.php
-// کارها: ساخت پوشه‌ها، ساخت config.php از روی example، ساخت دیتابیس مدیریتی
+// کارها: ساخت پوشه‌ها، ساخت config.php از روی example، ساخت دیتابیس مدیریتی، تنظیم دسترسی‌ها
 
 $root = dirname(__DIR__);
 foreach (['bots', 'data', 'templates/faxima', 'templates/mirza'] as $d) {
     if (!is_dir($root.'/'.$d)) { mkdir($root.'/'.$d, 0777, true); echo "mkdir $d\n"; }
+}
+
+// ===== تنظیم دسترسی‌ها (755 برای پوشه‌ها، 644 برای فایل‌ها) =====
+require_once $root.'/src/PermissionManager.php';
+echo "\n🔧 تنظیم دسترسی‌ها...\n";
+$permResults = PermissionManager::fixAll($root);
+if ($permResults['success']) {
+    echo "✅ دسترسی‌ها تنظیم شدند:\n";
+    echo "  • پوشه‌های تنظیم‌شده: " . $permResults['fixed_dirs'] . "\n";
+    echo "  • فایل‌های تنظیم‌شده: " . $permResults['fixed_files'] . "\n";
+} else {
+    echo "⚠️  بعضی دسترسی‌ها تنظیم نشدند:\n";
+    foreach ($permResults['errors'] as $err) {
+        echo "  • $err\n";
+    }
+}
+if (!empty($permResults['errors'])) {
+    echo "\n💡 نکته: اگر از هاست اشتراکی استفاده می‌کنید، برخی دسترسی‌ها ممکن است محدود باشند.\n";
 }
 
 if (!file_exists($root.'/config.php')) {

@@ -7,6 +7,7 @@ require_once __DIR__ . '/../src/Store.php';
 require_once __DIR__ . '/../src/Manager.php';
 require_once __DIR__ . '/../src/BotApi.php';
 require_once __DIR__ . '/../src/Logger.php';
+require_once __DIR__ . '/../src/PermissionManager.php';
 
 $cfgFile = __DIR__ . '/../config.php';
 if (!file_exists($cfgFile)) {

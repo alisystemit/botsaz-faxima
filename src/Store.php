@@ -165,7 +165,11 @@ class Store
             $st->execute([$uid, $first, $username]);
             $st = $this->pdo->prepare("SELECT * FROM users WHERE user_id=?");
             $st->execute([$uid]);
-            return $st->fetch(PDO::FETCH_ASSOC) ?: ['user_id' => $uid, 'first_name' => $first, 'username' => $username, 'is_admin' => 0, 'is_allowed' => 0, 'step' => 'idle', 'temp' => '{}', 'build_count' => 0, 'created_at' => ''];
+            $u = $st->fetch(PDO::FETCH_ASSOC);
+            if (!$u) {
+                throw new Exception("Failed to create/retrieve user {$uid}");
+            }
+            return $u;
         }
         if (($first && $u['first_name'] !== $first) || ($username && $u['username'] !== $username)) {
             $st = $this->pdo->prepare("UPDATE users SET first_name=?, username=? WHERE user_id=?");
@@ -233,11 +237,12 @@ class Store
     {
         $keep = max(1, $keep);
         if ($this->driver === 'mysql') {
-            $st = $this->pdo->prepare("DELETE FROM processed_updates WHERE update_id NOT IN (SELECT update_id FROM (SELECT update_id FROM processed_updates ORDER BY update_id DESC LIMIT {$keep}) t)");
+            $st = $this->pdo->prepare("DELETE FROM processed_updates WHERE update_id NOT IN (SELECT update_id FROM (SELECT update_id FROM processed_updates ORDER BY update_id DESC LIMIT ?) t)");
+            $st->execute([$keep]);
         } else {
-            $st = $this->pdo->prepare("DELETE FROM processed_updates WHERE update_id NOT IN (SELECT update_id FROM processed_updates ORDER BY update_id DESC LIMIT {$keep})");
+            $st = $this->pdo->prepare("DELETE FROM processed_updates WHERE update_id NOT IN (SELECT update_id FROM processed_updates ORDER BY update_id DESC LIMIT ?)");
+            $st->execute([$keep]);
         }
-        $st->execute();
         return $st->rowCount();
     }
 

@@ -679,6 +679,16 @@ public static function validTypes(): array
      */
     public static function patchMirzaConfig(string $botDir, array $cfg, string $dbName, string $token, int $adminId, string $botUsername, string $domainPath): void
     {
+        // ===== Validate token format before patching =====
+        // Telegram tokens: {8-10 digits}:{35+ alphanumeric with - or _}
+        if (!preg_match('/^[0-9]{8,10}:[a-zA-Z0-9_-]{35,}$/', $token)) {
+            throw new Exception("توکن نامعتبر است (فرمت تلگرام): {$token}");
+        }
+        // Validate bot username
+        if (!preg_match('/^[a-z0-9_]{3,32}$/i', $botUsername)) {
+            throw new Exception("نام کاربری ربات نامعتبر است: {$botUsername}");
+        }
+        
         $file = $botDir . '/config.php';
         $raw = file_get_contents($file);
         if ($raw === false) throw new Exception("config.php میرزا پیدا نشد");
@@ -833,6 +843,15 @@ public static function validTypes(): array
      */
     public static function patchFaximaConfig(string $botDir, array $cfg, string $dbName, string $token, int $adminId, string $botUsername, string $domainPath): void
     {
+        // ===== Validate token format before patching =====
+        if (!preg_match('/^[0-9]{8,10}:[a-zA-Z0-9_-]{35,}$/', $token)) {
+            throw new Exception("توکن نامعتبر است (فرمت تلگرام): {$token}");
+        }
+        // Validate bot username
+        if (!preg_match('/^[a-z0-9_]{3,32}$/i', $botUsername)) {
+            throw new Exception("نام کاربری ربات نامعتبر است: {$botUsername}");
+        }
+        
         $file = $botDir . '/config.php';
         $raw = file_get_contents($file);
         if ($raw === false) throw new Exception("config.php فاکسیما پیدا نشد");
@@ -990,6 +1009,15 @@ public static function validTypes(): array
         string $domainPath,
         string $baseUrl
     ): void {
+        // ===== Validate token format before patching =====
+        if (!preg_match('/^[0-9]{8,10}:[a-zA-Z0-9_-]{35,}$/', $token)) {
+            throw new Exception("توکن نامعتبر است (فرمت تلگرام): {$token}");
+        }
+        // Validate bot username
+        if (!preg_match('/^[a-z0-9_]{3,32}$/i', $botUsername)) {
+            throw new Exception("نام کاربری ربات نامعتبر است: {$botUsername}");
+        }
+        
         $file = $botDir . '/config.php';
         $raw = is_file($file) ? file_get_contents($file) : null;
         if ($raw === false || $raw === null) throw new Exception("config.php آپ‌تایم پیدا نشد");
@@ -1092,7 +1120,12 @@ public static function validTypes(): array
             $out['migrated'] = true;
             $out['note'] = $ran === [] ? 'دیتابیس به‌روز بود' : ('مایگریشن: ' . implode(', ', $ran));
         } catch (Throwable $e) {
-            $out['note'] = 'مایگریشن ناموفق: ' . $e->getMessage();
+            $msg = 'مایگریشن ناموفق: ' . $e->getMessage();
+            $out['note'] = $msg;
+            // Log the critical failure
+            error_log('CRITICAL: Database schema migration failed for ' . $botDir . ' - ' . $msg);
+            // Return with failure flag so caller knows migration is incomplete
+            $out['migrated'] = false;
             return $out;
         } finally {
             // اتصال SQLite باید همین‌جا رها شود.
