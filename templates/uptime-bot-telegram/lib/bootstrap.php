@@ -27,9 +27,21 @@ if (!defined('UPTIME_ROOT')) {
     require_once __DIR__ . '/pay.php';
     require_once __DIR__ . '/ranking.php';
     require_once __DIR__ . '/page.php';
+    require_once __DIR__ . '/miniapp.php';
     require_once __DIR__ . '/groupbot.php';
     require_once __DIR__ . '/paybot.php';
+    require_once __DIR__ . '/addons.php';          // افزونه‌ها (class Addons + trait AddonsUi)
     require_once __DIR__ . '/bot.php';
+    
+    // ===== ماژول‌های جدید =====
+    require_once __DIR__ . '/webhooks.php';        // Webhook‌های شخصی
+    require_once __DIR__ . '/reports.php';         // گزارش SLA
+    require_once __DIR__ . '/queue.php';           // صف کارها
+    require_once __DIR__ . '/anomaly.php';         // تشخیص ناهنجاری
+    require_once __DIR__ . '/integrations.php';    // Slack/Discord
+    require_once __DIR__ . '/import_export.php';   // Export/Import
+    require_once __DIR__ . '/analytics.php';       // Analytics پیشرفته
+    require_once __DIR__ . '/affiliate.php';       // برنامهٔ همکاری
 }
 
 /** کانفیگ (یک‌بار بارگذاری) */
@@ -45,6 +57,55 @@ function appConfig(): array
         $cfg += ['defaults' => []];
     }
     return $cfg;
+}
+
+/**
+ * نرمال‌سازی آدرس پایه: scheme + بدون اسلش انتهایی.
+ * ورودی خام کاربر ممکن است «example.com/x» یا «https://example.com/x/» باشد.
+ */
+function normalizeBaseUrl(string $raw): string
+{
+    $u = trim($raw);
+    if ($u === '') return '';
+    if (!preg_match('#^https?://#i', $u)) $u = 'https://' . $u;
+    $u = rtrim($u, '/');
+    $hostpart = preg_replace('#^https?://#i', '', $u) ?? '';
+    if (trim($hostpart) === '') return '';
+    return $u;
+}
+
+/**
+ * آدرس پایهٔ مؤثر — «اولویت با تنظیم پنل مدیریت، بعد کانفیگ».
+ *
+ * چرا این تابع؟ قبلاً miniAppUrl()/statusUrl()/siteUrl() فقط config.php را
+ * می‌خواندند، پس تغییر «آدرس اپلیکیشن» یا «دامنهٔ ربات» از پنل مدیریت هیچ
+ * اثری نداشت (کاربر پیام «ذخیره شد» می‌گرفت ولی لینک‌ها همان قدیمی می‌ماندند).
+ * حالا هرچه در جدول settings (set:base_url / set:domain) ذخیره شده بر
+ * config.php مقدم است.
+ */
+function effectiveBaseUrl(): string
+{
+    $cfg = appConfig();
+    $dbUrl = '';
+    $dbDomain = '';
+    try {
+        $dbUrl = (string)(Db::get('base_url') ?? '');
+        $dbDomain = (string)(Db::get('domain') ?? '');
+    } catch (Throwable $e) {
+        // اگر دیتابیس در دسترس نبود، به config.php بسنده می‌کنیم
+    }
+    $cfgDomain = trim((string)($cfg['domain'] ?? ''));
+    $candidates = [
+        $dbUrl,
+        $dbDomain !== '' ? 'https://' . $dbDomain : '',
+        (string)($cfg['base_url'] ?? ''),
+        $cfgDomain !== '' ? 'https://' . $cfgDomain : '',
+    ];
+    foreach ($candidates as $c) {
+        $n = normalizeBaseUrl($c);
+        if ($n !== '') return $n;
+    }
+    return '';
 }
 
 /** آماده‌سازی دیتابیس + جدول‌ها */
@@ -64,6 +125,32 @@ function botToken(): string
 function botUsername(): string
 {
     return trim((string)(appConfig()['bot_username'] ?? ''), '@');
+}
+
+/**
+ * URL اپلیکیشن تلگرام (Mini App).
+ *
+ * منبعِ واحد: effectiveBaseUrl() که اولویت را به تنظیم پنل مدیریت
+ * (جدول settings) می‌دهد و بعد سراغ config.php می‌رود.
+ * قبلاً پنج «قدم» با ترتیب اشتباه بود: config.php قبل از دیتابیس خوانده
+ * می‌شد، برای همین تغییر «آدرس اپلیکیشن» از پنل هیچ اثری نداشت.
+ */
+function miniAppUrl(): string
+{
+    $base = effectiveBaseUrl();
+    if ($base !== '') return $base . '/webapp/index.html';
+
+    // آخرین تلاش: حدس از روی خودِ درخواست (وقتی نه config و نه دیتابیس چیزی ندارند)
+    $host = (string)($_SERVER['SERVER_NAME'] ?? '');
+    if ($host !== '') {
+        $port = (string)($_SERVER['SERVER_PORT'] ?? '');
+        if ($port !== '' && $port !== '80' && $port !== '443') $host .= ':' . $port;
+        // تلگرام برای WebApp فقط https را قبول می‌کند
+        $guess = normalizeBaseUrl('https://' . $host);
+        if ($guess !== '') return $guess . '/webapp/index.html';
+    }
+
+    return '';
 }
 
 /** آیدی ادمین(ها) — آیدی اصلی از کانفیگ + لیست جداگانهٔ ادمین‌ها اگر ست شده باشد */

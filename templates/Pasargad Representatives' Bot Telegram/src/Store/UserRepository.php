@@ -110,6 +110,29 @@ final class UserRepository
         $this->db->update('users', ['last_seen_at' => time(), 'updated_at' => time()], ['id' => $userId]);
     }
 
+    public function addLoyaltyPoints(int $userId, int $points): void
+    {
+        $this->db->run(
+            'UPDATE users SET loyalty_points = loyalty_points + ?, updated_at = ? WHERE id = ?',
+            [max(0, $points), time(), $userId]
+        );
+    }
+
+    public function deductLoyaltyPoints(int $userId, int $points): void
+    {
+        $this->db->run(
+            'UPDATE users SET loyalty_points = MAX(0, loyalty_points - ?), updated_at = ? WHERE id = ?',
+            [max(0, $points), time(), $userId]
+        );
+    }
+
+    public function loyaltyPoints(int $userId): int
+    {
+        $row = $this->db->first('SELECT loyalty_points FROM users WHERE id = ?', [$userId]);
+
+        return (int) ($row['loyalty_points'] ?? 0);
+    }
+
     /**
      * به‌روزرسانی وضعیت پنل کاربر (از مسیرهای قدیمی که کلید کاربر می‌دادند).
      *
@@ -328,7 +351,19 @@ final class UserRepository
             $this->db->insert('wallet_txns', [
                 'user_id'    => $userId,
                 'amount'     => $amount,
-                'kind'       => in_array($kind, ['manual', 'referral', 'wallet_pay'], true) ? $kind : 'manual',
+                // ⭐️ این allowlist فقط برای **خواناییِ تاریخچه** است، نه برای امنیت.
+//
+// پیش از این، `referral_level2` در آن نبود و `in_array()` آن را رد می‌کرد و
+// ردیف را `manual` ثبت می‌کرد — یعنی پرداختِ خودکارِ سطح دوم در تاریخچهٔ
+// کاربر دقیقاً شبیه «شارژ دستیِ مدیر» دیده می‌شد. اگر کاربری شکایت می‌کرد که
+// موجودی‌اش زیاد شده، هیچ راهی برای دیدنِ اینکه از کجا آمده نبود.
+'kind' => in_array($kind, [
+                    'manual',
+                    'referral',
+                    'referral_level2',
+                    'referral_commission',
+                    'wallet_pay',
+                ], true) ? $kind : 'manual',
                 'note'       => Str::truncate($note !== '' ? $note : ($amount > 0 ? 'شارژ توسط مدیریت' : 'کسر توسط مدیریت'), 300),
                 'admin_id'   => $adminId > 0 ? $adminId : null,
                 'created_at' => time(),
@@ -339,6 +374,65 @@ final class UserRepository
             'ok'      => true,
             'message' => $amount > 0 ? 'کیف پول شارژ شد.' : 'از کیف پول کسر شد.',
             'balance' => $balance,
+        ];
+    }
+
+    /**
+     * برداشت از کیف پول، **فقط اگر موجودی کافی باشد**.
+     *
+     * ⭐️ چرا این متد جدا از `adjustWallet()` است و نباید با آن جایگزین شود:
+     *
+     * `adjustWallet()` منفی نمی‌شود؛ اگر موجودی کم باشد، تا صفر کم می‌کند. برای
+     * **شارژ** که درست است، ولی برای **پرداختِ سفارش** فاجعه: مشتری موجودیِ
+     * ۵۰ هزار تومانی دارد، سفارش ۹۰۰ هزار تومانی می‌خرد، و کیف پولش خالی
+     * می‌شود در حالی که سفارش هم بی‌صدا «پرداخت‌شده» علامت می‌خورد.
+     *
+     * اینجا شرطِ موجودی در خودِ `UPDATE` است (compare-and-swap)، پس دو درخواستِ
+     * همزمان نمی‌توانند موجودی را دوبار خرج کنند.
+     *
+     * @return array{ok:bool, message:string, balance:int, shortfall:int}
+     */
+    public function spendWallet(int $userId, int $amount, string $note = ''): array
+    {
+        if ($amount <= 0) {
+            return ['ok' => true, 'message' => '', 'balance' => $this->walletBalance($userId), 'shortfall' => 0];
+        }
+
+        $deducted = false;
+        $before   = $this->walletBalance($userId);
+
+        $this->db->transaction(function () use ($userId, $amount, $note, &$deducted): void {
+            // ⭐️ شرطِ `wallet_balance >= amount` داخل خودِ UPDATE است، پس دو
+            // درخواستِ همزمان نمی‌توانند موجودی را دوبار خرج کنند.
+            //
+            // `rowCount()` تنها راهِ قابل‌اعتمادِ تشخیص موفقیت است؛ بررسیِ
+            // «آیا تراکنشی با این مبلغ ثبت شده» غلط بود چون یک خرجِ *قبلی* با
+            // همان مبلغ، کسرِ *ناموفق* فعلی را موفق نشان می‌داد.
+            $deducted = $this->db->run(
+                'UPDATE users SET wallet_balance = wallet_balance - :a, updated_at = :t
+                  WHERE id = :id AND wallet_balance >= :a',
+                ['a' => $amount, 't' => time(), 'id' => $userId]
+            )->rowCount() > 0;
+
+            if (!$deducted) {
+                return;
+            }
+
+            $this->db->insert('wallet_txns', [
+                'user_id'    => $userId,
+                'amount'     => -$amount,
+                'kind'       => 'wallet_pay',
+                'note'       => Str::truncate($note !== '' ? $note : 'پرداخت از کیف پول', 300),
+                'admin_id'   => null,
+                'created_at' => time(),
+            ]);
+        });
+
+        return [
+            'ok'        => $deducted,
+            'message'    => $deducted ? '' : 'موجودی کیف پول کافی نیست.',
+            'balance'    => $this->walletBalance($userId),
+            'shortfall'  => $deducted ? 0 : max(0, $amount - $before),
         ];
     }
 
@@ -393,5 +487,54 @@ final class UserRepository
         $this->setCouponCode($userId, '');
 
         return true;
+    }
+
+    // ------------------------------------------------------------------
+    //  ⬇️ پروفایل و آمار کلی  (برای UserProfile و AdminDashboard)
+    // ------------------------------------------------------------------
+
+    /**
+     * ستون‌هایی که `updateField()` اجازهٔ نوشتن روی آن‌ها را می‌دهد.
+     *
+     * نام ستون نمی‌تواند از کاربر بیاید (SQLite پارامتر برای ستون ندارد)، پس
+     * هر فیلد باید از این فهرست رد شود؛ وگرنه یک فراخوانی مثل
+     * `updateField($id, $_GET['f'], …)` راه تزریق SQL می‌شد.
+     *
+     * @var array<int, string>
+     */
+    private const WRITABLE_PROFILE_FIELDS = [
+        'first_name',
+        'language_code',
+        'email',
+        'phone',
+        'notifications_enabled',
+        'digest_emails',
+    ];
+
+    /**
+     * نوشتن یک ستون از پروفایل کاربر.
+     *
+     * @return bool آیا واقعاً چیزی نوشته شد؟
+     */
+    public function updateField(int $userId, string $field, mixed $value): bool
+    {
+        if (!in_array($field, self::WRITABLE_PROFILE_FIELDS, true)) {
+            return false;
+        }
+
+        return $this->db->update('users', [$field => $value], ['id' => $userId]) > 0;
+    }
+
+    public function count(): int
+    {
+        return $this->db->count('SELECT COUNT(*) FROM users');
+    }
+
+    /**
+     * چند کاربر از این لحظه به بعد ساخته شده‌اند (برای آمار «امروز/این ماه»).
+     */
+    public function countCreatedAfter(int $timestamp): int
+    {
+        return $this->db->count('SELECT COUNT(*) FROM users WHERE created_at >= ?', [$timestamp]);
     }
 }

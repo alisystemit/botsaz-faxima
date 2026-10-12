@@ -14,6 +14,12 @@ class Db
     private static bool $booted = false;
     private static bool $traceOn = false;
 
+    /**
+     * نسخهٔ اسکیما. هر بار جدول/ستون جدیدی به schema() اضافه شد این عدد را
+     * بالا ببرید تا روی نصب‌های قدیمی هم یک‌بار migrate اجرا شود.
+     */
+    private const SCHEMA_VERSION = 2;
+
     /** کانفیگ بارگذاری‌شده (توسط bootstrap تنظیم می‌شود) */
     private static array $cfg = [];
 
@@ -72,13 +78,23 @@ class Db
         if (self::$booted) return;
         self::$settingsCache = [];
         $pdo = self::pdo();
+        $fresh = false;
         try {
             $pdo->query('SELECT 1 FROM `settings` LIMIT 1');
-            // جدول از قبل هست → فقط ارتقاها (ستون‌های جدید + تنظیمات پیش‌فرض)
+        } catch (PDOException $e) {
+            $fresh = true;
+        }
+        // فقط وقتی جدول‌ها از قبل هستند و نسخهٔ اسکیما به‌روز است، صرفاً ارتقای
+        // ستون‌ها انجام می‌شود. در غیر این‌صورت migrate کامل اجرا می‌شود تا
+        // جدول‌هایی که در نسخه‌های بعدی اضافه شده‌اند روی نصب قدیمی هم ساخته
+        // شوند (قبلاً migrate فقط وقتی اجرا می‌شد که جدول settings وجود نداشت،
+        // پس جدول‌های تازه روی نصب‌های قدیمی هرگز ساخته نمی‌شدند).
+        if ($fresh || (int)self::get('schema_version', '0') < self::SCHEMA_VERSION) {
+            self::migrate();
+            self::set('schema_version', (string)self::SCHEMA_VERSION);
+        } else {
             self::syncColumns();
             self::seedDefaults();
-        } catch (PDOException $e) {
-            self::migrate();
         }
         self::$booted = true;
     }
@@ -240,6 +256,26 @@ class Db
             'raw'         => 'TEXT NULL DEFAULT NULL',
         ];
         foreach ($payCols as $c => $ddl) self::ensureColumn('payments', $c, $ddl);
+        
+        // pay_url را به 1000 کاراکتر بسط بده (برای URL‌های پرداخت طولانی)
+        try {
+            $cols = self::pdo()->query("SHOW COLUMNS FROM `payments` WHERE `Field` = 'pay_url'")->fetchAll(PDO::FETCH_ASSOC);
+            if ($cols && isset($cols[0]['Type'])) {
+                $type = $cols[0]['Type'];
+                if (!str_contains($type, '1000')) {
+                    self::pdo()->exec("ALTER TABLE `payments` MODIFY COLUMN `pay_url` VARCHAR(1000) NOT NULL DEFAULT ''");
+                }
+            }
+        } catch (Throwable $e) {
+            @error_log('[uptime] payments pay_url upgrade failed: ' . $e->getMessage());
+        }
+        
+        // ---------- pay_gateway: ستون‌های کلید API ----------
+        $gwCols = [
+            'api_key' => 'VARCHAR(500) NOT NULL DEFAULT \'\'',
+            'secret'  => 'VARCHAR(500) NOT NULL DEFAULT \'\'',
+        ];
+        foreach ($gwCols as $c => $ddl) self::ensureColumn('pay_gateway', $c, $ddl);
         self::ensureColumn('pay_gateway', 'created_at', 'DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP');
         try {
             $pidx = self::indexes('payments');
@@ -423,8 +459,8 @@ class Db
                 `title` VARCHAR(60) NOT NULL DEFAULT '',
                 `enabled` TINYINT(1) NOT NULL DEFAULT 0,
                 `kind` VARCHAR(10) NOT NULL DEFAULT 'card',
-                `api_key` VARCHAR(190) NOT NULL DEFAULT '',
-                `secret` VARCHAR(190) NOT NULL DEFAULT '',
+                `api_key` VARCHAR(500) NOT NULL DEFAULT '',
+                `secret` VARCHAR(500) NOT NULL DEFAULT '',
                 `merchant_id` VARCHAR(120) NOT NULL DEFAULT '',
                 `base_url` VARCHAR(190) NOT NULL DEFAULT '',
                 `settings` TEXT NULL DEFAULT NULL,
@@ -520,6 +556,119 @@ class Db
                 PRIMARY KEY (`id`),
                 UNIQUE KEY `uniq_scope` (`user_id`, `chat_id`, `domain`(120)),
                 KEY `idx_domain` (`domain`)
+            )" . $engine,
+
+            // ===== Webhook‌های شخصی‌سازی =====
+            "CREATE TABLE IF NOT EXISTS `webhooks` (
+                `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+                `user_id` BIGINT UNSIGNED NOT NULL,
+                `site_id` INT UNSIGNED NOT NULL,
+                `type` VARCHAR(24) NOT NULL,
+                `url` VARCHAR(1000) NOT NULL,
+                `events` VARCHAR(255) NOT NULL DEFAULT 'down,up,slow',
+                `secret` VARCHAR(190) NOT NULL DEFAULT '',
+                `sign_algo` VARCHAR(20) NOT NULL DEFAULT 'sha256',
+                `enabled` TINYINT(1) NOT NULL DEFAULT 1,
+                `test_at` DATETIME NULL,
+                `last_used` DATETIME NULL,
+                `fail_count` INT NOT NULL DEFAULT 0,
+                `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (`id`),
+                KEY `idx_user` (`user_id`),
+                KEY `idx_site` (`site_id`)
+            )" . $engine,
+
+            // ===== گزارش‌های SLA =====
+            "CREATE TABLE IF NOT EXISTS `sla_reports` (
+                `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+                `user_id` BIGINT UNSIGNED NOT NULL,
+                `period_start` DATE NOT NULL,
+                `period_end` DATE NOT NULL,
+                `type` VARCHAR(10) NOT NULL,
+                `data_json` LONGTEXT NOT NULL,
+                `sent_at` DATETIME NULL,
+                `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (`id`),
+                KEY `idx_user` (`user_id`, `created_at`)
+            )" . $engine,
+
+            // ===== صف کارها (Queue) =====
+            "CREATE TABLE IF NOT EXISTS `queue` (
+                `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                `type` VARCHAR(40) NOT NULL,
+                `data` LONGTEXT NOT NULL,
+                `status` VARCHAR(20) NOT NULL DEFAULT 'pending',
+                `result` LONGTEXT NULL,
+                `error` VARCHAR(500) NULL,
+                `attempts` INT NOT NULL DEFAULT 0,
+                `last_error` VARCHAR(500) NULL,
+                `priority` INT NOT NULL DEFAULT 5,
+                `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                `started_at` DATETIME NULL,
+                `completed_at` DATETIME NULL,
+                PRIMARY KEY (`id`),
+                KEY `idx_status` (`status`, `priority`, `created_at`)
+            )" . $engine,
+
+            // ===== Integration‌های خارجی (Slack, Discord) =====
+            "CREATE TABLE IF NOT EXISTS `integrations` (
+                `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+                `user_id` BIGINT UNSIGNED NOT NULL,
+                `type` VARCHAR(20) NOT NULL,
+                `webhook_url` VARCHAR(1000) NOT NULL,
+                `enabled` TINYINT(1) NOT NULL DEFAULT 1,
+                `settings` JSON NULL,
+                `test_at` DATETIME NULL,
+                `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (`id`),
+                UNIQUE KEY `uniq_user_type` (`user_id`, `type`)
+            )" . $engine,
+
+            // ===== برنامهٔ همکاری =====
+            "CREATE TABLE IF NOT EXISTS `affiliates` (
+                `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+                `user_id` BIGINT UNSIGNED NOT NULL,
+                `code` VARCHAR(10) UNIQUE NOT NULL,
+                `commission_rate` INT NOT NULL DEFAULT 20,
+                `signup_count` INT NOT NULL DEFAULT 0,
+                `total_commission` BIGINT NOT NULL DEFAULT 0,
+                `status` VARCHAR(20) NOT NULL DEFAULT 'active',
+                `last_signup` DATETIME NULL,
+                `payout_method` VARCHAR(20) NULL,
+                `payout_info` VARCHAR(255) NULL,
+                `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (`id`),
+                UNIQUE KEY `uniq_user` (`user_id`),
+                KEY `idx_code` (`code`)
+            )" . $engine,
+
+            // ===== درآمدهای affiliate =====
+            "CREATE TABLE IF NOT EXISTS `affiliate_earnings` (
+                `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                `affiliate_id` INT UNSIGNED NOT NULL,
+                `amount` BIGINT NOT NULL,
+                `commission` BIGINT NOT NULL,
+                `type` VARCHAR(20) NOT NULL DEFAULT 'referral_payment',
+                `payment_id` INT UNSIGNED NOT NULL,
+                `payout_id` INT UNSIGNED NULL,
+                `paid_at` DATETIME NULL,
+                `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (`id`),
+                KEY `idx_affiliate` (`affiliate_id`, `paid_at`)
+            )" . $engine,
+
+            // ===== درخواست‌های پرداخت affiliate =====
+            "CREATE TABLE IF NOT EXISTS `affiliate_payouts` (
+                `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+                `affiliate_id` INT UNSIGNED NOT NULL,
+                `amount` BIGINT NOT NULL,
+                `method` VARCHAR(20) NOT NULL,
+                `status` VARCHAR(20) NOT NULL DEFAULT 'pending',
+                `reference` VARCHAR(255) NULL,
+                `requested_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                `completed_at` DATETIME NULL,
+                PRIMARY KEY (`id`),
+                KEY `idx_affiliate` (`affiliate_id`, `status`)
             )" . $engine,
         ];
     }

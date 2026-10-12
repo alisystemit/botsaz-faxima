@@ -16,6 +16,7 @@ use Pasargad\Store\PanelSyncer;
 use Pasargad\Store\Provisioner;
 use Pasargad\Store\Settings;
 use Pasargad\Store\TicketRepository;
+use Pasargad\Store\TestConfigRepository;
 use Pasargad\Store\UserRepository;
 use Pasargad\Support\Config;
 use Pasargad\Support\Invoice;
@@ -50,11 +51,23 @@ final class Kernel
     private FeatureFlags $flags;
     private PanelRepository $panels;
     private ?\Pasargad\Panel\PasarGuardClient $panel = null;
+
+    /**
+     * کلاینتی که **از بیرون** تزریق شده (فقط تست‌ها).
+     *
+     * چ جدا از `$panel` نگه می‌داریم؟ چون `panelClient()` خودش `$panel` را از
+     * کانفیگ می‌سازد و پر می‌کند. اگر تشخیص تزریق را از روی `$panel` بگیریم،
+     * یک فراخوانیِ زودهنگام در محیط واقعی باعث می‌شود فکر کنیم کلاینت تستی
+     * تزریق شده و آدرسِ پنلی را که کاربر داده نادیده بگیریم.
+     */
+    private ?\Pasargad\Panel\PasarGuardClient $injectedPanel = null;
     private ?PanelCenter $panelCenter = null;
     private ?ChannelGuard $channelGuard = null;
     private ?AdminController $adminController = null;
     private ?SupportCenter $supportCenter = null;
     private ?DiscountService $discounts = null;
+    private TestConfigRepository $testRepo;
+    private ?\Pasargad\Store\Security $security = null;
     private FloodGuard $flood;
 
     public function __construct(
@@ -81,10 +94,12 @@ final class Kernel
         $this->sessions    = $sessions ?? new SessionStore();
         $this->flags       = $flags ?? new FeatureFlags($this->settings);
         $this->panel       = $panel;
+        $this->injectedPanel = $panel;
         $this->panels      = $panels ?? new PanelRepository();
         $this->provisioner = $provisioner ?? new Provisioner($panel, $this->orders, $this->users, $this->settings, $this->panels);
         $this->payments    = $payments ?? new PaymentService($this->orders, $this->provisioner, $this->settings, $this->flags);
         $this->flood       = $floodGuard ?? new FloodGuard();
+        $this->testRepo    = new TestConfigRepository();
 
         $this->payments->setNotifier($this->notifier);
     }
@@ -160,6 +175,22 @@ final class Kernel
         }
 
         return $this->adminController;
+    }
+
+    /**
+     * پروفایل کاربر — نمایش و ویرایش نام، زبان و اطلاعات تماس.
+     */
+    private function userProfile(): UserProfile
+    {
+        return new UserProfile($this->bot, $this->users);
+    }
+
+    /**
+     * داشبورد آماری مدیر (کاربران، سفارش‌ها، درآمد، تسویه).
+     */
+    private function adminDashboard(): AdminDashboard
+    {
+        return new AdminDashboard($this->bot, $this->users, $this->orders, $this->panels);
     }
 
     private function panelClient(): \Pasargad\Panel\PasarGuardClient
@@ -239,6 +270,20 @@ final class Kernel
         return $this->discounts;
     }
 
+    private function userSettings(): UserSettings
+    {
+        return new UserSettings($this->bot, $this->users, $this->settings, $this->panels);
+    }
+
+    private function security(): \Pasargad\Store\Security
+    {
+        if ($this->security === null) {
+            $this->security = new \Pasargad\Store\Security();
+        }
+
+        return $this->security;
+    }
+
     public function tickets(): TicketRepository
     {
         return new TicketRepository();
@@ -279,6 +324,22 @@ final class Kernel
         // 🛡️ ضدتکرار و محافظ بار سرور (fail-open: با خطا، دستور اجرا می‌شود)
         // ------------------------------------------------------------------
         if ($this->isDuplicateOrFlood($update, $userId, $chatId)) {
+            return;
+        }
+
+        // ------------------------------------------------------------------
+        // 🛡️ محدودیت نرخ ضداسپم: اگر کاربر بیش از حد پیام بدهد، محدود می‌شود.
+        // ------------------------------------------------------------------
+        if ($this->flood->isSpamRateLimited($userId, 15, 60)) {
+            if ($update->isCallbackQuery()) {
+                $this->bot->answerCallback(
+                    (string) ($update->raw()['callback_query']['id'] ?? ''),
+                    '⏳ پیام‌های شما بیش از حد است! لطفاً کمی استراحت کنید. 🙏'
+                );
+            } else {
+                $this->bot->sendMessage($chatId, '⏳ پیام‌های شما بیش از حد مجاز است! لطفاً ۶۰ ثانیه صبر کنید. 🙏');
+            }
+
             return;
         }
 
@@ -326,6 +387,20 @@ final class Kernel
                 'error'   => $e->getMessage(),
                 'file'    => $e->getFile() . ':' . $e->getLine(),
             ]);
+
+            // ⭐️ آپدیت پارک می‌شود تا کرون دوباره تلاش کند.
+            //
+            // تلگرام وبهوک را فقط **یک‌بار** تحویل می‌دهد، پس بدون این، این آپدیت
+            // برای همیشه از بین می‌رفت — نه خطایی به کاربر می‌رسید، نه تکراری. برای
+            // یک فروشگاه یعنی: رسید ارسال شد، ربات وسط کار مرد، سفارش باز ماند و
+            // کسی خبردار نشد.
+            //
+            // خودِ `recordFailure()` استثنا نمی‌دهد، پس خطای اصلی هم گم نمی‌شود.
+            WebhookReliability::recordFailure(
+                $update->updateId(),
+                $e,
+                (array) $update->raw()
+            );
 
             $this->safeReply($chatId, '⚠️🔧 خطایی رخ داد! 😔 لطفاً دوباره تلاش کنید. 🙏');
         }
@@ -427,6 +502,15 @@ final class Kernel
 
     /**
      * مراحل نشستی که ورودی متنی آزاد مصرف می‌کنند.
+     /**
+     * میان‌برِ خوانا به ثابتِ مشترک.
+     *
+     * تعریفِ اصلی در `PaymentService::METHOD_WALLET` است چون مینی‌اپ هم از آن
+     * استفاده می‌کند؛ دو رشتهٔ جدا یعنی دو رفتارِ متفاوت در دو لایه.
+     */
+    private const METHOD_WALLET = PaymentService::METHOD_WALLET;
+
+    /**
      *
      * @var array<int, string>
      */
@@ -441,7 +525,47 @@ final class Kernel
         'admin_text',
         'admin_wallet',
         'admin_testconfig',
+        'admin_panel_transfer',
     ];
+
+    /**
+     * خواندنِ یک عدد از `callback_data` — به‌صورتِ **محدود**.
+     *
+     * ⭐️ چرا این متد و نه `(int) ($data['x'] ?? 0)`:
+     *
+     * `callback_data` ورودیِ کاربر است، هرچه باشد. `(int)` روی یک رشتهٔ
+     * عددیِ خیلی بزرگ عددی درمی‌آورد که در `* 5` سرریز می‌کند و PHP آن را
+     * **float** می‌کند. بعد `array_slice()` با آرگومانِ float یک `TypeError`
+     * می‌دهد و صفحه می‌میرد:
+     *
+     *     array_slice(): Argument #2 ($offset) must be of type int, float given
+     *
+     * یعنی یک دکمهٔ جعلیِ ساده کلِ فهرستِ سفارش‌ها را می‌شکند — و چون آپدیت
+     * برای تلاشِ مجدد پارک می‌شود، همان خطا بی‌نهایت تکرار می‌شود.
+     *
+     * این متد ورودی را به یک بازهٔ معقول می‌آورد تا هر مقدارِ دلبخواهی به
+     * «صفحهٔ صفر» تبدیل شود — کاربر چیزی از دست نمی‌دهد، فقط صفحهٔ اول را
+     * می‌بیند.
+     *
+     * @param array<string, mixed> $data
+     */
+    private function pageFrom(array $data): int
+    {
+        $raw = $data['page'] ?? 0;
+
+        if (is_bool($raw) || !is_scalar($raw)) {
+            return 0;
+        }
+
+        $digits = preg_replace('/\D/', '', Str::toEnglishDigits(trim((string) $raw))) ?? '';
+
+        if ($digits === '' || strlen($digits) > 4) {
+            // بیش از ۴ رقم یعنی قطعاً یک عددِ جعلی است (صفحٔ ۱۰٬۰۰۰ وجود ندارد).
+            return 0;
+        }
+
+        return max(0, min(999, (int) $digits));
+    }
 
     private function handleChannelGate(Update $update, int $chatId): void
     {
@@ -693,6 +817,28 @@ final class Kernel
             return;
         }
 
+        // انتقال مالکیت پنل: مرحلهٔ دوم (کاربرِ مقصد).
+        //
+        // دکمهٔ «🔄 انتقال» قبلاً پنل را به `user_id = 0` می‌داد که با کلیدِ
+        // خارجی می‌مرد و پنل یتیم می‌شد. حالا کاربرِ مقصد پرسیده و اعتبارسنجی
+        // می‌شود، پس این مرحله حیاتی است.
+        if ($isAdmin && ($state['step'] ?? '') === 'admin_panel_transfer') {
+            if ($update->command() === 'cancel' || $update->command() === 'start') {
+                $this->sessions->clear($telegramId);
+                $this->bot->sendMessage($chatId, '❌ لغو شد.');
+                return;
+            }
+
+            if ($text === '') {
+                $this->bot->sendMessage($chatId, '⚠️ آیدی عددی را بفرستید، یا /cancel را بزنید.');
+                return;
+            }
+
+            $this->sessions->clear($telegramId);
+            $this->adminController()->saveTransferOwnership($chatId, $telegramId, $update->text());
+            return;
+        }
+
         // مسیرهای نشستی: ثبت پنل («من پنل دارم») و ویرایش بسته
         if ($state !== null && $this->handleSessionState($update, $user, $state)) {
             return;
@@ -742,18 +888,31 @@ final class Kernel
             case 'start':
                 // لینک دعوت: /start R123 یا /start ref_R123
                 //
-                // پارامتر فقط وقتی پذیرفته می‌شود که شکل کد معرفی داشته باشد،
-                // وگرنه هر متنی بعد از /start (مثلاً /start foo) یک «معرفی
-                // نامعتبر» نشان می‌داد و کاربر گیج می‌شد.
+                // ⚠️ فقط **شکلِ کد معرفی** پذیرفته می‌شود (`R123` یا `ref_R123`).
+                //
+                // کاربر ممکن است تصادفی بنویسد `/start hello`؛ گفتنِ «کد معرفی
+                // نامعتبر» به چنین پیامی یعنی ربات به هر متنی جوابِ نامربوط
+                // می‌دهد و کاربر گیج می‌شود که چرا. ولی اگر کد **واقعاً** شبیه
+                // کدِ معرفی باشد، سکوت کردن هم بد است — کاربر فکر می‌کند ثبت شده.
                 $refParam = trim((string) $update->argument());
 
-                if ($refParam !== '') {
+                if ($refParam !== '' && preg_match('/^(ref_)?R\d+$/i', $refParam) === 1) {
                     $refParam = preg_replace('/^ref_/i', '', $refParam) ?? '';
 
                     $bind = $this->bindReferral($user, $refParam);
 
-                    if (($bind['ok'] ?? false) && ($bind['message'] ?? '') !== '') {
-                        $this->bot->sendMessage($chatId, Str::escape((string) $bind['message']));
+                    // ⭐️ پیام **همیشه** فرستاده می‌شود، چه ثبت شود چه نشود.
+                    //
+                    // قبلاً فقط حالتِ موفق پیام داشت. نتیجه: کاربری که لینکِ
+                    // خودش را باز می‌کند، یا کدِ ناموجود می‌زند، فقط منوی اصلی
+                    // می‌بیند و **فکر می‌کند ثبت شده** — و بعد کلافه می‌شود که
+                    // چرا تخفیفی نگرفت. سکوتِ یک عملِ عمدی، بدترین پاسخ است.
+                    //
+                    // و بدون `Str::escape`: متنِ پیام را خودِ ما با `<b>` ساخته‌ایم
+                    // و هیچ دادهِ کاربر در آن نیست. escape کردنش باعث می‌شد کاربر
+                    // به‌جای «۱۰٪» تگِ خامِ `&lt;b&gt;` را ببیند.
+                    if (($bind['message'] ?? '') !== '') {
+                        $this->bot->sendMessage($chatId, (string) $bind['message']);
                     }
                 }
 
@@ -762,10 +921,17 @@ final class Kernel
             case 'menu':
                 $this->sessions->clear($telegramId);
                 $name = (string) ($user['first_name'] ?? $user['username'] ?? 'دوست عزیز');
-                // کیبورد ثابتِ قدیمی (اگر از نسخهٔ قبلیِ ربات با همین اکانت مانده باشد)
-                // تا اینجا روی دستگاهِ مخاطب بوده و هرگز پاک نشده — با remove_keyboard حذف می‌شود.
+                // کیبوردِ ثابتِ شیشه‌ای کنار دکمه‌های اینلاین:
+                // این پیام دکمه‌های پایینی را می‌سازد، پیام منو دکمه‌های اینلاین را.
                 $this->bot->sendMessage($chatId, Text::welcome($name, $this->hasPanels($user)), [
-                    'reply_markup' => ['remove_keyboard' => true],
+                    'reply_markup' => [
+                        'keyboard' => [
+                            [['text' => '🏠 منوی اصلی'], ['text' => '🛒 فروشگاه']],
+                            [['text' => '👤 حساب من'], ['text' => '🎫 پشتیبانی']],
+                        ],
+                        'resize_keyboard' => true,
+                        'is_persistent'  => true,
+                    ],
                 ]);
                 $this->showMainMenu($chatId, $user, $isAdmin);
                 break;
@@ -822,8 +988,9 @@ final class Kernel
 
             case 'login':
                 // نگه‌داشته شده برای سازگاری با دکمه‌های قدیمی؛ اکنون همان
-                // جریان «من پنل دارم» است.
-                $this->panelCenter()->startSelfRegister($chatId, $telegramId);
+                // جریان کلید API است (ربات دیگر رمز نمی‌گیرد).
+                (new PanelConnectionManager($this->bot, $this->panels, $this->sessions, $this->injectedPanel))
+                    ->startApiKeyConnection($chatId, $telegramId);
                 break;
 
             case 'logout':
@@ -853,6 +1020,27 @@ final class Kernel
 
     private function handleMenuText(Update $update, array $user, bool $isAdmin, string $text): void
     {
+        // دکمه‌های ثابت (ردیفِ پایینِ صفحه) به همان مسیرهای ربات مپ می‌شوند
+        switch ($text) {
+            case '🏠 منوی اصلی':
+                $this->sessions->clear((int) $update->userId());
+                $this->showMainMenu((int) $update->chatId(), $user, $isAdmin);
+
+                return;
+            case '🛒 فروشگاه':
+                $this->showShop((int) $update->chatId(), $user, PackageRepository::KIND_AGENCY);
+
+                return;
+            case '👤 حساب من':
+                $this->showAccount((int) $update->chatId(), $user);
+
+                return;
+            case '🎫 پشتیبانی':
+                $this->supportCenter()->start((int) $update->chatId(), $user);
+
+                return;
+        }
+
         $this->bot->sendMessage((int) $update->chatId(), 'برای مشاهدهٔ گزینه‌ها روی دکمه‌های زیر بزنید 👇', [
             'reply_markup' => $this->bot->buildMarkup($this->mainMenuKeyboard($user, $isAdmin)),
         ]);
@@ -877,6 +1065,108 @@ final class Kernel
         $step       = (string) ($state['step'] ?? '');
 
         switch ($step) {
+            case 'admin_disk_quota':
+                $panelId = (int) ($state['panel_id'] ?? 0);
+
+                if ($update->command() === 'cancel' || $update->command() === 'start') {
+                    $this->sessions->clear($telegramId);
+                    $this->bot->sendMessage($chatId, '❌ لغو شد.');
+                    return true;
+                }
+
+                if ($text === '') {
+                    $this->bot->sendMessage($chatId, '⚠️ مقداری نفرستادید! دوباره بفرستید یا /cancel را بزنید.');
+                    return true;
+                }
+
+                // تبدیل مگابایت به بایت اگر با M یا MB تمام شده باشد
+                $text = strtoupper(trim($text));
+                $bytes = 0;
+                
+                if (preg_match('/^(\d+(?:\.\d+)?)\s*(MB|M)$/i', $text, $m)) {
+                    $bytes = (int) round((float) $m[1] * 1024 * 1024);
+                } elseif (preg_match('/^(\d+(?:\.\d+)?)\s*(TB|T)$/i', $text, $m)) {
+                    $bytes = (int) round((float) $m[1] * 1024 * 1024 * 1024 * 1024);
+                } elseif (preg_match('/^(\d+(?:\.\d+)?)\s*(GB|G)$/i', $text, $m)) {
+                    $bytes = (int) round((float) $m[1] * 1024 * 1024 * 1024);
+                } else {
+                    $bytes = (int) preg_replace('/\D/', '', $text);
+                }
+
+                // بررسی overflow: حداکثر ۱۰TB = 10995116277760 بایت
+                $maxBytes = 10 * 1024 * 1024 * 1024 * 1024;
+                
+                if ($bytes < 0 || $bytes > $maxBytes) {
+                    $this->bot->sendMessage($chatId, '⚠️ مقدار باید بین ۰ تا ۱۰ ترابایت باشد.');
+                    return true;
+                }
+
+                $this->sessions->clear($telegramId);
+                $this->adminController()->savePanelDiskQuota($chatId, $panelId, $bytes);
+                return true;
+
+            case 'panel.test.autodelete.set':
+                if ($update->command() === 'cancel' || $update->command() === 'start') {
+                    $this->sessions->clear($telegramId);
+                    $this->bot->sendMessage($chatId, '❌ لغو شد.');
+                    return true;
+                }
+
+                if ($text === '') {
+                    $this->bot->sendMessage($chatId, '⚠️ عدد ثانیه‌ای وارد نشده. لطفاً عدد بفرستید.');
+                    return true;
+                }
+
+                $configId = (int) ($state['config_id'] ?? 0);
+                $seconds  = (int) $text;
+
+                if ($seconds > 365 * 86400) {
+                    $this->bot->sendMessage($chatId, '⚠️ حداکثر زمان ۳۶۵ روز است.');
+                    return true;
+                }
+
+                if ($seconds <= 0) {
+                    $this->bot->sendMessage($chatId, '⚠️ زمان باید بیشتر از صفر باشد.');
+                    return true;
+                }
+
+                // رفع Race Condition: استفاده از transaction برای atomicity
+                try {
+                    $db = Db::instance();
+                    $db->transaction(function () use ($db, $configId, $seconds) {
+                        // بررسی کنتورل: آیا کانفیگ توسط کاربر دیگری تغییر نیافته؟
+                        $config = $db->fetchOne(
+                            'SELECT id, user_id, is_auto_delete FROM test_configs WHERE id = ?',
+                            [$configId]
+                        );
+                        
+                        if (!$config) {
+                            throw new \Exception('کانفیگ تست یافت نشد.');
+                        }
+                        
+                        // اگر قبلاً auto_delete فعال شده، دوباره set نشود
+                        if ((int) ($config['is_auto_delete'] ?? 0) === 1) {
+                            throw new \Exception('این کانفیگ قبلاً برای حذف خودکار تنظیم شده است.');
+                        }
+
+                        $this->testRepo->update($configId, [
+                            'is_auto_delete' => 1,
+                            'auto_delete_at' => time() + $seconds,
+                        ]);
+                    });
+                } catch (\Exception $e) {
+                    $this->bot->sendMessage($chatId, '⚠️ خطا: ' . $e->getMessage());
+                    return true;
+                }
+
+                $this->sessions->clear($telegramId);
+                $this->bot->sendMessage($chatId, '✅ زمان حذف خودکار ' . Str::faNumber($seconds / 86400) . ' روز تنظیم شد.', [
+                    'reply_markup' => $this->bot->buildMarkup(Keyboard::rows([
+                        Keyboard::back(BotApi::encodeData('panel.test.list'), '🧪 بازگشت به کانفیگ‌های تست'),
+                    ])),
+                ]);
+                return true;
+
             case 'coupon:apply':
                 if ($update->command() === 'cancel' || $update->command() === 'start') {
                     $this->sessions->clear($telegramId);
@@ -925,53 +1215,216 @@ final class Kernel
                 $this->supportCenter()->submit($chatId, $user, $category, $text, $ticketId);
                 return true;
 
-            case 'panel:username':
+            // ============ تنظیمات Pasargad ============
+            case 'admin_panel_base_url':
                 if ($update->command() === 'cancel' || $update->command() === 'start') {
                     $this->sessions->clear($telegramId);
                     $this->bot->sendMessage($chatId, '❌ لغو شد.');
                     return true;
                 }
 
-                $username = Str::toEnglishDigits(trim($text));
-
-                if (!Str::isValidPanelUsername($username)) {
-                    $this->bot->sendMessage($chatId, '⚠️ نام کاربری نامعتبر است. فقط حروف انگلیسی، عدد و _ مجاز است.');
+                $url = trim($text);
+                if (!str_starts_with($url, 'https://') && !str_starts_with($url, 'http://')) {
+                    $this->bot->sendMessage($chatId, '⚠️ باید با https:// یا http:// شروع شود.');
                     return true;
                 }
 
-                $this->panelCenter()->askPassword($chatId, $telegramId, $username);
-                return true;
-
-            case 'panel:password':
-                $password = $text;
-                $username = (string) ($state['username'] ?? '');
+                if ($url === '') {
+                    $this->bot->sendMessage($chatId, '⚠️ آدرس خالی نیست.');
+                    return true;
+                }
 
                 $this->sessions->clear($telegramId);
+                $settings = new \Pasargad\Store\Settings();
+                $settings->set('panel_base_url', $url);
+                $this->bot->sendMessage($chatId, '✅ آدرس پنل به‌روزرسانی شد (نیاز به restart ربات دارد).');
+                return true;
 
-                if ($password === '' || $username === '') {
-                    $this->bot->sendMessage($chatId, '❌ ثبت پنل ناموفق بود. دوباره تلاش کنید.');
+            // ⚠️ مراحل `admin_owner_username` و `admin_owner_password` حذف شدند.
+            //
+            // ربات دیگر رمز عبور نمی‌گیرد — حتی از مدیر خودش. به‌جایش فقط
+            // **کلید API** پذیرفته می‌شود. این پیام عمداً راهنمایی می‌کند تا
+            // رمزی که کاربر فرستاده بی‌صدا دور ریخته نشود.
+            case 'admin_owner_username':
+            case 'admin_owner_password':
+                $this->sessions->clear($telegramId);
+
+                $this->bot->sendMessage($chatId, implode("\n", [
+                    'ℹ️ ربات دیگر نام کاربری و رمز عبور نمی‌گیرد.',
+                    '',
+                    'برای ساخت «پنل نمایندگی» فقط **کلید API** لازم است.',
+                    'آن را از داخل پنل بسازید (Settings → API Keys) و در',
+                    '<code>config.php</code> مقدار <code>panel.api_key</code> را تنظیم کنید.',
+                ]), [
+                    'reply_markup' => $this->bot->buildMarkup(Keyboard::rows([
+                        [['text' => '⚙️ تنظیمات پنل', 'data' => BotApi::encodeData('admin.settings.panel')]],
+                        Keyboard::back('menu', '🔙 بازگشت'),
+                    ])),
+                ]);
+
+                return true;
+
+            // ---------------- ورودی‌های متنی پروفایل ----------------
+            //
+            // این قدم‌ها از دکمه‌های `profile:*` ساخته می‌شوند و پیام بعدی
+            // کاربر را به `UserProfile` می‌دهند.
+
+            case 'profile_name':
+                $this->sessions->clear($telegramId);
+                $this->userProfile()->handleNameChange($chatId, $telegramId, $text);
+                return true;
+
+            case 'profile_email':
+                $this->sessions->clear($telegramId);
+                $this->userProfile()->handleEmailChange($chatId, $telegramId, $text);
+                return true;
+
+            case 'profile_phone':
+                $this->sessions->clear($telegramId);
+                $this->userProfile()->handlePhoneChange($chatId, $telegramId, $text);
+                return true;
+
+            case 'admin_rep_role':
+                if ($update->command() === 'cancel' || $update->command() === 'start') {
+                    $this->sessions->clear($telegramId);
+                    $this->bot->sendMessage($chatId, '❌ لغو شد.');
                     return true;
                 }
 
-                // نکتهٔ حیاتی: نتیجه باید بررسی شود. finishSelfRegister روی
-                // خطا فقط آرایه برمی‌گرداند و پیامی نمی‌فرستد — پس اگر اینجا
-                // نتیجه نادیده گرفته شود، کاربر رمز اشتباه می‌فرستد و هیچ
-                // پاسخی نمی‌گیرد و فکر می‌کند ربات هنگ کرده است.
-                $result = $this->panelCenter()->finishSelfRegister($chatId, $user, $username, $password);
-
-                if (!($result['ok'] ?? false)) {
-                    // نتیجه ممکن است HTML آماده (مثل Text::loginFailed) یا متن
-                    // ساده باشد؛ BotApi خودش در صورت خطای parse به متن ساده
-                    // برمی‌گردد، پس اینجا escape نمی‌کنیم تا تگ‌ها خراب نشوند.
-                    $this->bot->sendMessage($chatId, (string) $result['message'], [
-                        'reply_markup' => $this->bot->buildMarkup(Keyboard::rows([
-                            [['text' => '🔁 تلاش مجدد', 'data' => BotApi::encodeData('panel.self')]],
-                            Keyboard::back('menu'),
-                        ])),
-                    ]);
+                $roleId = (int) Str::toEnglishDigits(trim($text));
+                if ($roleId < 0) {
+                    $this->bot->sendMessage($chatId, '⚠️ شناسهٔ نقش نمی‌تواند منفی باشد.');
+                    return true;
                 }
 
+                $this->sessions->clear($telegramId);
+                $settings = new \Pasargad\Store\Settings();
+                $settings->set('panel_rep_role', (string) $roleId);
+                $this->bot->sendMessage($chatId, '✅ نقش نماینده تنظیم شد: ' . ($roleId > 0 ? \Pasargad\Support\Str::faNumber($roleId) : 'خودکار'));
                 return true;
+
+            case 'admin_payment_card':
+                if ($update->command() === 'cancel' || $update->command() === 'start') {
+                    $this->sessions->clear($telegramId);
+                    $this->bot->sendMessage($chatId, '❌ لغو شد.');
+                    return true;
+                }
+
+                $card = preg_replace('/\D/', '', trim($text));
+                if (strlen($card) !== 16) {
+                    $this->bot->sendMessage($chatId, '⚠️ شماره کارت باید ۱۶ رقم باشد.');
+                    return true;
+                }
+
+                if (!Str::isValidCardNumber($card)) {
+                    $this->bot->sendMessage($chatId, '⚠️ شماره کارت معتبر نیست (فیلتر Luhn).');
+                    return true;
+                }
+
+                $this->sessions->clear($telegramId);
+                $settings = new \Pasargad\Store\Settings();
+                $settings->set('payment_card_number', $card);
+                $this->bot->sendMessage($chatId, '✅ شماره کارت ذخیره شد: ' . \Pasargad\Support\Str::maskCardNumber($card));
+                return true;
+
+            case 'admin_payment_owner':
+                if ($update->command() === 'cancel' || $update->command() === 'start') {
+                    $this->sessions->clear($telegramId);
+                    $this->bot->sendMessage($chatId, '❌ لغو شد.');
+                    return true;
+                }
+
+                $owner = trim($text);
+                if (strlen($owner) < 3) {
+                    $this->bot->sendMessage($chatId, '⚠️ نام صاحب کارت باید حداقل ۳ کاراکتر باشد.');
+                    return true;
+                }
+
+                $this->sessions->clear($telegramId);
+                $settings = new \Pasargad\Store\Settings();
+                $settings->set('payment_card_owner', $owner);
+                $this->bot->sendMessage($chatId, '✅ نام صاحب کارت ذخیره شد.');
+                return true;
+
+            case 'admin_payment_bank':
+                if ($update->command() === 'cancel' || $update->command() === 'start') {
+                    $this->sessions->clear($telegramId);
+                    $this->bot->sendMessage($chatId, '❌ لغو شد.');
+                    return true;
+                }
+
+                $bank = trim($text);
+                if (strlen($bank) < 2) {
+                    $this->bot->sendMessage($chatId, '⚠️ نام بانک باید حداقل ۲ کاراکتر باشد.');
+                    return true;
+                }
+
+                $this->sessions->clear($telegramId);
+                $settings = new \Pasargad\Store\Settings();
+                $settings->set('payment_card_bank', $bank);
+                $this->bot->sendMessage($chatId, '✅ نام بانک ذخیره شد.');
+                return true;
+
+            // ⚠️ مراحل `panel:username` و `panel:password` عمداً حذف شدند.
+            //
+            // جریان «من پنل دارم» قبلاً نام کاربری و رمز می‌گرفت؛ حالا همان دکمه
+            // به جریان کلید API می‌رود. اگر کسی وسطِ آن پیامی فرستاده باشد، با
+            // پیام روشن راهنمایی می‌شود که کلید را از کجا بفرستد — نه اینکه رمزش
+            // بی‌صدا دور ریخته شود.
+            case 'panel:username':
+            case 'panel:password':
+                $this->sessions->clear($telegramId);
+
+                $this->bot->sendMessage($chatId, implode("\n", [
+                    'ℹ️ ربات دیگر نام کاربری و رمز نمی‌گیرد.',
+                    '',
+                    'برای وصل کردن پنل، **کلید API** لازم است:',
+                    'داخل پنل → تنظیمات / API Keys → ساخت کلید جدید.',
+                    '',
+                    'بعد دکمهٔ «🔗 من پنل دارم» را بزنید.',
+                ]), [
+                    'reply_markup' => $this->bot->buildMarkup(Keyboard::rows([
+                        [['text' => '🔗 من پنل دارم', 'data' => BotApi::encodeData('panel.self')]],
+                        Keyboard::back('menu'),
+                    ])),
+                ]);
+
+                return true;
+
+
+            // ======== جریان اتصال پنل جدید (آدرس → کلید API) ========
+            //
+            // فقط دو مرحله دارد چون ربات دیگر نام کاربری و رمز نمی‌گیرد.
+            //
+            // این جریان بر پایهٔ `step` داخل نشست پیش می‌رود. هر مرحله نام
+            // ثابت خودش را دارد (`PanelConnectionManager::STEP_*`) و با ورودی
+            // نامعتبر عوض نمی‌شود تا کاربر بتواند بدون شروع از دوباره، همان
+            // مرحله را تکرار کند.
+            case PanelConnectionManager::STEP_URL:
+            case PanelConnectionManager::STEP_CREDENTIAL:
+                if ($update->command() === 'cancel' || $update->command() === 'start') {
+                    $this->sessions->clear($telegramId);
+                    $this->bot->sendMessage($chatId, '❌ لغو شد.');
+                    return true;
+                }
+
+                if ($text === '') {
+                    $this->bot->sendMessage($chatId, '⚠️ مقداری نفرستادید! دوباره بفرستید یا /cancel را بزنید.');
+                    return true;
+                }
+
+                $manager   = new PanelConnectionManager($this->bot, $this->panels, $this->sessions, $this->injectedPanel);
+                $panelStep = (string) ($state['step'] ?? '');
+
+                if ($panelStep === PanelConnectionManager::STEP_URL) {
+                    return $manager->handleBaseUrl($chatId, $telegramId, $text, $state);
+                }
+
+                // ورودی مصرف‌شده ⇒ نشست پاک می‌شود (چه موفق چه ناموفق) تا پیام
+                // بعدی دوباره به‌عنوان کلید تفسیر نشود.
+                $this->sessions->clear($telegramId);
+
+                return $manager->handleCredential($chatId, $telegramId, $text, $state, $user);
 
             default:
                 // نکتهٔ حیاتی: اینجا نباید نشست پاک شود.
@@ -1111,6 +1564,23 @@ final class Kernel
             return;
         }
 
+        // ---------------- تنظیمات کاربر ----------------
+        //
+        // ⚠️ این مسیر قبلاً اصلاً وجود نداشت، با اینکه دکمهٔ «⚙️ تنظیمات» در منوی
+        // اصلی بود. نتیجه‌اش این بود که کلیک روی دکمه فقط «این گزینه در دسترس
+        // نیست» می‌داد و کاربر فکر می‌کرد ربات خراب است.
+        if ($ns === 'settings') {
+            $this->bot->answerCallback($callbackId);
+            $this->userSettings()->showMenu($chatId, $user);
+            return;
+        }
+
+        if ($ns === 'settings.global') {
+            $this->bot->answerCallback($callbackId);
+            $this->userSettings()->showGlobalNote($chatId);
+            return;
+        }
+
         if ($ns === 'channel.recheck') {
             $this->channelGuard()->forget((int) $update->userId());
             $this->handleChannelGate($update, $chatId);
@@ -1144,7 +1614,59 @@ final class Kernel
 
         if ($ns === 'panel.self') {
             $this->bot->answerCallback($callbackId);
-            $this->panelCenter()->startSelfRegister($chatId, (int) $update->userId());
+
+            // ⚠️ این دکمه قبلاً جریان «نام کاربری + رمز» را شروع می‌کرد. حالا
+            // همان جریانِ **کلید API** را می‌رود، چون ربات دیگر رمز نمی‌گیرد.
+            // دکمه‌های قدیمی روی گوشی کاربران دست‌نخورده می‌مانند و کار می‌کنند.
+            (new PanelConnectionManager($this->bot, $this->panels, $this->sessions, $this->injectedPanel))
+                ->startApiKeyConnection($chatId, (int) $update->userId());
+
+            return;
+        }
+
+        // ---------------- اتصال پنل جدید ----------------
+        //
+        // این namespaceها عمداً `panel.*` هستند (نه `admin.*`)، چون نمایندهٔ
+        // عادی هم به آن‌ها دسترسی دارد. به همین دلیل اینجا مسیریابی می‌شوند تا
+        // از فیلتر «فقط سوپرادمین»ِ پایینِ همین متد رد شوند.
+        if (str_starts_with($ns, 'panel.connect')) {
+            $this->bot->answerCallback($callbackId);
+
+            $manager    = new PanelConnectionManager($this->bot, $this->panels, $this->sessions, $this->injectedPanel);
+            $telegramId = (int) $update->userId();
+
+            // شروع جریان (ساخت نشست + پرسیدن آدرس) داخل خودِ کلاس است تا
+            // Kernel مجبور نباشد ساختار نشست را دستی بازسازی کند — وگرنه هر
+            // دو طرف باید با هم هماهنگ بمانند.
+            switch ($ns) {
+                case 'panel.connect':
+                    $manager->showMenu($chatId);
+                    break;
+
+                // ⚠️ نام‌های قدیمیِ جریان (که روی گوشی کاربران از قبل هست) عمداً
+                // به مسیر کلید می‌روند، نه به خطا. پاسخ «در دسترس نیست» فقط
+                // سردرگمشان می‌کرد؛ این‌طوری همه یک راه دارند.
+                case 'panel.connect.password':
+                case 'panel.connect.keyandpass':
+                case 'panel.connect.apikey':
+                    $manager->startApiKeyConnection($chatId, $telegramId);
+                    break;
+
+                default:
+                    $this->bot->answerCallback($callbackId, 'این گزینه در دسترس نیست.');
+                    break;
+            }
+
+            return;
+        }
+
+        // فهرست پنل‌های خودِ کاربر (نه پنل‌های کل سامانه در پنل مدیریت).
+        if ($ns === 'panel.mine') {
+            $this->bot->answerCallback($callbackId);
+
+            (new PanelConnectionManager($this->bot, $this->panels, $this->sessions, $this->injectedPanel))
+                ->listUserPanels($chatId, (int) ($user['id'] ?? 0));
+
             return;
         }
 
@@ -1190,6 +1712,19 @@ final class Kernel
         if ($ns === 'referral.my') {
             $this->bot->answerCallback($callbackId);
             $this->showReferral($chatId, $user);
+            return;
+        }
+
+        // فهرست و جزئیاتِ دعوت‌شده‌ها — بخشِ «همکاری در فروش».
+        if ($ns === 'referral.list') {
+            $this->bot->answerCallback($callbackId);
+            $this->showReferralList($chatId, $user);
+            return;
+        }
+
+        if ($ns === 'referral.one') {
+            $this->bot->answerCallback($callbackId);
+            $this->showReferralOne($chatId, $user, (int) ($data['id'] ?? 0));
             return;
         }
 
@@ -1241,6 +1776,49 @@ final class Kernel
             return;
         }
 
+        // ----------------  تست کانفیگ / اشتراک ----------------
+        if ($ns === 'panel.test.autodelete.show') {
+            $this->bot->answerCallback($callbackId);
+            $this->panelCenter()->showTestAutoDelete($chatId, $user, (int) ($data['id'] ?? 0));
+            return;
+        }
+
+        if ($ns === 'panel.test.autodelete.toggle') {
+            $this->bot->answerCallback($callbackId);
+            $this->panelCenter()->handleTestAutoDeleteToggle($update, $user, (int) ($data['id'] ?? 0));
+            return;
+        }
+
+        if ($ns === 'panel.test.autodelete.set') {
+            $this->bot->answerCallback($callbackId);
+            $this->panelCenter()->handleTestAutoDeleteSet($update, $user, (int) ($data['id'] ?? 0));
+            return;
+        }
+
+        if ($ns === 'panel.test.autodelete.clear') {
+            $this->bot->answerCallback($callbackId);
+            $this->panelCenter()->handleTestAutoDeleteClear($update, $user, (int) ($data['id'] ?? 0));
+            return;
+        }
+
+        if ($ns === 'panel.subscribe') {
+            $this->bot->answerCallback($callbackId);
+            $this->panelCenter()->showSubscribe($chatId, $user, (int) ($data['id'] ?? 0));
+            return;
+        }
+
+        if ($ns === 'panel.subscribe.detail') {
+            $this->bot->answerCallback($callbackId);
+            $this->panelCenter()->showSubscribeDetail($chatId, $user, (int) ($data['id'] ?? 0));
+            return;
+        }
+
+        if ($ns === 'panel.subscribe.premium') {
+            $this->bot->answerCallback($callbackId, 'در حال خرید اشتراک premium...');
+            $this->panelCenter()->purchaseSubscribe($chatId, $user, (int) ($data['id'] ?? 0));
+            return;
+        }
+
         // ---------------- حساب / کیف پول / پرداخت‌ها ----------------
         if ($ns === 'user.account') {
             $this->bot->answerCallback($callbackId);
@@ -1266,6 +1844,162 @@ final class Kernel
             return;
         }
 
+        // ---------------- پروفایل کاربر ----------------
+        //
+        // `UserProfile` کامل نوشته شده بود ولی هیچ مسیری به آن نبود، پس همهٔ
+        // دکمه‌های `profile:*` به «این گزینه در دسترس نیست» می‌رسیدند.
+        // توجه: دکمه‌های این کلاس `data` خام دارند (نه JSON)، پس `$ns` از
+        // همان رشتهٔ خام پر می‌شود.
+
+        // ⚠️ هر دو شکل پذیرفته می‌شود.
+        //
+        // دکمه‌هایی که `UserProfile` می‌سازد `data` خام دارند (مثلاً
+        // `profile:menu`)، ولی دو جا در کد با نقطه ساخته شده‌اند
+        // (`UserSettings` و منوی اصلی). چون نقطه با دونقطه اشتباه گرفته می‌شد،
+        // کلیک روی «👤 پروفایل من» به «این گزینه در دسترس نیست» می‌رسید.
+        // پذیرفتن هر دو، این کلاسِ درگیرِ دوگانه را هم بی‌خطر می‌کند.
+        if ($ns === 'profile:menu' || $ns === 'profile.menu') {
+            $this->bot->answerCallback($callbackId);
+            $this->userProfile()->showMenu($chatId, (int) $update->userId());
+            return;
+        }
+
+        if ($ns === 'profile:edit_name') {
+            $this->bot->answerCallback($callbackId);
+            $this->userProfile()->showEditName($chatId, (int) $update->userId());
+            $this->sessions->set((int) $update->userId(), ['step' => 'profile_name']);
+            return;
+        }
+
+        if ($ns === 'profile:change_password') {
+            $this->bot->answerCallback($callbackId);
+            $this->userProfile()->showChangePassword($chatId, (int) $update->userId());
+            return;
+        }
+
+        if ($ns === 'profile:language') {
+            $this->bot->answerCallback($callbackId);
+            $this->userProfile()->showLanguageSelection($chatId);
+            return;
+        }
+
+        if ($ns === 'profile:lang_fa' || $ns === 'profile:lang_en') {
+            $this->bot->answerCallback($callbackId);
+            $this->userProfile()->handleLanguageChange(
+                $chatId,
+                (int) $update->userId(),
+                $ns === 'profile:lang_fa' ? 'fa' : 'en'
+            );
+            return;
+        }
+
+        if ($ns === 'profile:contact') {
+            $this->bot->answerCallback($callbackId);
+            $this->userProfile()->showContactEditor($chatId, (int) $update->userId());
+            return;
+        }
+
+        if ($ns === 'profile:edit_email') {
+            $this->bot->answerCallback($callbackId);
+            $this->userProfile()->showEditEmail($chatId);
+            $this->sessions->set((int) $update->userId(), ['step' => 'profile_email']);
+            return;
+        }
+
+        if ($ns === 'profile:edit_phone') {
+            $this->bot->answerCallback($callbackId);
+            $this->userProfile()->showEditPhone($chatId);
+            $this->sessions->set((int) $update->userId(), ['step' => 'profile_phone']);
+            return;
+        }
+
+        // ---------------- داشبورد مدیریتی ----------------
+        //
+        // `AdminDashboard` هم کامل بود و هم بی‌مسیر. دکمه‌هایش `admin:` دارند
+        // (با دونقطه) پس زیر شرط `str_starts_with($ns, 'admin.')` نمی‌افتند و
+        // باید اینجا و قبل از آن شرط بررسی شوند.
+
+        if ($ns === 'admin:dashboard') {
+            $this->bot->answerCallback($callbackId);
+            $this->adminDashboard()->showDashboard($chatId);
+            return;
+        }
+
+        if ($isAdmin && $ns === 'admin:chart') {
+            $this->bot->answerCallback($callbackId);
+            $this->adminDashboard()->showRevenueChart($chatId);
+            return;
+        }
+
+        if ($isAdmin && $ns === 'admin:activity') {
+            $this->bot->answerCallback($callbackId);
+            $this->adminDashboard()->showActivityLog($chatId);
+            return;
+        }
+
+        if ($isAdmin && $ns === 'admin:reconcile') {
+            $this->bot->answerCallback($callbackId);
+            $this->adminDashboard()->showReconciliation($chatId);
+            return;
+        }
+
+        if ($isAdmin && $ns === 'admin:sync_status') {
+            $this->bot->answerCallback($callbackId);
+            $this->adminDashboard()->showSyncStatus($chatId);
+            return;
+        }
+
+        // `UserProfile` و `AdminDashboard` هر دو «بازگشت» را با همین نام می‌فرستند.
+        if ($ns === 'main_menu') {
+            $this->bot->answerCallback($callbackId);
+            $this->showMainMenu($chatId, $user, $isAdmin);
+            return;
+        }
+
+        // ---------------- دکمه‌های باقی‌ماندهٔ FullMenu ----------------
+        //
+        // `FullMenu` هشت متد دارد که هیچ‌جا صدا زده نمی‌شوند؛ چهارتای
+        // اول هر کدام یک namespace بدون مسیر می‌فرستاد. به صفحه‌های
+        // موجود وصل شدند تا دکمه‌هایشان هم کار کنند.
+
+        if ($ns === 'wallet.deposit') {
+            $this->bot->answerCallback($callbackId);
+            $this->showWallet($chatId, $user);
+            return;
+        }
+
+        if ($ns === 'setting.language') {
+            $this->bot->answerCallback($callbackId);
+            $this->userProfile()->showLanguageSelection($chatId);
+            return;
+        }
+
+        if ($ns === 'setting.notifications') {
+            $this->bot->answerCallback($callbackId);
+            $this->showNotificationSettings($chatId, $user);
+            return;
+        }
+
+        if ($ns === 'setting.payment') {
+            $this->bot->answerCallback($callbackId);
+            $this->showPaymentInfo($chatId);
+            return;
+        }
+
+        if ($ns === 'setting.notifications.toggle') {
+            $this->bot->answerCallback($callbackId);
+
+            $fresh  = $this->users->findById((int) $user['id']) ?? $user;
+            $column = ($data['c'] ?? 'notifications_enabled') === 'digest_emails'
+                ? 'digest_emails'
+                : 'notifications_enabled';
+            $current = (int) ($fresh[$column] ?? 0);
+            $this->users->updateField((int) $fresh['id'], $column, $current === 1 ? 0 : 1);
+
+            $this->showNotificationSettings($chatId, $user);
+            return;
+        }
+
         // ---------------- فروشگاه ----------------
         if ($ns === 'shop') {
             $this->bot->answerCallback($callbackId);
@@ -1281,20 +2015,54 @@ final class Kernel
 
         if ($ns === 'pkg.buy') {
             $this->bot->answerCallback($callbackId);
-            $this->createOrder($chatId, $user, (int) ($data['id'] ?? 0), (int) ($data['p'] ?? 0));
+            $this->createOrder($chatId, $user, (int) ($data['id'] ?? 0), (int) ($data['p'] ?? 0), (int) ($data['d'] ?? 0));
             return;
         }
 
         if ($ns === 'pay') {
             $this->bot->answerCallback($callbackId);
-            $this->startPayment($chatId, $user, (int) ($data['id'] ?? 0), (string) ($data['m'] ?? ''));
+
+            $method = (string) ($data['m'] ?? '');
+            $orderId = (int) ($data['id'] ?? 0);
+
+            // ⭐️ کیف پول یک «درگاه» نیست؛ هیچ سرویس بیرونی ای در کار نیست.
+            // پس **قبل** از رسیدن به PaymentService جدا شود — وگرنه دنبالِ
+            // درگاهی به نام `wallet_balance` می‌گردد و کاربر خطای مبهم می‌بیند.
+            if ($method === self::METHOD_WALLET) {
+                $order = $this->orders->findForUser($orderId, (int) $user['id']);
+
+                if ($order === null) {
+                    $this->bot->sendMessage($chatId, Text::notFound());
+                    return;
+                }
+
+                $this->payWithWallet($chatId, $user, $order);
+                return;
+            }
+
+            $this->startPayment($chatId, $user, $orderId, $method);
+            return;
+        }
+
+        // «روش‌های دیگر» — برگشت به صفحهٔ انتخاب روش پرداخت بدون از دست دادن
+        // سفارش (کاربر پولش را از دست نداده، فقط باید راه دیگری انتخاب کند).
+        if ($ns === 'pay.again') {
+            $this->bot->answerCallback($callbackId);
+            $order = $this->orders->findForUser((int) ($data['id'] ?? 0), (int) $user['id']);
+
+            if ($order === null) {
+                $this->bot->sendMessage($chatId, Text::notFound());
+                return;
+            }
+
+            $this->showPaymentMethods($chatId, $order, []);
             return;
         }
 
         // ---------------- سفارش‌ها ----------------
         if ($ns === 'order.list' || $ns === 'orders') {
             $this->bot->answerCallback($callbackId);
-            $this->showOrders($chatId, $user, (int) ($data['page'] ?? 0));
+            $this->showOrders($chatId, $user, $this->pageFrom($data));
             return;
         }
 
@@ -1333,13 +2101,13 @@ final class Kernel
 
     private function showMainMenu(int $chatId, array $user, bool $isAdmin, bool $force = false): void
     {
-        $hasPanels = $this->hasPanels($user);
+        // غنی‌سازی داده کاربر برای منوی زیبا
+        $user['panel_count']   = count($this->panels->listByUser((int) ($user['id'] ?? 0)));
+        $user['wallet_balance'] = (int) ($user['wallet_balance'] ?? 0);
+        $user['loyalty_points'] = (int) ($user['loyalty_points'] ?? 0);
 
-        $this->bot->sendMessage(
-            $chatId,
-            Text::mainMenu($isAdmin, $hasPanels, $this->settings->bool(Settings::SHOP_OPENED, true)),
-            ['reply_markup' => $this->bot->buildMarkup($this->mainMenuKeyboard($user, $isAdmin))]
-        );
+        $fullMenu = new \Pasargad\Bot\FullMenu($this->bot);
+        $fullMenu->mainMenu($chatId, $user, $isAdmin);
     }
 
     /**
@@ -1400,6 +2168,11 @@ final class Kernel
                 ['text' => '📋 تیکت‌های من', 'data' => BotApi::encodeData('ticket.list')],
             ];
         }
+
+        // دکمهٔ Mini App روی منوی اصلی ربات هم هست تا کاربر از داخل چت
+        // (جایی که اکثر تعامل‌ها اتفاق می‌افتد) بتواند وارد اپ شود.
+        $webApp = new \Pasargad\Bot\FullMenu($this->bot);
+        $rows   = array_merge($rows, $webApp->webAppRows());
 
         if ($isAdmin) {
             $rows[] = [['text' => '🛠✨ پنل مدیریت', 'data' => BotApi::encodeData('admin.home')]];
@@ -1483,6 +2256,70 @@ final class Kernel
                     ['text' => '💳📊 تاریخچه پرداخت‌ها', 'data' => BotApi::encodeData('user.payments')],
                 ],
                 Keyboard::back('menu', '🔙 بازگشت به منوی اصلی 🏠'),
+            ])),
+        ]);
+    }
+
+    /**
+     * 🔔 تنظیم اعلان‌ها.
+     *
+     * @param array<string, mixed> $user
+     */
+    private function showNotificationSettings(int $chatId, array $user): void
+    {
+        $fresh = $this->users->findById((int) $user['id']) ?? $user;
+
+        $on  = (int) ($fresh['notifications_enabled'] ?? 1) === 1;
+        $dig = (int) ($fresh['digest_emails'] ?? 0) === 1;
+
+        $this->bot->sendMessage($chatId, implode("\n", [
+            '🔔 <b>تنظیمات اعلان</b>',
+            '',
+            '• اعلان‌های ربات: ' . ($on ? '✅ روشن' : '❌ خاموش'),
+            '• دیجیتال وقت: ' . ($dig ? '✅ روشن' : '❌ خاموش'),
+            '',
+            'اعلان‌های مربوط به انقضای حجم، پایان اعتبار و سفارش‌ها ارسال می‌شوند '
+                . 'و با خاموش کردنشان دیگر نرسند.',
+        ]), [
+            'reply_markup' => $this->bot->buildMarkup(Keyboard::rows([
+                [[
+                    'text' => ($on ? '🔕 خاموش کردن اعلان‌ها' : '🔔 روشن کردن اعلان‌ها'),
+                    'data' => BotApi::encodeData('setting.notifications.toggle', ['c' => 'notifications_enabled']),
+                ]],
+                [[
+                    'text' => ($dig ? '📭 خاموش کردن دیجیتال وقت' : '📬 روشن کردن دیجیتال وقت'),
+                    'data' => BotApi::encodeData('setting.notifications.toggle', ['c' => 'digest_emails']),
+                ]],
+                [['text' => '👤 پروفایل من', 'data' => BotApi::encodeData('profile.menu')]],
+                Keyboard::back('settings', '⬅️ بازگشت به تنظیمات'),
+            ])),
+        ]);
+    }
+
+    /**
+     * 💳 روش‌های پرداختی که فروشگاه پشتیبانی می‌کند.
+     *
+     * اسمش `showPaymentInfo` است چون `showPaymentMethods()` از قبل برای
+     * صفحهٔ پرداختِ یک سفارش خاص وجود دارد.
+     */
+    private function showPaymentInfo(int $chatId): void
+    {
+        $this->bot->sendMessage($chatId, implode("\n", [
+            '💳 <b>روش‌های پرداخت</b>',
+            '',
+            'پرداخت از داخل ربات انجام می‌شود:',
+            '۱) بسته را از فروشگاه انتخاب کنید',
+            '۲) دکمهٔ پرداخت را بزنید',
+            '۳) مبلغ را کارت‌به‌کارت یا از درگاه بپردازید',
+            '',
+            '📸 رسید را به ربات بفرستید تا سفارش بررسی و اجرا شود.',
+            '',
+            '💡 اگر کیف پولتان شارژ باشد، مبلغ مستقیم از آن کسر می‌شود.',
+        ]), [
+            'reply_markup' => $this->bot->buildMarkup(Keyboard::rows([
+                [['text' => '🛒 رفتن به فروشگاه', 'data' => BotApi::encodeData('shop', ['kind' => PackageRepository::KIND_AGENCY])]],
+                [['text' => '💰 کیف پول من', 'data' => BotApi::encodeData('user.wallet')]],
+                Keyboard::back('settings', '⬅️ بازگشت به تنظیمات'),
             ])),
         ]);
     }
@@ -1699,10 +2536,19 @@ final class Kernel
             }
         }
 
-        $keyboard = [[[
-            'text' => '🛒 خرید این بسته',
-            'data' => BotApi::encodeData('pkg.buy', ['id' => $packageId, 'p' => $panelId]),
-        ]]];
+        $periods = PackageRepository::periodOptions($package);
+        $keyboard = [];
+
+        foreach ($periods as $period) {
+            $label = '🛒 خرید این بسته';
+            if (count($periods) > 1) {
+                $label .= ' — ' . $period['duration_days'] . ' روزه • ' . Str::formatToman($period['price_toman']);
+            }
+            $keyboard[] = [[
+                'text' => $label,
+                'data' => BotApi::encodeData('pkg.buy', ['id' => $packageId, 'p' => $panelId, 'd' => $period['duration_days']]),
+            ]];
+        }
 
         if ($kind === PackageRepository::KIND_TOPUP && $panelId > 0) {
             $target  = $this->panels->find($panelId);
@@ -1888,32 +2734,260 @@ final class Kernel
 
         $summary = $this->discounts()->referralSummary((int) $user['id']);
         $percent = max(0, min(100, (int) $this->settings->int(Settings::REFERRAL_DISCOUNT, 10)));
-        $botName = Config::str('bot_username', '');
+        $botName = ltrim(Config::str('bot_username', ''), '@');
+        $balance = $this->users->walletBalance((int) $user['id']);
+
+        // مدل دوم — کمیسیونِ درصدیِ خریدهای بعدی.
+        $policy = is_array($summary['policy'] ?? null) ? $summary['policy'] : [];
+        $commOn = !empty($policy['enabled']);
+
+        $inviteLink = $botName !== ''
+            ? 'https://t.me/' . $botName . '?start=' . $summary['code']
+            : '';
 
         $lines = [
-            '🎁✨ <b>دعوت دوست به ربات</b>',
+            '🤝✨ <b>همکاری در فروش</b>',
             '',
-            '🔗 کد شما: <code>' . Str::escape($summary['code']) . '</code>',
+            'دوستانتان را دعوت کنید؛ هر خریدِ موفقشان کیف پول شما را پر می‌کند.',
+            '',
+            '🔗 <b>کد شما:</b> <code>' . Str::escape((string) $summary['code']) . '</code>',
         ];
 
-        if ($botName !== '') {
-            $lines[] = '';
-            $lines[] = '📣 لینک دعوت:';
-            $lines[] = '<code>' . Str::escape('https://t.me/' . $botName . '?start=' . $summary['code']) . '</code>';
+        if ($inviteLink !== '') {
+            $lines[] = '<code>' . Str::escape($inviteLink) . '</code>';
         }
 
         $lines[] = '';
-        $lines[] = '👥 دعوت‌شده‌ها: <b>' . Str::faNumber($summary['invited']) . '</b>';
-        $lines[] = '✅ پاداش داده‌شده: <b>' . Str::faNumber($summary['rewarded']) . '</b>';
+        $lines[] = '📊 <b>آمار شما</b>';
+        $lines[] = '👥 دعوت‌شده‌ها: <b>' . Str::faNumber((int) $summary['invited']) . '</b>';
+
+        if ((int) $summary['invited'] > 0) {
+            $lines[] = '🛒 خرید کرده‌اند: <b>' . Str::faNumber((int) $summary['paid']) . '</b>';
+        }
+
+        $lines[] = '🎁 پاداش گرفته‌اید: <b>' . Str::faNumber((int) $summary['rewarded']) . '</b>';
+        $lines[] = '💰 پاداش اولیه: <b>' . Str::formatToman((int) $summary['earned']) . '</b>';
+
+        // ⭐️ درآمدِ کمیسیون **جدا** از پاداش اولیه نشان داده می‌شود. قاطی کردنشان
+        // باعث می‌شود کاربر فکر کند پاداشِ اولیه‌اش بزرگ‌تر شده، در حالی که فقط
+        // یک منبعِ درآمدِ جدید اضافه شده — و نتواند بفهمد کدام تنظیم روی آن اثر
+        // دارد.
+        if ($commOn) {
+            $lines[] = '💸 کمیسیون فروش: <b>' . Str::formatToman((int) ($summary['commission'] ?? 0)) . '</b>'
+                . ' <i>(' . Str::faNumber((int) ($summary['commission_cnt'] ?? 0)) . ' خرید)</i>';
+        }
+
+        $lines[] = '👛 موجودی کیف پول: <b>' . Str::formatToman($balance) . '</b>';
+
         $lines[] = '';
         $lines[] = '🎉 دوست شما با این کد <b>' . Str::faNumber($percent) . '٪</b> تخفیف می‌گیرد.';
-        $lines[] = '💰 شما به ازای هر خرید موفق او <b>' . Str::formatToman($summary['bonus_each'])
-            . '</b> پاداش می‌گیرید (به کیف پولتان اضافه می‌شود).';
+        $lines[] = '💰 به ازای <b>اولین</b> خریدِ موفقِ او <b>' . Str::formatToman((int) $summary['bonus_each'])
+            . '</b> به کیف پول شما اضافه می‌شود.';
+
+        if ($commOn) {
+            // ⭐️ سقف عمداً «تا N خرید» نوشته می‌شود نه «نامحدود». اگر ادمان
+            // سقف را بعداً کم کند، عددِ نمایش‌داده‌شده همان لحظه درست می‌شود؛
+            // کاربر غافلگیر نمی‌شود که چرا کمیسیون قطع شد.
+            $lines[] = '💸 از <b>دومین</b> خریدِ او به بعد: <b>'
+                . Str::faNumber((int) $policy['percent']) . '٪</b> از مبلغ خرید،'
+                . ' تا سقفِ <b>' . Str::faNumber((int) $policy['max_orders']) . ' خرید</b> برای هر دوست.';
+        }
+
+        $keyboard = [];
+
+        if ($inviteLink !== '') {
+            // دکمهٔ اشتراک‌گذاریِ خودِ تلگرام: کاربر می‌تواند لینک را در هر
+            // گفتگویی بفرستد. بدون این، مجبور است لینک را کپی کند — که در عمل
+            // یعنی یک مانع اضافه بین «خواندم پیام» و «فرستادم».
+            $keyboard[] = [[
+                'text' => '📤 دعوت دوستان',
+                'url'  => 'https://t.me/share/url?url=' . rawurlencode($inviteLink)
+                    . '&text=' . rawurlencode('با این ربات فروش پنل نمایندگی بگیر! 🎁'),
+            ]];
+        }
+
+        $list = is_array($summary['list'] ?? null) ? $summary['list'] : [];
+
+        if ($list !== []) {
+            $keyboard[] = [[
+                'text' => '👥 دعوت‌شده‌های من',
+                'data' => BotApi::encodeData('referral.list'),
+            ]];
+        }
+
+        $keyboard[] = [['text' => '👛 کیف پول من', 'data' => BotApi::encodeData('user.wallet')]];
+        $keyboard[] = Keyboard::back('menu');
+
+        $this->bot->sendMessage($chatId, implode("\n", $lines), [
+            'reply_markup' => $this->bot->buildMarkup(Keyboard::rows($keyboard)),
+        ]);
+    }
+
+    /**
+     * فهرست دعوت‌شده‌ها با وضعیت خریدِ هرکدام.
+     *
+     * این صفحه چیزی است که «همکاری در فروش» را از یک عددِ بی‌استفاده به ابزارِ
+     * واقعی تبدیل می‌کند: کاربر می‌بیند چه کسی ثبت‌نام کرده، چه کسی خرید کرده
+     * و کجا پاداش گرفته.
+     */
+    private function showReferralList(int $chatId, array $user): void
+    {
+        if (!$this->flags->isReferralEnabled()) {
+            $this->bot->sendMessage($chatId, '🎁 سیستم معرفی موقتاً غیرفعال است. 😴');
+            return;
+        }
+
+        $summary = $this->discounts()->referralSummary((int) $user['id']);
+        $list    = is_array($summary['list'] ?? null) ? $summary['list'] : [];
+
+        if ($list === []) {
+            $this->bot->sendMessage($chatId, implode("\n", [
+                '👥 <b>هنوز کسی را دعوت نکرده‌اید</b>',
+                '',
+                'لینک دعوت را برای دوستانتان بفرستید. هر خریدِ موفقشان به کیف',
+                'پول شما اضافه می‌شود. 🎁',
+            ]), [
+                'reply_markup' => $this->bot->buildMarkup(Keyboard::rows([
+                    Keyboard::back(BotApi::encodeData('referral.my'), '🔙 بازگشت'),
+                ])),
+            ]);
+
+            return;
+        }
+
+        $lines    = ['👥 <b>دعوت‌شده‌های من</b>', ''];
+        $keyboard = [];
+
+        foreach (array_slice($list, 0, 20) as $row) {
+            $name = trim((string) ($row['first_name'] ?? ''));
+
+            if ($name === '') {
+                $name = 'کاربر #' . (int) ($row['telegram_id'] ?? 0);
+            }
+
+            $lines[] = '• <b>' . Str::escape($name) . '</b>';
+
+            if (!empty($row['is_paid'])) {
+                $lines[] = '   🛒 خرید کرده — ' . Str::formatToman((int) ($row['orders_total'] ?? 0));
+            } else {
+                // ⭐️ این پیامِ «هنوز نخریده» عمداً صریح است: بدون آن کاربر
+                // نمی‌داند چرا پاداشی نگرفته و فکر می‌کند سیستم خراب است.
+                $lines[] = '   ⏳ هنوز خرید نکرده';
+            }
+
+            if (!empty($row['reward_given'])) {
+                $lines[] = '   🎁 پاداش ' . Str::formatToman((int) ($row['bonus_toman'] ?? 0)) . ' گرفته شد';
+            } elseif (!empty($row['is_paid'])) {
+                $lines[] = '   ⏳ پاداش در کرون بعدی داده می‌شود';
+            }
+
+            // ⭐️ کمیسیون جدا از پاداش اولیه نشان داده می‌شود تا کاربر بداند این
+            // دوست «تا الان چقدر ارزشِ معرفی داشته» — همان چیزی که تصمیمِ
+            // «به او بیشتر پیگیری کنم یا نه» را می‌سازد.
+            $comm = (int) ($row['commission_toman'] ?? 0);
+
+            if ($comm > 0) {
+                $lines[] = '   💸 کمیسیون: ' . Str::formatToman($comm)
+                    . ' از ' . Str::faNumber((int) ($row['commission_orders'] ?? 0)) . ' خرید';
+            }
+
+            $keyboard[] = [[
+                'text' => (empty($row['is_paid']) ? '⏳ ' : '✅ ') . Str::truncate($name, 24),
+                'data' => BotApi::encodeData('referral.one', ['id' => (int) $row['id']]),
+            ]];
+        }
+
+        if (count($list) > 20) {
+            $lines[] = '';
+            $lines[] = '… و ' . Str::faNumber(count($list) - 20) . ' نفر دیگر';
+        }
+
+        $keyboard[] = Keyboard::back(BotApi::encodeData('referral.my'), '🔙 بازگشت');
+
+        $this->bot->sendMessage($chatId, implode("\n", $lines), [
+            'reply_markup' => $this->bot->buildMarkup(Keyboard::rows($keyboard)),
+        ]);
+    }
+
+    /**
+     * جزئیاتِ یک دعوت.
+     *
+     * ⚠️ مالکیت بررسی می‌شود: شناسهٔ دعوت داخل `callback_data` است و هر کاربری
+     * می‌تواند عدد دلخواه بفرستد. بدون این بررسی، هرکسی می‌توانست آمارِ دعوتِ
+     * دیگران را ببیند.
+     */
+    private function showReferralOne(int $chatId, array $user, int $referralId): void
+    {
+        $row = $this->discounts()->referrals()->findById($referralId);
+
+        if ($row === null || (int) $row['referrer_user_id'] !== (int) $user['id']) {
+            $this->bot->sendMessage($chatId, Text::notFound());
+            return;
+        }
+
+        $name = trim((string) ($row['first_name'] ?? ''));
+
+        if ($name === '') {
+            $name = 'کاربر #' . (int) ($row['telegram_id'] ?? 0);
+        }
+
+        $lines = [
+            '👤 <b>' . Str::escape($name) . '</b>',
+            '',
+            '📅 تاریخ دعوت: ' . Str::date((int) $row['created_at']),
+            '🎁 پاداش هر خرید: ' . Str::formatToman((int) ($row['bonus_toman'] ?? 0)),
+        ];
+
+        if ($row['rewarded_at'] !== null) {
+            $lines[] = '✅ پاداش داده شده در ' . Str::date((int) $row['rewarded_at']);
+        } else {
+            $lines[] = '⏳ هنوز پاداشی داده نشده (بعد از اولین خریدِ موفق)';
+        }
+
+        $slate = (int) ($row['slate_bonus_toman'] ?? 0);
+
+        if ($slate > 0) {
+            $lines[] = '💎 پاداش اسلات: ' . Str::formatToman($slate);
+        }
+
+        // ------------------------------------------------------------------
+        // کمیسیونِ مدل دوم — با وضعیتِ سقف
+        // ------------------------------------------------------------------
+        //
+        // ⭐️ فقط وقتی این بخش نشان داده می‌شود که کمیسیون **واقعاً روشن** باشد.
+        // اگر ادمین درصد را گذاشته ولی سقف را نه، نوشتنِ «۵٪ کمیسیون» اینجا
+        // یعنی وعدهٔ پولی که هرگز پرداخت نمی‌شود.
+        $policy = $this->discounts()->commissionPolicy();
+        $comm   = $this->discounts()->referrals()->commissionStatsFor((int) $user['id']);
+        $mine   = $comm['per_referral'][$referralId] ?? null;
+
+        $lines[] = '';
+
+        if (!empty($policy['enabled'])) {
+            $lines[] = '💸 <b>کمیسیون خریدهای بعدی</b>: <b>'
+                . Str::faNumber((int) $policy['percent']) . '٪</b>'
+                . ' تا سقفِ <b>' . Str::faNumber((int) $policy['max_orders']) . ' خرید</b>';
+
+            $lines[] = (int) ($mine['total'] ?? 0) > 0
+                ? '💸 کمیسیونِ دریافتی از این دوست: <b>'
+                    . Str::formatToman((int) $mine['total']) . '</b> از '
+                    . Str::faNumber((int) $mine['orders']) . ' خرید'
+                : '💸 هنوز کمیسیونی از خریدهای بعدیِ او نگرفته‌اید.';
+
+            $used    = (int) ($mine['orders'] ?? 0);
+            $room    = max(0, (int) $policy['max_orders'] - $used);
+
+            $lines[] = $room > 0
+                ? '   <i>تا سقف، ' . Str::faNumber($room) . ' خریدِ دیگر از این دوست کمیسیون می‌دهد.</i>'
+                : '   <i>سقفِ کمیسیونِ این دوست پر شده است.</i>';
+        } elseif ((int) $policy['percent'] > 0) {
+            // نیمه‌تنظیم: ادمین درصد را گذاشته ولی سقف را نه.
+            $lines[] = '💸 کمیسیون خریدهای بعدی: <i>فعلاً خاموش است</i>';
+        }
 
         $this->bot->sendMessage($chatId, implode("\n", $lines), [
             'reply_markup' => $this->bot->buildMarkup(Keyboard::rows([
-                [['text' => '👛 کیف پول من', 'data' => BotApi::encodeData('user.wallet')]],
-                Keyboard::back('menu'),
+                Keyboard::back(BotApi::encodeData('referral.list'), '🔙 بازگشت به فهرست'),
             ])),
         ]);
     }
@@ -1926,10 +3000,18 @@ final class Kernel
      */
     public function bindReferral(array $user, string $code): array
     {
-        $none = ['ok' => false, 'referrer' => null, 'message' => ''];
+        if (!$this->flags->isReferralEnabled()) {
+            // پیام دارد: کاربری که لینکِ دعوت را باز کرده باید بفهمد چرا
+            // چیزی ثبت نشد، وگرنه فکر می‌کند لینک خراب است.
+            return [
+                'ok'       => false,
+                'referrer' => null,
+                'message'  => 'سیستم معرفی در حال حاضر غیرفعال است. 😴',
+            ];
+        }
 
-        if (!$this->flags->isReferralEnabled() || trim($code) === '') {
-            return $none;
+        if (trim($code) === '') {
+            return ['ok' => false, 'referrer' => null, 'message' => ''];
         }
 
         $referrer = $this->discounts()->referrals()->findReferrerByCode($code);
@@ -1965,7 +3047,7 @@ final class Kernel
      *
      * @param  array<string, mixed> $user
      */
-    private function createOrder(int $chatId, array $user, int $packageId, int $panelId = 0): void
+    private function createOrder(int $chatId, array $user, int $packageId, int $panelId = 0, int $periodDays = 0): void
     {
         if (!$this->shopIsOpen()) {
             $this->bot->sendMessage($chatId, Text::shopClosed());
@@ -1979,6 +3061,55 @@ final class Kernel
             return;
         }
 
+        // ------------------------------------------------------------------
+        // مدت/قیمتِ انتخابی
+        //
+        // ⚠️ چرا «ناشناخته» یعنی رد کردن، نه «بی‌خیال شدن»:
+        //
+        // `d` داخل `callback_data` است و کاربر می‌تواند هر عددی بفرستد. قبلاً اگر
+        // عدد با هیچ گزینه‌ای نمی‌خواند، بی‌صدا نادیده گرفته می‌شد و سفارش با
+        // **قیمتِ پیش‌فرضِ بسته** ساخته می‌شد.
+        //
+        // یعنی دکمه‌ای که رویش نوشته «۹۰ روزه • ۵۰۰ هزار» می‌توانست سفارشی با قیمتِ
+        // گزینهٔ ۳۰ روزه بسازد. کاربر فکر می‌کند گزینهٔ ۹۰ روزه را خریده و مبلغِ
+        // دیگری از او گرفته می‌شود — بدترین نوعِ باگِ مالی: بی‌صدا.
+        //
+        // پس: نبودنِ `d` یعنی «پیش‌فرض»؛ `d`ِ ناشناخته یعنی «اشتباه» و باید گفته شود.
+        // ------------------------------------------------------------------
+        if ($periodDays !== 0) {
+            $matched = false;
+
+            foreach (PackageRepository::periodOptions($package) as $opt) {
+                if ((int) $opt['duration_days'] === $periodDays) {
+                    $package['duration_days'] = (int) $opt['duration_days'];
+                    $package['price_toman']   = (int) $opt['price_toman'];
+                    $matched = true;
+                    break;
+                }
+            }
+
+            if (!$matched) {
+                $this->bot->sendMessage($chatId, implode("\n", [
+                    '⚠️ <b>این گزینه دیگر معتبر نیست</b>',
+                    '',
+                    'مدتی که انتخاب شده در گزینه‌های این بسته نیست، پس سفارشی ساخته',
+                    'نشد و از شما پولی گرفته نشد. ✅',
+                    '',
+                    'لطفاً از فهرست دوباره انتخاب کنید. 🔄',
+                ]), [
+                    'reply_markup' => $this->bot->buildMarkup(Keyboard::rows([
+                        Keyboard::back(
+                            BotApi::encodeData('pkg', ['id' => $packageId, 'p' => $panelId]),
+                            '🔙 بازگشت به بسته'
+                        ),
+                        Keyboard::back('menu', '🏠 منوی اصلی'),
+                    ])),
+                ]);
+
+                return;
+            }
+        }
+
         $minOrder = Config::int('store.min_order_toman', 50000);
         if ((int) $package['price_toman'] < $minOrder) {
             $this->bot->sendMessage($chatId, '⚠️💰 قیمت این بسته کمتر از حداقل مجاز است! 😔');
@@ -1986,6 +3117,34 @@ final class Kernel
         }
 
         $kind = (string) $package['kind'];
+
+        // ------------------------------------------------------------------
+        // نبودِ روش پرداخت ⇒ اصلاً سفارش ساخته نشود.
+        //
+        // قبلاً سفارش ساخته می‌شد و بعد پیام «هیچ روش پرداختی فعال نیست» داده
+        // می‌شد. نتیجه: یک سفارشِ یتیم در «سفارش‌های من» می‌ماند که کاربر
+        // نمی‌داند چرا هست و چه باید بکند.
+        //
+        // سهمیهٔ خرید آسیب نمی‌بیند (چون `purchasedCount` فقط `paid` و
+        // `applied` را می‌شمارد) — ولی باز هم یک رکوردِ بی‌معنا در دیتابیس و
+        // یک ابهام در چتِ کاربر می‌ماند.
+        // ------------------------------------------------------------------
+        if ($this->payments->activeGateways() === []) {
+            $this->bot->sendMessage($chatId, implode("\n", [
+                '⚠️💳 <b>الان امکان ثبت سفارش نیست</b>',
+                '',
+                'هیچ روش پرداختی فعال نیست، پس سفارشی ثبت نشد و از شما پولی',
+                'گرفته نشده است.',
+                '',
+                'لطفاً کمی بعد دوباره تلاش کنید یا با پشتیبانی تماس بگیرید. 📞',
+            ]), [
+                'reply_markup' => $this->bot->buildMarkup(Keyboard::rows([
+                    Keyboard::back('menu', '🏠 بازگشت به منو'),
+                ])),
+            ]);
+
+            return;
+        }
 
         // ------------------------------------------------------------------
         // شارژ بدون پنل معتبر انجام نمی‌شود.
@@ -2037,6 +3196,20 @@ final class Kernel
         $listPrice  = (int) $package['price_toman'];
         $discount   = $this->resolveDiscount($user, $listPrice);
         $finalPrice = max(0, $listPrice - $discount['discount']);
+
+        // تخفیف وفاداری: اگر کاربر امتیاز لازم را دارد، درصد ثابتی روی مبلغ نهایی
+        $loyaltyExtra = 0;
+        $loyaltyPoints = (int) ($user['loyalty_points'] ?? 0);
+        $redeemPoints  = max(1, $this->settings->int(Settings::LOYALTY_REDEEM, 100));
+        $loyaltyPercent = max(0, min(100, $this->settings->int(Settings::LOYALTY_DISCOUNT, 5)));
+
+        if ($loyaltyPercent > 0 && $loyaltyPoints >= $redeemPoints) {
+            $loyaltyExtra = (int) floor($finalPrice * $loyaltyPercent / 100);
+            if ($loyaltyExtra > 0) {
+                $finalPrice -= $loyaltyExtra;
+                $discount['discount'] += $loyaltyExtra;
+            }
+        }
 
         // حداقل مبلغ خرید **بعد** از تخفیف سنجیده می‌شود. اگر قبل از تخفیف
         // سنجیده شود، یک بستهٔ ۵۰ هزار تومانی با کد ۱۰۰٪ عملاً رایگان می‌شد و
@@ -2125,6 +3298,10 @@ final class Kernel
             return;
         }
 
+        if ($loyaltyExtra > 0) {
+            $this->users->deductLoyaltyPoints((int) $user['id'], $redeemPoints);
+        }
+
         $this->users->refreshOrderStats((int) $user['id']);
         $this->showPaymentMethods($chatId, $order, $discount);
     }
@@ -2192,8 +3369,17 @@ final class Kernel
     private function showPaymentMethods(int $chatId, array $order, array $discount): void
     {
         $gateways = $this->payments->activeGateways();
+        $balance  = $this->users->walletBalance((int) $order['user_id']);
+        $price    = (int) $order['price_toman'];
 
-        if ($gateways === []) {
+        // ⭐️ کیف پول هم یک «روش پرداخت» است.
+        //
+        // بدون این، پاداشِ معرفی عملاً بی‌فایده بود: به کیف پول می‌رفت، هیچ‌جا
+        // نمایش داده نمی‌شد و هرگز خرج نمی‌شد — یعنی کاربر برای هر دوستی که
+        // می‌آورد پاداش می‌گرفت و نمی‌توانست از آن استفاده کند.
+        $walletCovers = $price > 0 && $balance >= $price;
+
+        if ($gateways === [] && !$walletCovers) {
             $this->bot->sendMessage($chatId, '⚠️💳 هیچ روش پرداختی فعال نیست! 😔 با پشتیبانی تماس بگیرید. 📞🙏');
             return;
         }
@@ -2204,6 +3390,13 @@ final class Kernel
             $keyboard[] = [[
                 'text' => $gateway->title(),
                 'data' => BotApi::encodeData('pay', ['id' => (int) $order['id'], 'm' => $gateway->name()]),
+            ]];
+        }
+
+        if ($balance > 0) {
+            $keyboard[] = [[
+                'text' => '👛 کیف پول (' . Str::formatToman($balance) . ')',
+                'data' => BotApi::encodeData('pay', ['id' => (int) $order['id'], 'm' => self::METHOD_WALLET]),
             ]];
         }
 
@@ -2225,11 +3418,134 @@ final class Kernel
         }
 
         $lines[] = '';
-        $lines[] = '💵 <b>مبلغ قابل پرداخت: ' . Str::formatToman((int) $order['price_toman']) . '</b>';
+        $lines[] = '💵 <b>مبلغ قابل پرداخت: ' . Str::formatToman($price) . '</b>';
+
+        if ($walletCovers) {
+            $lines[] = '';
+            $lines[] = '👛 موجودی کیف پول شما <b>' . Str::formatToman($balance)
+                . '</b> است و کل این سفارش را پوشش می‌دهد — بدون نیاز به پرداخت بیرونی!';
+        } elseif ($balance > 0) {
+            $lines[] = '👛 موجودی کیف پول: <b>' . Str::formatToman($balance) . '</b>'
+                . ' — ' . Str::formatToman($price - $balance) . ' کم می‌آورد.';
+        }
 
         $this->bot->sendMessage($chatId, implode("\n", $lines), [
             'reply_markup' => $this->bot->buildMarkup($keyboard),
         ]);
+    }
+
+    /**
+     * پرداخت از موجودیِ کیف پول.
+     *
+     * ⚠️ **کیف پول یا کل مبلغ را پوشش می‌دهد یا هیچ.**
+     *
+     * عمداً پول را نصفه کم نمی‌کنیم و باقی را از درگاه می‌گیریم: آن ترکیب در
+     * عمل یعنی یک سفارش با **دو منبع پرداخت**. اگر درگاه بعداً خطا بدهد،
+     * موجودی رفته ولی بسته اجرا نشده — و بازگرداندنِ موجودی پیچیده و مستعد خطا
+     * می‌شود. یکی از دو، نه هر دو.
+     */
+    private function payWithWallet(int $chatId, array $user, array $order): void
+    {
+        $price  = (int) $order['price_toman'];
+        $status = (string) $order['status'];
+
+        // ⚠️ `callback_data` قابل جعل است: کاربر می‌تواند `pay` را با شناسهٔ
+        // یک سفارشِ بستهٔ خودش بفرستد. بدون این بررسی، موجودی کیف پولش کم
+        // می‌شد و بعد `markPaid` false برمی‌گرداند و ما پول را برمی‌گرداندیم —
+        // یعنی یک رفت‌وبرگشت بی‌دلیل در دیتابیس برای هر کلیک.
+        if ($status !== OrderRepository::STATUS_CREATED
+            && $status !== OrderRepository::STATUS_AWAITING_PAYMENT
+        ) {
+            $this->bot->sendMessage($chatId, implode("\n", [
+                'ℹ️ این سفارش قابل پرداخت نیست.',
+                '',
+                'وضعیت فعلی: <b>' . Str::escape($status) . '</b>',
+                '',
+                'اگر فکر می‌کنید پرداخت کرده‌اید، از بخش «سفارش‌های من» پیگیری کنید.',
+            ]), [
+                'reply_markup' => $this->bot->buildMarkup([
+                    [[
+                        'text' => '🧾 سفارش‌های من',
+                        'data' => BotApi::encodeData('order.list', ['page' => 0]),
+                    ]],
+                    Keyboard::back('menu'),
+                ]),
+            ]);
+
+            return;
+        }
+
+        if ($price < 1) {
+            $this->bot->sendMessage($chatId, '⚠️ مبلغ سفارش نامعتبر است.');
+            return;
+        }
+
+        $spend = $this->users->spendWallet(
+            (int) $user['id'],
+            $price,
+            'پرداخت سفارش ' . (string) $order['code']
+        );
+
+        if (!$spend['ok']) {
+            // موجودی نرسید ⇒ هیچ اتفاقی نیفتاده. مشتری می‌تواند روش دیگری
+            // انتخاب کند و بابت این تلاش چیزی از دست نداده.
+            $this->bot->sendMessage($chatId, implode("\n", [
+                '👛 <b>موجودی کیف پول کافی نیست</b>',
+                '',
+                'موجودی شما: <b>' . Str::formatToman((int) $spend['balance']) . '</b>',
+                'مبلغ سفارش: <b>' . Str::formatToman($price) . '</b>',
+                '',
+                'لطفاً با روش پرداخت دیگری ادامه دهید.',
+            ]), [
+                'reply_markup' => $this->bot->buildMarkup([
+                    [[
+                        'text' => '💳 روش‌های دیگر',
+                        'data' => BotApi::encodeData('pay.again', ['id' => (int) $order['id']]),
+                    ]],
+                    Keyboard::back('menu'),
+                ]),
+            ]);
+
+            return;
+        }
+
+        $paid = $this->orders->markPaid((int) $order['id'], self::METHOD_WALLET, (string) $order['code']);
+
+        if (!$paid) {
+            // ⚠️ موجودی کم شد ولی سفارش پرداخت‌شده علامت نخورد ⇒ پول گم شده.
+            // این تنها جایی است که چنین خطری وجود دارد، پس صریح برمی‌گردانیم.
+            $this->users->adjustWallet(
+                (int) $user['id'],
+                $price,
+                'بازگشت موجودی — پرداخت کیف پول ثبت نشد',
+                0,
+                'manual'
+            );
+
+            $this->bot->sendMessage($chatId, implode("\n", [
+                '⚠️ <b>پرداخت ثبت نشد</b>',
+                '',
+                'موجودی کیف پول شما دست‌نخورده برگشت. لطفاً دوباره تلاش کنید یا با',
+                'پشتیبانی تماس بگیرید.',
+            ]));
+
+            return;
+        }
+
+        $this->users->refreshOrderStats((int) $user['id']);
+
+        $fresh  = $this->orders->find((int) $order['id']);
+        $result = $fresh === null
+            ? ['ok' => false, 'message' => 'سفارش یافت نشد.']
+            : $this->provisioner->provision($fresh);
+
+        $this->bot->sendMessage(
+            $chatId,
+            (($result['ok'] ?? false) ? '🎉 ' : '⏳ ')
+            . 'پرداخت از کیف پول انجام شد! ✅\n\n'
+            . Str::escape((string) ($result['message'] ?? ''))
+            . "\n\n👛 موجودی باقی‌مانده: <b>" . Str::formatToman((int) $spend['balance']) . '</b>'
+        );
     }
 
     private function startPayment(int $chatId, array $user, int $orderId, string $method): void

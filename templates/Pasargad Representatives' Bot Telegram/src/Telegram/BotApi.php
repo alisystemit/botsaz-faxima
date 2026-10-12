@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Pasargad\Telegram;
 
+use Pasargad\Support\BaseUrl;
 use Pasargad\Support\Config;
 use Pasargad\Support\Http;
 use Pasargad\Support\Logger;
@@ -24,12 +25,12 @@ class BotApi
     private int $timeout;
     private ?int $lastUpdateId = null;
 
-    /** @var array<int, array<string, mixed>> پاسخ خطاهای اخیر برای لاگ */
+        /** @var array<int, array<string, mixed>> پاسخ خطاهای اخیر برای لاگ */
     private array $errorLog = [];
 
     public function __construct(?string $token = null)
     {
-        $this->token   = $token ?? Config::str('bot_token', '');
+        $this->token   = trim($token ?? Config::str('bot_token', ''));
         $this->timeout = Config::int('http_timeout', 30);
 
         // پایهٔ سفارشی فقط وقتی تنظیم شده باشد. برای سرور Bot API خودی یا
@@ -762,7 +763,9 @@ class BotApi
 
         $raw = curl_exec($curl);
         $err = curl_error($curl);
-        curl_close($curl);
+
+        // `curl_close()` از PHP 8.0 بی‌اثر است و از 8.5 deprecated شده؛
+        // منابع آزادسازی خودکار است.
 
         if (!is_string($raw) || $raw === '') {
             return ['ok' => false, 'description' => $err !== '' ? $err : 'ارسال فایل ناموفق بود.'];
@@ -930,6 +933,28 @@ class BotApi
             $buttons = [];
 
             foreach ($row as $button) {
+                // ⚠️ بعضی جاها `Keyboard::back()` / `close()` را مستقیم به‌عنوان
+                // یک عنصرِ لیست ردیف‌ها append می‌کنند:
+                //
+                //     $kb = [[button], [button]];
+                //     $kb[] = Keyboard::back('menu');   // ← خودش یک «ردیف» است
+                //     $this->bot->buildMarkup($kb);
+                //
+                // آن عنصر یک ردیفِ آماده است، نه دکمه؛ پس `normalizeButton`
+                // آن را `null` می‌داد و کل دکمه **بی‌صدا حذف می‌شد** (کاربر
+                // دکمهٔ بازگشت را نمی‌دید و فکر می‌کرد منو خراب است).
+                //
+                // اینجا بازش می‌کنیم تا همان ردیف را جدا اضافه کنیم.
+                if (is_array($button) && !$this->looksLikeButton($button)) {
+                    $nested = $this->normalizeKeyboard([$button]);
+
+                    foreach ($nested as $nestedRow) {
+                        $rows[] = $nestedRow;
+                    }
+
+                    continue;
+                }
+
                 $normalized = $this->normalizeButton($button);
 
                 if ($normalized !== null) {
@@ -943,6 +968,26 @@ class BotApi
         }
 
         return $rows;
+    }
+
+    /**
+     * آیا این آرایه یک دکمه است یا یک ردیفِ آماده از دکمه‌ها؟
+     *
+     * تفکیک بر اساس کلیدهای شناسهٔ دکمه است: `Keyboard::back()` خروجی‌اش
+     * `[[['text'=>…,'data'=>…]]]` است، پس عنصر بیرونی هیچ `text`/`data`/
+     * `url`/`callback_data` ندارد و در نتیجه «ردیف» تشخیص داده می‌شود.
+     *
+     * @param array<mixed> $candidate
+     */
+    private function looksLikeButton(array $candidate): bool
+    {
+        foreach (['text', 'data', 'callback_data', 'url', 'web_app', 'style', 'pay'] as $key) {
+            if (array_key_exists($key, $candidate)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -983,6 +1028,33 @@ class BotApi
             return ['text' => $text, 'url' => $url];
         }
 
+        // دکمهٔ Mini App
+        //
+        // ⚠️ این شاخه **قبل** از شاخهٔ callback می‌آید. قبلاً نبود و دکمهٔ
+        // «📱 اپلیکیشن وب» در منوی اصلی به‌جای باز شدن اپ، یک
+        // `callback_data: noop` می‌ساخت و بی‌صدا هیچ کاری نمی‌کرد.
+        //
+        // ⚠️ شکل درست طبق مستندات Bot API یک آبجکت است:
+        //   {"text": "…", "web_app": {"url": "https://…"}}
+        // اگر رشتهٔ خالی (`"web_app": "https://…"`) فرستاده شود، تلگرام کل
+        // پیام را با خطای `can't parse inline keyboard button` رد می‌کند و
+        // کاربر اصلاً دکمه را نمی‌بیند — یا لینک را دستی در مرورگر باز
+        // می‌کند که initData ندارد و اپ روی «دادهٔ ورودی معتبر نیست» می‌ماند.
+        if (isset($button['web_app'])) {
+            $candidate = $button['web_app'];
+            if (is_array($candidate)) {
+                $candidate = $candidate['url'] ?? '';
+            }
+            $url = trim((string) $candidate);
+
+            if (!$this->isTrustedWebAppUrl($url)) {
+                Logger::warning('Skipping button with untrusted web_app url', ['text' => $text, 'url' => $url]);
+                return null;
+            }
+
+            return ['text' => $text, 'web_app' => ['url' => $url]];
+        }
+
         // دکمهٔ callback
         $data = trim((string) ($button['data'] ?? $button['callback_data'] ?? ''));
 
@@ -996,6 +1068,64 @@ class BotApi
         }
 
         return ['text' => $text, 'callback_data' => $data];
+    }
+
+    /**
+     * آیا این URL برای دکمهٔ Mini App قابل اعتماد است؟
+     *
+     * سه شرط، و هر سه لازم‌اند:
+     *   ۱) HTTPS — تلگرام در غیر این صورت دکمه را رد می‌کند و در برخی نسخه‌ها
+     *      کل کیبورد را باطل می‌کند.
+     *   ۲) مبدأ == `base_url` کانفیگ (یعنی سرور خودِ ربات).
+     *   ۳) ویژگی `userinfo`/`fragment` نداشته باشد؛
+     *      `https://example.com@evil.tld/` در نگاه اول مبدأ ما را دارد ولی
+     *      در واقع به `evil.tld` می‌رود. تلگرام این را «باز کردن لینک در
+     *      Mini Appِ ما» نشان می‌دهد ولی کاربر را جای دیگری می‌برد.
+     */
+    private function isTrustedWebAppUrl(string $url): bool
+    {
+        if ($url === '' || preg_match('#^https://#i', $url) !== 1) {
+            return false;
+        }
+
+        $parts = parse_url($url);
+
+        if (!is_array($parts) || empty($parts['host'])) {
+            return false;
+        }
+
+        if (isset($parts['user']) || isset($parts['pass']) || isset($parts['fragment'])) {
+            return false;
+        }
+
+        // ⚠️ این مقایسه باید با همان چیزی باشد که دکمه را ساخته، وگرنه یا
+        // دکمه ساخته نمی‌شود یا ساخته می‌شود ولی اینجا رد می‌شود.
+        // `BaseUrl::host()` هر دو حالتِ «از config» و «تشخیص خودکار» را
+        // پوشش می‌دهد.
+        $baseOk = BaseUrl::host();
+
+        if ($baseOk === '') {
+            return false;
+        }
+
+        $host = strtolower((string) $parts['host']);
+
+        if ($host !== $baseOk && !str_ends_with($host, '.' . $baseOk)) {
+            Logger::warning('WebApp host does not match base URL', [
+                'host'    => $host,
+                'base'    => $baseOk,
+                'source'  => BaseUrl::source(),
+            ]);
+
+            return false;
+        }
+
+        // اجازهٔ میزبانی روی زیردامنهٔ رسمی تلگرام هم هست (مثلاً وب‌اپ‌هایی که
+        // روی pages.dev سرو می‌شوند ولی به تلهگرام وصل‌اند) — ولی فقط وقتی
+        // که `base_url` خودش به آن دامنه اشاره کند، که در شرط بالا بررسی شد.
+        unset($parts);
+
+        return true;
     }
 
     /**

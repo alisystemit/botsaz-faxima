@@ -29,6 +29,21 @@ final class PaymentService
      */
     public const IPN_AMOUNT_TOLERANCE = 0.02;
 
+    /**
+     * نامِ روش پرداختِ «کیف پول خودِ ربات».
+     *
+     * ⭐️ این یک **درگاه نیست** — هیچ سرویس بیرونی پشتش نیست — ولی از دید
+     * کاربر یک «روش پرداخت» است و باید در صفحهٔ انتخاب روش کنار بقیه بیاید.
+     *
+     * اینجا تعریف شده نه در `Kernel`/`Api`، چون هر دو لایه (ربات و مینی‌اپ) از
+     * آن استفاده می‌کنند و باید دقیقاً یکی باشند. اگر یکی `wallet` و دیگری
+     * `wallet_balance` بگوید، پرداخت کیف پول به درگاه می‌رود یا برعکس.
+     *
+     * عمداً بی‌شباهت به هر نام درگاهی است تا روزی درگاهی با همین نام اضافه
+     * شد، تداخل نکند.
+     */
+    public const METHOD_WALLET = 'wallet_balance';
+
     private OrderRepository $orders;
     private Provisioner $provisioner;
     private Settings $settings;
@@ -160,11 +175,46 @@ final class PaymentService
             return ['ok' => false, 'message' => 'مبلغ سفارش نامعتبر است! 😔❌'];
         }
 
+        // ------------------------------------------------------------------
+        // سنجش سلامتِ درگاه بر پایهٔ همین تلاشِ واقعی.
+        //
+        // قبل و بعد از `start()` زمان گرفته می‌شود تا میانگین پاسخ هم واقعی
+        // باشد. مهم‌تر: نتیجهٔ ناموفق ثبت می‌شود تا اگر درگاه خراب شد، به
+        // کاربر گفته شود روش دیگری را انتخاب کند — و مدیر در داشبورد ببیند.
+        //
+        // ⚠️ پرداختِ موفق و ناموفق هر دو ثبت می‌شوند؛ ولی «پرداختی که درگاه
+        // ساخته ولی انتقالش به دیتابیس شکست خورده» نباید ناموفق شمرده شود،
+        // چون آن پول واقعاً از کاربر گرفته شده است.
+        // ------------------------------------------------------------------
+        $startedAt = microtime(true);
+
         $result = $gateway->start($order, $chatId);
 
+        $elapsedMs = (int) round((microtime(true) - $startedAt) * 1000);
+
         if (!($result['ok'] ?? false)) {
+            PaymentGatewayOptimizer::recordFailure(
+                $method,
+                (string) ($result['message'] ?? $result['description'] ?? ''),
+                $elapsedMs
+            );
+
+            // اگر این درگاه چند بار پیاپی خراب بوده، به کاربر بگو کدام روش‌های
+            // دیگر سالم‌اند. جایگزین‌کردنِ خودکارِ روش پرداخت عمداً انجام نمی‌شود:
+            // هر درگاه کارمزد و دستورالعمل خودش را دارد و انتخاب کاربر باید محترم
+            // بماند.
+            $healthyAlternatives = $this->healthyAlternatives($method);
+
+            if ($healthyAlternatives !== []) {
+                $result['message'] = (string) ($result['message'] ?? '')
+                    . "\n\n⚠️ این روش پرداخت در حال حاضر مشکل دارد. "
+                    . 'این روش‌ها الان سالم‌اند: ' . implode('، ', $healthyAlternatives) . '.';
+            }
+
             return $result;
         }
+
+        PaymentGatewayOptimizer::recordSuccess($method, $elapsedMs);
 
         // ثبت تلاش پرداخت در دیتابیس.
         // اگر برای همین سفارش و همین روش قبلاً پرداختی ثبت شده، همان را
@@ -211,6 +261,32 @@ final class PaymentService
     // ------------------------------------------------------------------
     // تأیید دستی (کارت‌به‌کارت)
     // ------------------------------------------------------------------
+
+    /**
+     * نامِ روش‌های پرداختِ سالم، غیر از روشی که همین الان شکست خورده.
+     *
+     * @return array<int, string>
+     */
+    private function healthyAlternatives(string $failedMethod): array
+    {
+        try {
+            $names = array_keys($this->gateways);
+        } catch (\Throwable $e) {
+            return [];
+        }
+
+        $names = array_values(array_filter(
+            $names,
+            fn (string $n): bool => $n !== $failedMethod
+                && isset($this->gateways[$n])
+                && $this->gateways[$n]->isEnabled()
+                && $this->flags->isGatewayEnabled($n)
+        ));
+
+        return PaymentGatewayOptimizer::unhealthyAmong($names) === []
+            ? array_map(fn (string $n): string => $this->gateways[$n]->title(), $names)
+            : [];
+    }
 
     /**
      * ثبت رسید کارت‌به‌کارت توسط کاربر.
@@ -326,6 +402,8 @@ final class PaymentService
                 'review_admin_id' => $adminId,
             ]);
 
+            (new \Pasargad\Store\AuditLogger())->log($adminId, 'reject_payment', 'order', $orderId, $note);
+
             $payment = $this->orders->lastPayment($orderId);
             if ($payment !== null) {
                 $this->orders->updatePayment((int) $payment['id'], ['status' => 'failed']);
@@ -366,6 +444,9 @@ final class PaymentService
             'review_admin_id' => $adminId,
             'review_note'     => Str::truncate($note, 200),
         ]);
+
+        (new \Pasargad\Store\AuditLogger())->log($adminId, 'approve_payment', 'order', $orderId, $note);
+
 
         $payment = $this->orders->lastPayment($orderId);
         if ($payment !== null) {
@@ -497,6 +578,20 @@ final class PaymentService
                 'got'        => $payload['pay_amount'] ?? $payload['price_amount'] ?? null,
                 'currency'   => $payload['pay_currency'] ?? $payload['price_currency'] ?? null,
             ]);
+
+            // این یک رویداد امنیتی/مالی است؛ به سوپرادمین‌ها هم اعلام کن.
+            try {
+                $this->notifier?->notifyAdmins(
+                    '⚠️💳 <b>پرداخت نامعتبر</b>\n\nسفارش: <code>' . Str::escape((string) ($order['code'] ?? '')) . "</code>\n"
+                    . 'مبلغ مورد انتظار: <b>' . Str::formatToman((int) $order['price_toman']) . "</b>\n"
+                    . 'مبلغ دریافتی گزارش‌شده: <code>' . Str::escape((string) ($payload['pay_amount'] ?? $payload['price_amount'] ?? '?')) . '</code>'
+                );
+            } catch (\Throwable $e) {
+                Logger::warning('Failed to notify admins about invalid payment', [
+                    'error' => $e->getMessage(),
+                    'order_id' => $order['id'] ?? null,
+                ]);
+            }
 
             return ['ok' => false, 'message' => 'مبلغ پرداخت با مبلغ سفارش مطابقت ندارد.'];
         }
@@ -747,6 +842,16 @@ final class PaymentService
         }
 
         $this->notifier->notifyUser($telegramId, $message);
+
+        // امتیاز وفاداری: برای هر خرید موفق ۱۰ امتیاز
+        try {
+            $this->users->addLoyaltyPoints((int) $order['user_id'], 10);
+        } catch (\Throwable $e) {
+            Logger::warning('Failed to add loyalty points', [
+                'user_id' => $order['user_id'] ?? null,
+                'error' => $e->getMessage(),
+            ]);
+        }
     }
 
     /**

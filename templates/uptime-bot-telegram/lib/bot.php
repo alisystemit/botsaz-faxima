@@ -7,6 +7,7 @@
 class Bot
 {
     use PayUi;
+    use AddonsUi;
 
     private array $cfg;
     private string $token;
@@ -28,6 +29,15 @@ class Bot
         if (!empty($update['callback_query'])) {
             $this->onCallback($update['callback_query']);
             return;
+        }
+        // تغییر نقش/عضویت در گروه یا کانال → کش ادمین‌ها باید بی‌اعتبار شود
+        // (وگرنه تا یک ساعت نقش قدیمی معتبر می‌ماند)
+        foreach (['chat_member', 'my_chat_member'] as $memberUpdate) {
+            if (!empty($update[$memberUpdate])) {
+                $memberChatId = (int)($update[$memberUpdate]['chat']['id'] ?? 0);
+                if ($memberChatId !== 0) Group::forgetAdmins($memberChatId);
+                return;
+            }
         }
         // پیام کانال (کانال‌ها message معمولی ندارند)
         if (!empty($update['channel_post'])) {
@@ -225,9 +235,14 @@ class Bot
                 $this->clearStep();
                 BotApi::setMyCommands($this->token, [
                     ['command' => 'start', 'description' => '🏠 منوی اصلی'],
+                    ['command' => 'app', 'description' => '📱 اپلیکیشن'],
                     ['command' => 'sites', 'description' => '📋 سایت‌های من'],
                     ['command' => 'report', 'description' => '📈 گزارش آپتایم'],
                     ['command' => 'rank', 'description' => '📊 رنکینگ'],
+                    ['command' => 'analyze', 'description' => '🧠 تحلیل هوشمند'],
+                    ['command' => 'export', 'description' => '📤 خروجی سایت‌ها'],
+                    ['command' => 'import', 'description' => '📥 ورود سایت‌ها'],
+                    ['command' => 'affiliate', 'description' => '💰 برنامهٔ همکاری'],
                     ['command' => 'help', 'description' => 'ℹ️ راهنما'],
                 ]);
                 if (!$this->allowed()) {
@@ -248,6 +263,7 @@ class Bot
                 return;
             case '/rank':
             case '📊 رنکینگ':
+            case '🏆 رنکینگ':
                 $this->clearStep();
                 $this->send($this->rankingText(), $this->rankingMenu());
                 return;
@@ -255,9 +271,27 @@ class Bot
                 $this->clearStep();
                 $this->send($this->reportText(), $this->mainMenu());
                 return;
+            case '/app':
+                $this->clearStep();
+                $appUrl = miniAppUrl();
+                if ($appUrl === '') {
+                    $this->send('⚠️ آدرس اپلیکیشن در تنظیمات (base_url یا domain) ست نشده است.', $this->mainMenu());
+                    return;
+                }
+                $this->send(
+                    "📱 <b>اپلیکیشن</b>\n\nوضعیت لحظه‌ای سایت‌ها، نمودارها، رخدادها، دامنه‌ها و رنکینگ — همه در یک اپلیکیشن سریع.\nبا زدن دکمهٔ زیر بازش کنید:",
+                    BotApi::ikb([[['text' => '🚀 باز کردن اپلیکیشن', 'web_app' => ['url' => $appUrl]]]])
+                );
+                return;
             case '📈 گزارش من':
                 $this->clearStep();
                 $this->send($this->reportText(), $this->mainMenu());
+                return;
+            // کاربرِ بدون اشتراک (منوی محدود) هم باید بتواند اشتراک را ببیند؛
+            // پس این مورد *قبل* از دروازهٔ allowed() پردازش می‌شود.
+            case '🛒 اشتراک ویژه':
+                $this->clearStep();
+                $this->send($this->subText(), $this->subMenu());
                 return;
             case '/shared':
             case '/domains':
@@ -277,6 +311,8 @@ class Bot
                 $this->restrictedMenu());
             return;
         }
+
+        if ($this->addonCommand($cmd, $p)) return;
 
         switch ($text) {
             case '➕ افزودن سایت':
@@ -350,6 +386,26 @@ class Bot
         return isBotAdmin($this->uid);
     }
 
+    /**
+     * نگهبانِ درهای مدیریتی.
+     *
+     * نکتهٔ مهم: قبلاً همهٔ این درها با «return خام» بسته می‌شدند. یعنی اگر
+     * کاربری دکمهٔ مدیریتی را می‌زد (پیام قدیمی، پیام دوست/گروه، یا لغو
+     * مدیریت‌شدن) هیچ پاسخی نمی‌گرفت و فقط یک اسپینر بی‌پایان می‌دید.
+     * حالا صریح و محترمانه رد می‌شود و راه برگشت می‌گیرد.
+     *
+     * @return bool true یعنی کاربر مدیر است و باید ادامه دهد
+     */
+    private function requireAdmin(int $msgId = 0): bool
+    {
+        if ($this->isAdmin()) return true;
+        $txt = "⛔️ <b>این بخش فقط برای مدیر است.</b>\n\n"
+            . "اگر فکر می‌کنید اشتباهی این دکمه را زده‌اید، از منوی اصلی ادامه دهید.";
+        if ($msgId > 0) $this->edit($msgId, $txt, $this->mainMenu());
+        else $this->send($txt, $this->mainMenu());
+        return false;
+    }
+
     // ================================================================ مرحله‌ها
 
     /** @return bool آیا پیام به‌عنوان ورودیِ یک مرحله پردازش شد؟ */
@@ -365,6 +421,19 @@ class Bot
             $this->send('❌ انصراف داده شد.', $dest);
             return true;
         }
+
+        // ---- دکمهٔ منو و دستورها همیشه «ناوبری»‌اند، نه «ورودیِ مرحله» ----
+        // بدون این، کاربرِ وسطِ یک مرحله با زدن «⚙️ تنظیمات» یا «🛒 اشتراک ویژه»
+        // به یک handlerِ بی‌ربط می‌افتاد و پیام‌های گمراه‌کننده می‌گرفت.
+        // استثنا: «پیام همگانی» چون متنِ آن محتوای دلخواهِ مدیر است و ممکن است
+        // واقعاً با «⚙️ …» یا «/…» شروع شود.
+        if ($step !== 'await_broadcast' && (Nav::isMenuButton($text) || Nav::isCommand($text))) {
+            $this->clearStep();
+            $this->handleCommand($text, $msg);
+            return true;
+        }
+
+        if ($this->addonStep($text, $msg, $step)) return true;
 
         switch ($step) {
             case 'await_site':
@@ -485,6 +554,12 @@ class Bot
                 return $this->sharedMenu();
             case 'await_broadcast':
                 return $this->isAdmin() ? $this->adminMenu() : $this->mainMenu();
+            case 'await_webhook':
+                return $this->addonWebhooksMenu();
+            case 'await_integration':
+                return $this->addonIntegrationsMenu();
+            case 'await_import':
+                return $this->addonMenu();
             default:
                 return $this->mainMenu();
         }
@@ -616,6 +691,10 @@ class Bot
                 ]));
             return;
         }
+        if (strncmp($payload, 'aff_', 4) === 0) {
+            $this->addonAffiliateReferral(substr($payload, 4));
+            return;
+        }
         $this->clearStep();
         $this->send($this->welcome(), $this->mainMenu());
     }
@@ -737,8 +816,13 @@ class Bot
 
     private function siteUrl(string $token): string
     {
-        $base = rtrim((string)($this->cfg['base_url'] ?? ''), '/');
-        if ($base === '') $base = 'https://' . trim((string)($this->cfg['domain'] ?? ''));
+        // اولویت با تنظیم پنل مدیریت (base_url/domain در جدول settings)
+        $base = effectiveBaseUrl();
+        if ($base === '') {
+            $base = rtrim((string)($this->cfg['base_url'] ?? ''), '/');
+            if ($base === '') $base = 'https://' . trim((string)($this->cfg['domain'] ?? ''));
+        }
+        if ($base === '') return '';
         return $base . '/status.php?s=' . rawurlencode($token);
     }
 
@@ -1054,6 +1138,35 @@ class Bot
             Db::set('card', mb_substr(trim($text), 0, 19));
             $this->clearStep();
             $this->send("✅ شماره کارت ذخیره شد:\n<code>" . tgH(Db::get('card', '')) . "</code>", $this->adminPanelMenu());
+            return;
+        }
+        if ($key === 'base_url') {
+            $u = normalizeBaseUrl(faToLatin($text));
+            if ($u === '' || !preg_match('#^https?://([a-z0-9.-]+\.[a-z]{2,})(:\d+)?(/.*)?$#i', $u)) {
+                $this->send("⛔️ آدرس معتبر نیست.\n\nمثال درست:\n<code>https://example.com</code>\n"
+                    . "<code>https://example.com/bots/mybot</code>", Nav::cancelKb());
+                return;
+            }
+            Db::set('base_url', $u);
+            $this->clearStep();
+            $this->send("✅ آدرس پایه ذخیره شد:\n<code>" . tgH($u) . "</code>\n\n"
+                . "از این لحظه لینک‌های صفحهٔ وضعیت، اپلیکیشن و کرون از همین آدرس ساخته می‌شوند.\n"
+                . "🔗 نمونه: <code>" . tgH($u . '/webapp/index.html') . "</code>", $this->adminPanelMenu());
+            return;
+        }
+        if ($key === 'domain') {
+            // دامنه: بدون scheme و بدون اسلش انتهایی (مثل config.php)
+            $d = trim(faToLatin($text));
+            $d = preg_replace('#^https?://#i', '', $d) ?? $d;
+            $d = trim($d, "/ \t\n\r");
+            if ($d === '' || !preg_match('#^([a-z0-9.-]+\.[a-z]{2,})(:\d+)?(/.*)?$#i', $d)) {
+                $this->send("⛔️ دامنه معتبر نیست.\n\nمثال درست:\n<code>example.com</code>\n"
+                    . "<code>example.com/bots/mybot</code>\n\n(بدون <code>https://</code>)", Nav::cancelKb());
+                return;
+            }
+            Db::set('domain', $d);
+            $this->clearStep();
+            $this->send("✅ دامنهٔ ربات ذخیره شد:\n<code>" . tgH($d) . "</code>", $this->adminPanelMenu());
             return;
         }
         $rules = [
@@ -1490,15 +1603,15 @@ class Bot
                 return;
             case 'pgws_list':
             case 'pgws2':
-                if (!$this->isAdmin()) return;
+                if (!$this->requireAdmin($msgId)) return;
                 $this->edit($msgId, $this->adminGatewaysText(), $this->adminGatewaysMenu());
                 return;
             case 'pgw':
-                if (!$this->isAdmin()) return;
+                if (!$this->requireAdmin($msgId)) return;
                 $this->edit($msgId, $this->adminGatewayText($arg), $this->adminGatewayMenu($arg));
                 return;
             case 'pgwt': {
-                if (!$this->isAdmin()) return;
+                if (!$this->requireAdmin($msgId)) return;
                 $g = PayGws::get($arg);
                 if (!$g) return;
                 $on = (int)$g['enabled'] === 1;
@@ -1511,12 +1624,12 @@ class Bot
                     . "\n\n" . $this->adminGatewayText($arg), $this->adminGatewayMenu($arg));
                 return;
             }
-            case 'pgwk': if (!$this->isAdmin()) return; $this->paySetField($arg, 'api_key'); return;
-            case 'pgwm': if (!$this->isAdmin()) return; $this->paySetField($arg, 'merchant_id'); return;
-            case 'pgws': if (!$this->isAdmin()) return; $this->paySetField($arg, 'secret'); return;
-            case 'pgwb': if (!$this->isAdmin()) return; $this->paySetField($arg, 'base_url'); return;
+            case 'pgwk': if (!$this->requireAdmin($msgId)) return; $this->paySetField($arg, 'api_key'); return;
+            case 'pgwm': if (!$this->requireAdmin($msgId)) return; $this->paySetField($arg, 'merchant_id'); return;
+            case 'pgws': if (!$this->requireAdmin($msgId)) return; $this->paySetField($arg, 'secret'); return;
+            case 'pgwb': if (!$this->requireAdmin($msgId)) return; $this->paySetField($arg, 'base_url'); return;
             case 'pgwg':
-                if (!$this->isAdmin()) return;
+                if (!$this->requireAdmin($msgId)) return;
                 $this->setStep('await_paygw', ['code' => 'generic', 'field' => 'json']);
                 $this->edit($msgId, "🧩 <b>تنظیمات درگاه دلخواه</b>\n\n"
                     . "یک JSON معتبر بفرستید. کلیدهای پشتیبانی‌شده:\n"
@@ -1533,14 +1646,15 @@ class Bot
                     Nav::cancelKb());
                 return;
             case 'pgwx':
-                if (!$this->isAdmin()) return;
+                if (!$this->requireAdmin($msgId)) return;
                 $this->payGatewayTest($arg, $msgId);
                 return;
 
             // ---------- دامنه‌ها ----------
             case 'domains':
                 $this->edit($msgId, $this->domainText(), $this->domainMenu());
-                return;            case 'dadd':
+                return;
+            case 'dadd':
                 $this->setStep('await_domain');
                 $this->edit($msgId, "🌐 <b>افزودن دامنه</b>\n\n"
                     . "نام دامنه را بفرستید (بدون https و بدون مسیر):\n<code>example.ir</code>\n\n"
@@ -1557,22 +1671,26 @@ class Bot
 
             // ---------- ادمین: آمار/کرون/همگانی ----------
             case 'astats':
+                if (!$this->requireAdmin($msgId)) return;
                 $this->edit($msgId, $this->adminStatsText(), $this->adminMenu());
                 return;
             case 'apanel':
+                if (!$this->requireAdmin($msgId)) return;
                 $this->edit($msgId, $this->adminPanelText(), $this->adminPanelMenu());
                 return;
             case 'cron':
+                if (!$this->requireAdmin($msgId)) return;
                 $this->edit($msgId, $this->cronText(), $this->adminMenu());
                 return;
             case 'abroadcast':
+                if (!$this->requireAdmin($msgId)) return;
                 $this->setStep('await_broadcast');
                 $this->edit($msgId, "📣 پیام همگانی را بفرستید (متن/عکس/فایل).\nانصراف: ❌ انصراف", Nav::cancelKb());
                 return;
 
             // ---------- ادمین: توقف سراسری ----------
             case 'pause': {
-                if (!$this->isAdmin()) return;
+                if (!$this->requireAdmin($msgId)) return;
                 if (Db::getBool('pause_all', false)) { $this->edit($msgId, $this->adminPanelText(), $this->adminPanelMenu()); return; }
                 Db::set('pause_all', '1');
                 Db::set('pause_global_since', date('Y-m-d H:i:s'));
@@ -1583,7 +1701,7 @@ class Bot
                 return;
             }
             case 'resume': {
-                if (!$this->isAdmin()) return;
+                if (!$this->requireAdmin($msgId)) return;
                 if (!Db::getBool('pause_all', false)) { $this->edit($msgId, $this->adminPanelText(), $this->adminPanelMenu()); return; }
                 $since = Db::get('pause_global_since');
                 $dur = $since ? max(0, time() - strtotime($since)) : 0;
@@ -1599,7 +1717,7 @@ class Bot
 
             // ---------- ادمین: تنظیمات ----------
             case 'set': {
-                if (!$this->isAdmin()) return;
+                if (!$this->requireAdmin($msgId)) return;
                 if ($arg === 'notify') {
                     $cur = Db::getBool('notify', true);
                     Db::set('notify', $cur ? '0' : '1');
@@ -1645,6 +1763,8 @@ class Bot
                     'ssl_warn_days' => 'آستانهٔ هشدار انقضای گواهی (روز)',
                     'domain_warn_days' => 'آستانهٔ هشدار انقضای دامنه (روز)',
                     'max_domains' => 'سقف دامنه برای هر کاربر',
+                    'base_url' => 'آدرس کامل اپلیکیشن/ربات (با https)',
+                    'domain' => 'دامنهٔ ربات (بدون https و اسلش آخر)',
                 ];
                 if (!isset($labels[$arg])) return;
                 $this->setStep('await_setting', ['key' => $arg]);
@@ -1653,14 +1773,14 @@ class Bot
                 return;
             }
             case 'codes':
-                if (!$this->isAdmin()) return;
+                if (!$this->requireAdmin($msgId)) return;
                 $this->edit($msgId, $this->codesText(), BotApi::ikb([
                     [['text' => '➕ ساخت کد جدید', 'callback_data' => 'gen']],
                     [['text' => '↩️ بازگشت', 'callback_data' => 'apanel']],
                 ]));
                 return;
             case 'gen':
-                if (!$this->isAdmin()) return;
+                if (!$this->requireAdmin($msgId)) return;
                 $this->setStep('await_codegen');
                 $this->edit($msgId, "🎟 <b>ساخت کد فعال‌سازی</b>\n\nفرمت را بفرستید:\n<code>30 5</code>\n\n"
                     . "یعنی: کدهای <b>۳۰ روزه</b>، تعداد <b>۵</b>\n(حداکثر ۵۰ کد در هر نوبت)",
@@ -1669,18 +1789,18 @@ class Bot
 
             // ---------- ادمین: کاربران ----------
             case 'ausers':
-                if (!$this->isAdmin()) return;
+                if (!$this->requireAdmin($msgId)) return;
                 $this->sendUsersList((int)$arg, $msgId);
                 return;
             case 'auser': {
-                if (!$this->isAdmin()) return;
+                if (!$this->requireAdmin($msgId)) return;
                 $target = Db::one('SELECT * FROM `user` WHERE `id` = ?', [(int)$arg]);
                 if (!$target) { $this->edit($msgId, 'کاربر پیدا نشد.', $this->adminMenu()); return; }
                 $this->edit($msgId, $this->userDetail($target), $this->userMenu($target));
                 return;
             }
             case 'aub': { // مسدود/رفع مسدود
-                if (!$this->isAdmin()) return;
+                if (!$this->requireAdmin($msgId)) return;
                 $target = Db::one('SELECT * FROM `user` WHERE `id` = ?', [(int)$arg]);
                 if (!$target) return;
                 $new = (int)$target['is_blocked'] === 1 ? 0 : 1;
@@ -1693,7 +1813,7 @@ class Bot
                 return;
             }
             case 'auv': { // ویژه کردن
-                if (!$this->isAdmin()) return;
+                if (!$this->requireAdmin($msgId)) return;
                 $target = Db::one('SELECT * FROM `user` WHERE `id` = ?', [(int)$arg]);
                 if (!$target) return;
                 $days = Db::getInt('vip_days', 30);
@@ -1707,7 +1827,7 @@ class Bot
                 return;
             }
             case 'aud': { // حذف کاربر
-                if (!$this->isAdmin()) return;
+                if (!$this->requireAdmin($msgId)) return;
                 $target = Db::one('SELECT * FROM `user` WHERE `id` = ?', [(int)$arg]);
                 if (!$target) return;
                 $siteIds = array_map(fn($r) => (int)$r['id'], Db::all('SELECT `id` FROM `site` WHERE `user_id` = ?', [$target['id']]));
@@ -1722,12 +1842,12 @@ class Bot
                 return;
             }
             case 'apays':
-                if (!$this->isAdmin()) return;
+                if (!$this->requireAdmin($msgId)) return;
                 $this->sendPayments($msgId);
                 return;
             case 'apayok':
             case 'apayno': {
-                if (!$this->isAdmin()) return;
+                if (!$this->requireAdmin($msgId)) return;
                 $pay = Db::one('SELECT * FROM `payments` WHERE `id` = ?', [(int)$arg]);
                 if (!$pay) { $this->edit($msgId, 'پرداخت پیدا نشد.'); return; }
                 $approve = $act === 'apayok';
@@ -1739,8 +1859,9 @@ class Bot
                     $until = date('Y-m-d H:i:s', $base + $days * 86400);
                     Db::q("UPDATE `user` SET `plan` = 'vip', `plan_until` = ?, `access` = 1, `is_blocked` = 0 WHERE `id` = ?", [$until, $pay['user_id']]);
                     Db::logEvent($this->uid, 'payment_ok', (string)$pay['id']);
+                    AffiliateProgram::onPayment((int)$pay['user_id'], (int)$pay['amount']);
                     tgSend($pay['user_id'], "✅ پرداخت شما تأیید شد.\n💎 اشتراک ویژه فعال شد — تا " . faDateTime($until)
-                        . "\n🌐 سقف سایت‌ها: " . faNum(Db::getInt('vip_max_sites', 10)), $this->mainMenu());
+                        . "\n🌐 سقف سایت‌ها: " . faNum(Db::getInt('vip_max_sites', 10)), ['reply_markup' => $this->mainMenu()]);
                     $this->edit($msgId, "✅ پرداخت #" . faNum($pay['id']) . " تأیید و اشتراک فعال شد.");
                 } else {
                     Db::logEvent($this->uid, 'payment_reject', (string)$pay['id']);
@@ -1753,6 +1874,7 @@ class Bot
 
             // دکمهٔ ناشناس (مثلاً از پیام قدیمی) — کاربر را بدون راه برگشت رها نکن
             default:
+                if ($this->addonCallback($act, $arg, $parts, $msgId)) return;
                 $this->clearStep();
                 $this->edit($msgId, $this->welcome(), $this->mainMenu());
                 return;
@@ -1820,7 +1942,8 @@ class Bot
             . "📊 <b>مانیتورینگ سرور و سایت</b>\n\n"
             . "با این ربات می‌توانید تا <b>" . faNum($this->maxSites()) . " سایت/سرور</b> را زیر نظر بگیرید و وضعیت آن‌ها هر <b>"
             . faNum($interval) . " ثانیه</b> بررسی شود.\n\n"
-            . "📈 آپتایم دقیق با توضیح کامل، زمان پاسخ، تاریخچهٔ قطعی‌ها، اطلاع‌رسانی لحظه‌ای و یک <b>صفحهٔ وب اشتراکی</b> برای نمایش زنده.\n\n"
+            . "📈 آپتایم دقیق با توضیح کامل، زمان پاسخ، تاریخچهٔ قطعی‌ها، اطلاع‌رسانی لحظه‌ای و یک <b>صفحهٔ وب اشتراکی</b> برای نمایش زنده.\n"
+            . "📱 با دکمهٔ <b>«اپلیکیشن»</b> در منو، همهٔ این‌ها را در یک اپلیکیشن گرافیکی سریع ببینید.\n\n"
             . $vip
             . "🔁 موتور چک: " . ($engine['paused'] ? "⏸ <b>متوقف (توسط مدیر)</b>" : ($engine['cron_healthy'] ? "🟢 فعال" : "🟡 کرون هنوز راه‌اندازی نشده"))
             . ($engine['last_round'] ? "\n🕒 آخرین راند: " . faDateTime($engine['last_round']) : '');
@@ -1849,7 +1972,14 @@ class Bot
             . "«🌐 دامنه‌های من» تاریخ انقضای ثبت دامنه را پایش می‌کند؛ گواهی SSL سایت‌های HTTPS هم خودکار بررسی و هشدار داده می‌شود.\n\n"
             . "<b>۷) گروه و کانال</b>\n"
             . "ربات را به گروه اضافه کنید و با <code>/add https://example.com</code> مانیتور بسازید. اعلان قطعی/برقراری داخل گروه ارسال می‌شود. سقف مانیتورهای گروه جداست.\n\n"
-            . "⚙️ از «⚙️ تنظیمات» می‌توانید اعلان‌ها را خاموش/روشن کنید.";
+            . "⚙️ از «⚙️ تنظیمات» می‌توانید اعلان‌ها را خاموش/روشن کنید.\n\n"
+            . "<b>۸) افزونه‌ها</b> (از «⚙️ تنظیمات» → «🧩 افزونه‌ها»)\n"
+            . "▪️ 📤/📥 خروجی و ورود سایت‌ها به‌صورت CSV یا JSON\n"
+            . "▪️ 🔔 وبهوک — ارسال رویداد قطعی/برقراری به Discord، Slack یا هر سرویس دیگر\n"
+            . "▪️ 🔗 اتصال مستقیم Slack / Discord\n"
+            . "▪️ 🧠 تحلیل هوشمند — صدک تأخیر، امتیاز پایداری، پیش‌بینی و مقایسه با سایر سایت‌ها (یا دستور /analyze)\n"
+            . "▪️ 📄 گزارش SLA ماهانه با خروجی HTML و CSV\n"
+            . "▪️ 💰 برنامهٔ همکاری — کسب درآمد از معرفی دوستان (یا دستور /affiliate)";
     }
 
     private function sitesListText(): string
@@ -2227,23 +2357,35 @@ class Bot
         $hubs = Db::all('SELECT `chat_type`, COUNT(*) c FROM `chat_hub` GROUP BY `chat_type`');
         $hubTxt = '';
         foreach ($hubs as $h) $hubTxt .= ((string)$h['chat_type'] === 'channel' ? '📢 کانال: ' : '👥 گروه: ') . faNum((int)$h['c']) . '  ';
+        // مقدارها یک‌بار خوانده می‌شوند تا دسترسی دوم به کلیدِ غایب، هشدار PHP ندهد
+        $maxUsers = (int)($s['max_users'] ?? 0);
+        $price = (int)($s['price'] ?? 0);
+        $maxDomains = (int)($s['max_domains'] ?? 10);
         return "🛠 <b>پنل مدیریت</b>\n\n"
-            . "▫️ سقف کاربران: " . ((int)($s['max_users'] ?? 0) > 0 ? faNum((int)$s['max_users']) : 'نامحدود') . "\n"
+            . "▫️ سقف کاربران: " . ($maxUsers > 0 ? faNum($maxUsers) : 'نامحدود') . "\n"
             . "▫️ سقف سایت عادی: " . faNum((int)($s['max_sites'] ?? 5)) . " • ویژه: " . faNum((int)($s['vip_max_sites'] ?? 10)) . "\n"
             . "▫️ فاصلهٔ چک: " . faNum((int)($s['check_interval'] ?? 20)) . " ثانیه\n"
             . "▫️ آستانهٔ هشدار قطعی: " . faNum((int)($s['fail_threshold'] ?? 2)) . " چک ناموفق پیاپی\n"
             . "▫️ حالت دسترسی: " . $modeTxt . "\n"
-            . "▫️ قیمت اشتراک: " . ((int)($s['price'] ?? 0) > 0 ? faMoney((int)$s['price']) : '—') . " • مدت: " . faNum((int)($s['vip_days'] ?? 30)) . " روز\n"
+            . "▫️ قیمت اشتراک: " . ($price > 0 ? faMoney($price) : '—') . " • مدت: " . faNum((int)($s['vip_days'] ?? 30)) . " روز\n"
             . "▫️ شماره کارت: <code>" . tgH((string)($s['card'] ?? '—')) . "</code>\n"
             . "▫️ اعلان‌های سراسری: " . (Db::getBool('notify', true) ? '🔔 روشن' : '🔕 خاموش')
             . " • کندی: " . (Db::getBool('notify_slow', true) ? '🔔 روشن' : '🔕 خاموش') . "\n"
             . "▫️ 🔐 هشدار گواهی: " . faNum((int)($s['ssl_warn_days'] ?? 14)) . " روز قبل"
             . " • 🌐 هشدار دامنه: " . faNum((int)($s['domain_warn_days'] ?? 14)) . " روز قبل\n"
-            . "▫️ سقف دامنه: " . ((int)($s['max_domains'] ?? 10) > 0 ? faNum((int)$s['max_domains']) : 'نامحدود') . "\n"
+            . "▫️ سقف دامنه: " . ($maxDomains > 0 ? faNum($maxDomains) : 'نامحدود') . "\n"
             . "▫️ سقف مانیتور گروه: " . faNum((int)($s['group_max_sites'] ?? 10)) . " • منشن: " . $mentionTxt . "\n"
             . ($hubTxt !== '' ? "▫️ گروه/کانال‌های متصل: " . trim($hubTxt) . "\n" : '')
-            . "▫️ موتور چک: " . ($e['paused'] ? '⏸ <b>متوقف</b>' : '🟢 فعال')
-            . ($e['last_round'] ? " • آخرین راند: " . timeAgo($e['last_round'], tzOffset()) : '');
+            . "▫️ موتور چک: " . ($e['paused'] ? '⏸ <b>متوقف</b>'
+                : (!empty($e['cron_healthy']) ? '🟢 فعال' : '🟡 <b>کرون راه‌اندازی نشده</b>'))
+            . ($e['last_round'] ? " • آخرین راند: " . timeAgo($e['last_round'], tzOffset()) : '')
+            . "\n\n<b>🔗 آدرس‌های فعال</b>\n"
+            . "▫️ آدرس پایه: <code>" . tgH(effectiveBaseUrl() ?: '— تنظیم نشده —') . "</code>\n"
+            . "▫️ اپلیکیشن: <code>" . tgH(miniAppUrl() ?: '—') . "</code>\n"
+            . "▫️ صفحهٔ وضعیت: <code>" . tgH((function () {
+                $b = effectiveBaseUrl();
+                return $b !== '' ? $b . '/status.php?u=&lt;توکن&gt;' : '—';
+            })()) . "</code>";
     }
 
     private function cronText(): string
@@ -2298,16 +2440,19 @@ class Bot
     private function mainMenu(): string
     {
         $paused = $this->u && (int)$this->u['paused'] === 1;
-        $rows = [
-            [['text' => '➕ افزودن سایت'], ['text' => '📋 سایت‌های من']],
-            [['text' => '📊 رنکینگ'], ['text' => '📈 گزارش من']],
-            [['text' => '🔗 صفحهٔ وضعیت من'], ['text' => '👥 مانیتورهای مشترک']],
-            [['text' => $paused ? '▶️ ادامهٔ چک‌ها' : '⏸ توقف چک‌ها'], ['text' => '🌐 دامنه‌های من']],
-            [['text' => '⚙️ تنظیمات'], ['text' => '🛒 اشتراک ویژه']],
-            [['text' => 'ℹ️ راهنما']],
-            // سطر همیشه‌حاضر: در هر مرحلهٔ ورودی راه فرار دارد
-            [['text' => '❌ انصراف']],
-        ];
+        $appUrl = miniAppUrl();
+        $rows = [];
+        if ($appUrl !== '') {
+            $rows[] = [['text' => '📱 اپلیکیشن', 'web_app' => ['url' => $appUrl]]];
+        }
+        $rows[] = [['text' => '➕ افزودن سایت'], ['text' => '📋 سایت‌های من']];
+        $rows[] = [['text' => '📊 رنکینگ'], ['text' => '📈 گزارش من']];
+        $rows[] = [['text' => '🔗 صفحهٔ وضعیت من'], ['text' => '👥 مانیتورهای مشترک']];
+        $rows[] = [['text' => $paused ? '▶️ ادامهٔ چک‌ها' : '⏸ توقف چک‌ها'], ['text' => '🌐 دامنه‌های من']];
+        $rows[] = [['text' => '⚙️ تنظیمات'], ['text' => '🛒 اشتراک ویژه']];
+        $rows[] = [['text' => 'ℹ️ راهنما']];
+        // سطر همیشه‌حاضر: در هر مرحلهٔ ورودی راه فرار دارد
+        $rows[] = [['text' => '❌ انصراف']];
         if ($this->isAdmin()) {
             $rows[] = [['text' => '📊 آمار مدیریتی'], ['text' => '📣 همگانی']];
             $rows[] = [['text' => '👥 کاربران'], ['text' => '⚙️ پنل مدیریت']];
@@ -2344,12 +2489,14 @@ class Bot
             [['text' => '📆 مدت اشتراک (روز)', 'callback_data' => 'set:vip_days'], ['text' => '👥 سقف مانیتور گروه', 'callback_data' => 'set:group_max_sites']],
             [['text' => '🔐 هشدار گواهی (روز)', 'callback_data' => 'set:ssl_warn_days'], ['text' => '🌐 هشدار دامنه (روز)', 'callback_data' => 'set:domain_warn_days']],
             [['text' => '📇 سقف دامنه', 'callback_data' => 'set:max_domains'], ['text' => '🔕 اعلان کندی', 'callback_data' => 'set:notify_slow']],
+            [['text' => '🌐 آدرس اپلیکیشن (base_url)', 'callback_data' => 'set:base_url'], ['text' => '🌐 دامنه ربات', 'callback_data' => 'set:domain']],
             [['text' => Db::getBool('notify', true) ? '🔕 خاموش کردن اعلان‌ها' : '🔔 روشن کردن اعلان‌ها', 'callback_data' => 'set:notify'],
              ['text' => '🗣 منشن در گروه', 'callback_data' => 'set:group_mention']],
             [['text' => Db::getBool('pause_all', false) ? '▶️ ادامهٔ چک سراسری' : '⏸ توقف سراسری چک', 'callback_data' => Db::getBool('pause_all', false) ? 'resume' : 'pause']],
             [['text' => '🎟 کدهای فعال‌سازی', 'callback_data' => 'codes'], ['text' => '📊 آمار', 'callback_data' => 'astats']],
             [['text' => '🏦 درگاه‌های پرداخت', 'callback_data' => 'pgws_list'], ['text' => '⏰ کرون چک', 'callback_data' => 'cron']],
             [['text' => '📣 همگانی', 'callback_data' => 'abroadcast'], ['text' => '💳 پرداخت‌های در انتظار', 'callback_data' => 'apays']],
+            [['text' => '🧩 وضعیت افزونه‌ها', 'callback_data' => 'sysstat'], ['text' => '💰 پرداخت همکاران', 'callback_data' => 'apayouts']],
             [['text' => '🔙 بازگشت', 'callback_data' => 'menu']],
         ]);
     }
@@ -2382,6 +2529,7 @@ class Bot
              ['text' => '📜 رخدادها', 'callback_data' => 'sincer:' . $id]],
             [['text' => '🌐 لینک تک‌سایت', 'callback_data' => 'slink:' . $id],
              ['text' => '🔐 گواهی SSL', 'callback_data' => 'ssl:' . $id]],
+            [['text' => '🔔 وبهوک', 'callback_data' => 'whadd:' . $id]],
             [['text' => '🗑 حذف سایت', 'callback_data' => 'sdel:' . $id]],
             [['text' => '🔙 سایت‌های من', 'callback_data' => 'sites']],
         ];
@@ -2431,6 +2579,7 @@ class Bot
             [['text' => (int)$this->u['notify'] ? '🔕 خاموش کردن اعلان‌ها' : '🔔 روشن کردن اعلان‌ها', 'callback_data' => 'tnotify']],
             [['text' => '👥 مانیتورهای مشترک', 'callback_data' => 'shared'], ['text' => '🌐 دامنه‌های من', 'callback_data' => 'domains']],
             [['text' => '📜 رخدادهای من', 'callback_data' => 'uincer'], ['text' => '🔗 صفحهٔ وضعیت من', 'callback_data' => 'share']],
+            $this->addonEntryRow(),
             [['text' => '🛒 اشتراک', 'callback_data' => 'sub']],
             [['text' => '🔙 بازگشت', 'callback_data' => 'menu']],
         ]);

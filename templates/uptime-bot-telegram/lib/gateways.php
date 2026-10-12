@@ -57,14 +57,26 @@ class PayHttp
     public static function call(string $url, array $params, array $headers = [], string $method = 'POST', int $timeout = 20): array
     {
         $out = ['ok' => false, 'status' => 0, 'body' => '', 'json' => [], 'error' => ''];
-        $isJson = in_array('application/json', $headers, true) || $headers === [];
+        
+        // آیا Content-Type قبلاً تعیین شده است؟
+        $hasContentType = false;
+        foreach ($headers as $h) {
+            if (stripos($h, 'Content-Type:') === 0) {
+                $hasContentType = true;
+                break;
+            }
+        }
+        
+        // اگر Content-Type تعریف نشده است، پیش‌فرض را تنظیم کن
+        $isJson = !$hasContentType && !in_array('application/x-www-form-urlencoded', $headers, true);
+        
         $body = $isJson
             ? json_encode($params, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
             : http_build_query($params);
 
         $ch = curl_init($url);
         $h = $headers;
-        if ($isJson) $h[] = 'Content-Type: application/json';
+        if ($isJson && !$hasContentType) $h[] = 'Content-Type: application/json';
         $h[] = 'Accept: application/json';
         $h[] = 'User-Agent: UptimeBot/1.0';
 
@@ -89,7 +101,7 @@ class PayHttp
         $res = curl_exec($ch);
         $out['status'] = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
         $err = (string)curl_error($ch);
-        curl_close($ch);
+        unset($ch); // curl_close() از PHP 8.0 بی‌اثر و در 8.5 deprecated است
 
         $out['body'] = toStr($res);
         $out['json'] = json_decode($out['body'], true);

@@ -293,6 +293,19 @@ final class Migrator
             'CREATE INDEX IF NOT EXISTS idx_orders_panel ON orders(panel_id)',
 
             // ------------------------------------------------------------------
+            // آدرس پنل برای اتصال‌های چندپنلی
+            //
+            // چرا این ستون لازم شد؟ قبلاً فقط یک `panel.base_url` سراسری در
+            // `config.php` بود، پس «اتصال پنل جدید» عملاً بی‌معنا بود: هر
+            // اتصالی مجبور بود روی همان دامنهٔ ثابت کار کند. با این ستون هر
+            // ردیف آدرس خودش را دارد و نماینده می‌تواند به پنل دومش هم وصل شود.
+            //
+            // NULL یعنی «از `panel.base_url` استفاده کن» تا نصب‌های موجود بدون
+            // تغییر رفتار کار کنند.
+            // ------------------------------------------------------------------
+            'ALTER TABLE panels ADD COLUMN base_url TEXT',
+
+            // ------------------------------------------------------------------
             // انتقال دادهٔ موجود
             // ------------------------------------------------------------------
 
@@ -547,6 +560,202 @@ final class Migrator
             'ALTER TABLE orders ADD COLUMN max_users INTEGER NOT NULL DEFAULT 0',
             'ALTER TABLE panels ADD COLUMN user_limit INTEGER NOT NULL DEFAULT 0',
         ],
+
+        // ------------------------------------------------------------------
+        // 011: ویژگی‌های درخواستی کاربر
+        // ------------------------------------------------------------------
+        '011_user_features' => [
+            // ۱) اشتراک مدت‌دار برای ربات‌های فرزند
+            'ALTER TABLE panels ADD COLUMN subscription_expire_at INTEGER',
+            'ALTER TABLE panels ADD COLUMN is_subscribed INTEGER NOT NULL DEFAULT 0',
+
+            // ۲) سیستم معرفی (ریفرال) پاداش اسلات
+            'ALTER TABLE referrals ADD COLUMN slate_bonus_toman INTEGER NOT NULL DEFAULT 0',
+
+            // ۳) ربات آزمایشی با حذف خودکار
+            'ALTER TABLE test_configs ADD COLUMN auto_delete_at INTEGER',
+            'ALTER TABLE test_configs ADD COLUMN is_auto_delete INTEGER NOT NULL DEFAULT 0',
+
+            // ۴) سهمیه دیسک و ربات مرده
+            'ALTER TABLE panels ADD COLUMN disk_quota INTEGER NOT NULL DEFAULT 0',
+            'ALTER TABLE panels ADD COLUMN is_dead INTEGER NOT NULL DEFAULT 0',
+            'ALTER TABLE panels ADD COLUMN last_seen_at INTEGER',
+
+            // ۵) مانیتورینگ مرکزی ربات‌های فرزند
+            'ALTER TABLE panels ADD COLUMN monitor_status TEXT NOT NULL DEFAULT \'online\'',
+            'ALTER TABLE panels ADD COLUMN monitor_last_check INTEGER',
+
+            // ۷) انتقال مالکیت
+            'ALTER TABLE panels ADD COLUMN original_user_id INTEGER',
+
+            // ۸) لاگ حسابرسی ادمین
+            'CREATE TABLE IF NOT EXISTS admin_logs (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                admin_user_id   INTEGER NOT NULL,
+                action          TEXT NOT NULL,
+                target_type     TEXT NOT NULL,
+                target_id       INTEGER NOT NULL,
+                details         TEXT,
+                ip_address      TEXT,
+                created_at      INTEGER NOT NULL
+            )',
+            'CREATE INDEX IF NOT EXISTS idx_admin_logs_admin ON admin_logs(admin_user_id)',
+            'CREATE INDEX IF NOT EXISTS idx_admin_logs_target ON admin_logs(target_type, target_id)',
+            'CREATE INDEX IF NOT EXISTS idx_admin_logs_created ON admin_logs(created_at)',
+
+            // ۱۰) داشبورد درآمد
+            'ALTER TABLE orders ADD COLUMN revenue_share_toman INTEGER NOT NULL DEFAULT 0',
+            'ALTER TABLE orders ADD COLUMN is_referred INTEGER NOT NULL DEFAULT 0',
+        ],
+
+        // ------------------------------------------------------------------
+        // 012: امتیاز وفاداری + ضد brute-force + گزارش ادمین + قیمت‌گذاری چنددوره‌ای
+        // ------------------------------------------------------------------
+        '012_loyalty_security_pricing' => [
+            'ALTER TABLE users ADD COLUMN loyalty_points INTEGER NOT NULL DEFAULT 0',
+            'ALTER TABLE packages ADD COLUMN prices TEXT',
+
+            'CREATE TABLE IF NOT EXISTS login_attempts (
+                telegram_id INTEGER NOT NULL,
+                kind        TEXT NOT NULL,
+                attempts    INTEGER NOT NULL DEFAULT 0,
+                locked_until INTEGER NOT NULL DEFAULT 0,
+                updated_at  INTEGER NOT NULL,
+                PRIMARY KEY (telegram_id, kind)
+            )',
+
+            "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES ('referral_bonus_level2_toman', '25000', 0)",
+            "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES ('loyalty_discount_percent', '5', 0)",
+            "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES ('loyalty_redeem_points', '100', 0)",
+            "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES ('login_max_attempts', '5', 0)",
+            "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES ('login_lock_minutes', '15', 0)",
+            "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES ('admin_daily_report', '0', 0)",
+            "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES ('admin_weekly_report', '0', 0)",
+        ],
+
+        // `UserProfile` از قبل نوشته شده بود و این ستون‌ها را می‌خواند، ولی
+        // هیچ‌کدام در اسکیما نبود؛ یعنی آن کلاس با یک خطای SQL می‌مرد.
+        '013_user_profile' => [
+            'ALTER TABLE users ADD COLUMN email TEXT',
+            'ALTER TABLE users ADD COLUMN phone TEXT',
+            'ALTER TABLE users ADD COLUMN notifications_enabled INTEGER NOT NULL DEFAULT 1',
+            'ALTER TABLE users ADD COLUMN digest_emails INTEGER NOT NULL DEFAULT 0',
+        ],
+
+        // پنل‌هایی که با «کلید API» وصل شده‌اند با رمز عبور کار نمی‌کنند و
+        // برعکس. بدون این ستون، «بروزرسانی از پنل» یا ساخت پنل نمایندگی روی
+        // چنین پنل‌هایی همیشه ۴۰۳ می‌داد. مقدار NULL یعنی رمز عبور (حالت
+        // قدیمی که همهٔ ردیف‌های موجود دارند).
+        '014_panel_auth_mode' => [
+            'ALTER TABLE panels ADD COLUMN auth_mode TEXT',
+        ],
+
+        // کلید API از رمز عبور جدا ذخیره می‌شود تا یک ردیف بتواند **هر دو**
+        // را داشته باشد.
+        //
+        // چرا لازم است: کلیدها معمولاً مجوزهای ناقص دارند (مثلاً `admins.update`
+        // ندارند و شارژ پنل با آن‌ها ۴۰۳ می‌دهد). ربات اول با کلید امتحان
+        // می‌کند و فقط اگر کلید ناتوان بود به رمز برمی‌گردد — ولی اگر هر دو
+        // در یک ستون بودند، رمزگشایی‌شان قابل تفکیک نبود.
+        '015_panel_api_key' => [
+            'ALTER TABLE panels ADD COLUMN api_key TEXT',
+            'ALTER TABLE panels ADD COLUMN api_key_fallback INTEGER NOT NULL DEFAULT 0',
+        ],
+
+        // ------------------------------------------------------------------
+        // سلامتِ واقعیِ درگاه‌های پرداخت.
+        //
+        // چرا لازم است: نسخهٔ قبلیِ `PaymentGatewayOptimizer` یک health-check
+        // نوشته بود که همیشه `true` برمی‌گرداند و آمارش هم عدد ساختگی بود
+        // (۹۵٪ موفقیت، ۱۰٬۰۰۰ تراکنش). اگر به ادمین نشان داده می‌شد، دروغ
+        // می‌گفت؛ اگر به مسیر پول وصل می‌شد، خرابیِ واقعیِ درگاه را نامرئی
+        // می‌کرد.
+        //
+        // این جدول به‌جای «پروب زدن به درگاه»، نتیجهٔ **تلاش‌های واقعیِ پرداخت**
+        // را نگه می‌دارد. پروبِ فعال برای درگاه پرداخت یعنی درخواست ساختگیِ پول
+        // و خطر سوءاستفاده — پس سنجهٔ درست، همان چیزی است که واقعاً دیده‌ایم.
+        // ------------------------------------------------------------------
+        '016_gateway_health' => [
+            'CREATE TABLE IF NOT EXISTS gateway_health (
+                gateway      TEXT PRIMARY KEY,
+                healthy      INTEGER NOT NULL DEFAULT 1,
+                attempts     INTEGER NOT NULL DEFAULT 0,
+                successes    INTEGER NOT NULL DEFAULT 0,
+                failures     INTEGER NOT NULL DEFAULT 0,
+                total_ms     INTEGER NOT NULL DEFAULT 0,
+                last_error   TEXT,
+                checked_at   INTEGER NOT NULL DEFAULT 0,
+                updated_at   INTEGER NOT NULL DEFAULT 0
+            )',
+        ],
+
+        // ------------------------------------------------------------------
+        // صندوقِ مرده برای وبهوک‌هایی که پردازششان نیمه‌کاره ماند.
+        //
+        // چرا لازم است: تلگرام وبهوک را فقط **یک‌بار** تحویل می‌دهد. اگر پردازش
+        // (مثلاً اعمال بسته روی پنل) وسط کار بمیرد، آن آپدیت برای همیشه از
+        // دست می‌رود — نه خطایی به کاربر می‌رسد، نه تکراری. مشتری پول داده و
+        // ربات هیچ‌وقت خبردار نمی‌شود.
+        //
+        // `version` نگه داشته شده تا اگر روزی پردازشِ تازه‌ای برای یک رویدادِ
+        // قدیمی نوشته شد، آن رویداد دوباره اجرا نشود.
+        // ------------------------------------------------------------------
+        '017_webhook_dead_letters' => [
+            'CREATE TABLE IF NOT EXISTS webhook_dead_letters (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id    TEXT NOT NULL UNIQUE,
+                method      TEXT NOT NULL,
+                attempts    INTEGER NOT NULL DEFAULT 0,
+                last_error  TEXT,
+                payload     TEXT,
+                created_at  INTEGER NOT NULL,
+                updated_at  INTEGER NOT NULL
+            )',
+            'CREATE INDEX IF NOT EXISTS idx_dead_letters_attempts ON webhook_dead_letters (attempts)',
+        ],
+
+        // ------------------------------------------------------------------
+        // ۱۸) کمیسیون معرفی — مدل دوم
+        //
+        // تا اینجا هر معرف فقط یک «پاداش اولیه»ٔ ثابت می‌گرفت و بعد از آن هیچ
+        // انگیزه‌ای برای ادامهٔ معرفی نداشت. این جدول دفترِ کمیسیون است:
+        // هر سفارشِ واجدشرایطِ یک معرفی‌شده، دقیقاً **یک ردیف** کمیسیون
+        // می‌سازد.
+        //
+        // ⭐️ قیدِ یکتای `order_id` تمامِ تضمینِ اتمیک بودن است:
+        //
+        //   • بدون آن، دو اجرای همزمانِ کرون هر دو می‌دیدند که سفارش کمیسیون
+        //     نگرفته و هر دو پول را به کیف پول معرف می‌ریختند.
+        //   • بدون آن، یک سفارشِ پرداخت‌شده که کاربر «بررسی وضعیت» را چندبار
+        //     زده بود، چندبار کمیسیون می‌گرفت.
+        //
+        // حتی اگر منطقِ کرون هم اشتباه کند، دیتابیس اجازهٔ پرداختِ دوبارهٔ
+        // یک سفارش را نمی‌دهد — یعنی شمارهٔ ثبت‌شده در دفتر، حقیقتِ مالی است
+        // و نه «آنچه کد فکر می‌کند پرداخت کرده».
+        // ------------------------------------------------------------------
+        '018_referral_commission' => [
+            'CREATE TABLE IF NOT EXISTS referral_commissions (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                referral_id      INTEGER NOT NULL,
+                referrer_user_id INTEGER NOT NULL,
+                referee_user_id  INTEGER NOT NULL,
+                order_id         INTEGER NOT NULL,
+                percent          INTEGER NOT NULL DEFAULT 0,
+                base_toman       INTEGER NOT NULL DEFAULT 0,
+                amount_toman     INTEGER NOT NULL DEFAULT 0,
+                created_at       INTEGER NOT NULL,
+                FOREIGN KEY (referral_id) REFERENCES referrals(id) ON DELETE CASCADE,
+                FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE
+            )',
+            // تضمینِ «هر سفارش حداکثر یک کمیسیون».
+            'CREATE UNIQUE INDEX IF NOT EXISTS idx_ref_comm_order ON referral_commissions (order_id)',
+            'CREATE INDEX IF NOT EXISTS idx_ref_comm_referrer ON referral_commissions (referrer_user_id, created_at)',
+            'CREATE INDEX IF NOT EXISTS idx_ref_comm_referee ON referral_commissions (referee_user_id)',
+
+            // شمارندهٔ «چند خرید تا اینجا کمیسیون گرفته»، تا سقفِ قابل تنظیم
+            // اجرا شود. یکتا بودنِ per-referral است، نه global.
+            'CREATE UNIQUE INDEX IF NOT EXISTS idx_ref_comm_pair ON referral_commissions (referral_id, order_id)',
+        ],
         ];
     }
 
@@ -622,8 +831,8 @@ final class Migrator
             return $this->migrate();
         }
 
-        $newest = (string) end($known);
-        $latest = (string) end($applied);
+        $newest = self::newestName($known);
+        $latest = self::newestName($applied);
 
         if ($latest !== $newest) {
             Logger::info('Database schema outdated, migrating on hot path', [
@@ -634,7 +843,100 @@ final class Migrator
             return $this->migrate();
         }
 
-        return [];
+        // نسخه به‌روز است، ولی این به‌تنهایی تضمین نمی‌کند اسکیما واقعاً کامل
+        // باشد: کافی است یک `ALTER TABLE … ADD COLUMN` در گذشته نیمه‌کاره مانده
+        // باشد (مثلاً دیتابیس از روی نسخهٔ پشتیبان برگردانده شده باشد). آن‌وقت
+        // `migrations` نسخهٔ جدید را نشان می‌دهد ولی ستون نیست و هر درخواست
+        // با «no such column» می‌میرد ⇒ خطای ۵۰۰ به کاربر.
+        //
+        // پس اینجا ارزان‌ترین ممکن بررسی واقعی اسکیما را انجام می‌دهیم و اگر
+        // چیزی کم بود، همان `ALTER` را دوباره اجرا می‌کنیم.
+        return $this->repairMissingColumns();
+    }
+
+    /**
+     * اجرای دوبارهٔ `ADD COLUMN`هایی که واقعاً در دیتابیس غایب‌اند.
+     *
+     * این کار **idempotent** است: اگر ستون از قبل باشد، SQLite خطای
+     * «duplicate column» می‌دهد که اینجا نادیده گرفته می‌شود. پس اگر دیتابیس
+     * سالم بود، هیچ اتفاقی نمی‌افتد.
+     *
+     * @return array<int, string> دستورهایی که واقعاً اجرا شدند
+     */
+    private function repairMissingColumns(): array
+    {
+        $fixed = [];
+
+        foreach ($this->missingColumns() as $sql) {
+            try {
+                $this->db->pdo()->exec($sql);
+                $fixed[] = $sql;
+            } catch (Throwable $e) {
+                // «duplicate column» یعنی در واقع هست؛ خطای دیگر مهم است.
+                if (!str_contains(strtolower($e->getMessage()), 'duplicate column')) {
+                    Logger::error('Could not repair missing column', [
+                        'sql'   => $sql,
+                        'error' => $e->getMessage(),
+                    ]);
+                }
+            }
+        }
+
+        if ($fixed !== []) {
+            Logger::warning('Schema drift repaired on hot path', ['statements' => $fixed]);
+        }
+
+        return $fixed;
+    }
+
+    /**
+     * دستورهای `ALTER TABLE … ADD COLUMN` که ستونِ مقصدشان الان وجود ندارد.
+     *
+     * چرا این فهرست را از خودِ `migrations()` استخراج می‌کنیم و نه دستی
+     * نگه می‌داریم؟ چون فهرست دستی با هر مایگریشن تازه از راه می‌افتد و
+     * همان راه‌افتادگی، دقیقاً bugی است که این متد دارد درستش می‌کند.
+     *
+     * ⚠️ متنِ اصلی دستور برگردانده می‌شود، نه یک `ADD COLUMN` بازسازی‌شده؛ چون
+     * نوع و قید ستون (`TEXT`، `NOT NULL DEFAULT 0` و…) همان چیزی است که بقیهٔ
+     * کد رویش تکیه می‌کند و بازسازیِ بدون نوع، ستون را با affinity اشتباه
+     * می‌ساخت.
+     *
+     * @return array<int, string>
+     */
+    private function missingColumns(): array
+    {
+        /** @var array<string, array<string, string>> $wanted جدول ⇒ ستون ⇒ دستور اصلی */
+        $wanted = [];
+
+        foreach (self::migrations() as $statements) {
+            foreach ($statements as $sql) {
+                if (preg_match('/^\s*ALTER\s+TABLE\s+(\w+)\s+ADD\s+COLUMN\s+(\w+)/i', $sql, $m) === 1) {
+                    $wanted[$m[1]][$m[2]] = $sql;
+                }
+            }
+        }
+
+        $missing = [];
+
+        // هر جدول فقط **یک‌بار** پرسیده می‌شود، نه هر ستون.
+        foreach ($wanted as $table => $columns) {
+            if (!$this->db->tableExists($table)) {
+                continue;   // خودِ جدول را `migrate()` می‌سازد.
+            }
+
+            $existing = array_column(
+                $this->db->all('PRAGMA table_info("' . $table . '")'),
+                'name'
+            );
+
+            foreach ($columns as $column => $sql) {
+                if (!in_array($column, $existing, true)) {
+                    $missing[] = $sql;
+                }
+            }
+        }
+
+        return $missing;
     }
 
     /**
@@ -675,8 +977,18 @@ final class Migrator
             try {
                 $this->db->transaction(function () use ($name, $statements): void {
                     foreach ($statements as $sql) {
+                        // «ADD COLUMN» ذاتاً تکرارپذیر نیست و روی ستون موجود
+                        // با خطای SQLite می‌شکند. آن را خودمان رد می‌کنیم تا
+                        // اجرای مهاجریشن به وضعیت جدول `migrations` وابسته
+                        // نباشد — وگرنه هر بار که آن جدول از رابطهٔ همگامی
+                        // خارج شود، کل ربات با «duplicate column» می‌میرد.
+                        if ($this->columnAlreadyExists($sql)) {
+                            continue;
+                        }
+
                         $this->db->pdo()->exec($sql);
                     }
+
                     $this->db->insert('migrations', [
                         'name'       => $name,
                         'applied_at' => time(),
@@ -705,6 +1017,41 @@ final class Migrator
     }
 
     /**
+     * آیا این دستور یک `ADD COLUMN` است که ستونش از قبل در جدول هست؟
+     *
+     * اگر دستور اصلاً `ADD COLUMN` نباشد، `false` برمی‌گردد تا مثل قبل اجرا
+     * شود — این تابع فقط برای رد کردنِ دستورات تکراری است، نه تغییر رفتار.
+     */
+    private function columnAlreadyExists(string $sql): bool
+    {
+        $pattern = '/^\s*ALTER\s+TABLE\s+["\'`]?(\w+)["\'`]?\s+ADD\s+COLUMN\s+["\'`]?(\w+)["\'`]?/i';
+
+        if (preg_match($pattern, $sql, $m) !== 1) {
+            return false;
+        }
+
+        $table = $m[1];
+
+        // جدول هنوز ساخته نشده؟ بعداً در همان تراکنش ساخته می‌شود.
+        if (!$this->db->tableExists($table)) {
+            return false;
+        }
+
+        foreach ($this->db->all('PRAGMA table_info(' . $table . ')') as $column) {
+            if (strcasecmp((string) $column['name'], $m[2]) === 0) {
+                Logger::info('Migration column already present, skipping', [
+                    'table'  => $table,
+                    'column' => $m[2],
+                ]);
+
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * آیا خطای مایگریشن یعنی «قبلاً اجرا شده» است؟
      */
     private function alreadyApplied(string $name, Throwable $e): bool
@@ -721,6 +1068,38 @@ final class Migrator
 
         // باید مطمئن شویم واقعاً ثبت شده، وگرنه هر بار تکرار می‌شود.
         return in_array($name, $this->appliedMigrations(), true);
+    }
+
+    /**
+     * تازه‌ترین نام از روی **شمارهٔ** مهاجریشن، نه ترتیب آرایه.
+     *
+     * چرا لازم است؟ چون کل این مقایسه فقط یک کار می‌کند: «آیا دیتابیس از
+     * نظرِ اسکیمای کد فعلی عقب افتاده؟». اگر به ترتیبِ قرار گرفتن کلیدها در آرایه
+     * تکیه کنیم، هر بار که کسی یک مهاجریشن را وسط آرایه جا بدهد یا پاک کند،
+     * این مقایسه اشتباه می‌شود و یا مهاجریشن‌های اجرانشده بی‌صدا می‌مانند، یا
+     * بی‌جهت روی هر درخواست «در حال مهاجرت» می‌نویسد.
+     *
+     * نام‌ها شمارهٔ سه‌رقمی دارند (`007_flood_fingerprint`)، پس بزرگ‌ترین عدد
+     * یعنی تازه‌ترین مهاجریشن — مستقل از اینکه در آرایه کجا نشسته باشد.
+     *
+     * @param array<int, string> $names
+     */
+    private static function newestName(array $names): string
+    {
+        $newest = '';
+
+        foreach ($names as $name) {
+            $name  = (string) $name;
+            $num   = (int) strtok($name, '_');
+
+            $best  = (int) strtok($newest === '' ? '0_' : $newest, '_');
+
+            if ($num >= $best) {
+                $newest = $name;
+            }
+        }
+
+        return $newest;
     }
 
     /**

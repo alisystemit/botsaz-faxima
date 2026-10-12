@@ -333,7 +333,13 @@ final class Provisioner
         // ------------------------------------------------------------------
         // مسیر ۲: ساخت واقعی.
         //
-        // نکتهٔ حیاتی: اینجا **قبل** از ساخت، پرچم panel_applied ست نمی‌شود.
+        // پنل نمایندگی روی **پنلی ساخته می‌شود که خودِ خریدار وصل کرده**؛
+        // اگر نداشته باشد، به اکانت owner سراسری برمی‌گردیم (رفتار قدیمی).
+        // بدون این، خرید برای نماینده‌ای که پنلش روی دامنهٔ خودش بود
+        // بی‌فایده می‌شد: پنل زیر سرور پیش‌فرض ساخته می‌شد، نه جایی که
+        // نماینده واقعاً از آن استفاده می‌کند.
+        //
+        // نکتهٔ مهم: `panel_applied` **قبل** از ساخت ست نمی‌شود.
         //
         // اگر آن را از قبل می‌ستادیم و ساخت شکست می‌خورد، fail() می‌دید
         // panel_applied=1 و سفارش را «قبلاً اعمال شده» علامت می‌زد — یعنی
@@ -341,7 +347,11 @@ final class Provisioner
         // قفل همزمانیِ اجرا را همان markApplying در provision() می‌گیرد که
         // وضعیت را applying می‌کند و پروسهٔ دوم دیگر وارد نمی‌شود.
         // ------------------------------------------------------------------
-        $result = $this->agency->createPanel($user, $order, $bytes, (int) $order['duration_days']);
+        $creatorPanel = (new PanelAccess($this->panels))->creatorPanelFor($user);
+
+        $result = $this->agency
+            ->useCreatorPanel($creatorPanel)
+            ->createPanel($user, $order, $bytes, (int) $order['duration_days']);
 
         if (!$result['ok']) {
             $isFatal = (bool) ($result['details']['fatal'] ?? false);
@@ -386,7 +396,13 @@ final class Provisioner
 
         $this->orders->logProvision($orderId, PackageRepository::KIND_AGENCY, 'پنل نمایندگی ساخته شد.', [
             'request'  => ['volume_bytes' => $bytes, 'days' => (int) $order['duration_days']],
-            'response' => ['panel_id' => $panelId, 'username' => $details['panel_username'] ?? null],
+            'response' => [
+                'panel_id'       => $panelId,
+                'username'       => $details['panel_username'] ?? null,
+                // ثبت اینکه کجا ساخته شد، تا بعداً معلوم باشد چرا شارژ روی
+                // سرور دیگری می‌رفت اگر این ثبت نمی‌شد.
+                'created_on'     => $creatorPanel !== null ? 'user_panel#' . (int) ($creatorPanel['id'] ?? 0) : 'global_owner',
+            ],
         ]);
 
         return [
@@ -430,16 +446,17 @@ final class Provisioner
             return $this->failTerminal($orderId, 'invalid_volume', 'حجم یا مدت این سفارش نامعتبر است.');
         }
 
-        $credentials = $this->credentialsOf($panel);
-        if ($credentials === null) {
+        $clientRef = $this->panelClientFor($panel);
+        if ($clientRef === null) {
             return $this->failTerminal(
                 $orderId,
                 'panel_unlinked',
-                'اطلاعات ورود این پنل در ربات موجود نیست؛ لطفاً پنل را دوباره ثبت کنید.'
+                'کلید API این پنل در ربات ثبت نشده؛ لطفاً از داخل پنل یک کلید تازه '
+                    . 'بسازید و با دکمهٔ «🔗 من پنل دارم» دوباره وصل کنید.'
             );
         }
 
-        [$panelUsername, $password] = $credentials;
+        [$client, $panelUsername, $apiKey] = $clientRef;
 
         // ------------------------------------------------------------------
         // idempotency: هدف مطلق (absolute target) یک‌بار محاسبه و ذخیره می‌شود.
@@ -452,7 +469,7 @@ final class Provisioner
             ? (int) $order['target_limit']
             : 0;
 
-        $admin        = $this->panel->getAdmin($panelUsername, $panelUsername, $password);
+        $admin        = $client->getAdminWithApiKey($apiKey);
         $usedTraffic  = (int) ($admin['used_traffic'] ?? 0);
         $currentLimit = isset($admin['data_limit']) && is_numeric($admin['data_limit'])
             ? (int) $admin['data_limit']
@@ -475,8 +492,10 @@ final class Provisioner
 
         // اعمال روی پنل. چون هدف مطلق است، اجرای دوباره همان سقف را
         // دوباره می‌نویسد و حجم اضافه نمی‌شود.
+        // ⚠️ `modifyAdmin` با کلیدِ همان ردیف می‌رود، نه با رمز. این همان عملیاتی
+        // است که کلید ناقص با آن ۴۰۳ می‌گیرد — و خطایش صریح به کاربر می‌رسد.
         $response = $bytes > 0
-            ? $this->panel->modifyAdmin($panelUsername, ['data_limit' => $newLimit], $panelUsername, $password)
+            ? $client->modifyAdmin($panelUsername, ['data_limit' => $newLimit], 'api', $apiKey)
             : [];
 
         // پنل ممکن است پاسخ ناقص بدهد؛ فقط کلیدهای موجود merge می‌شوند تا
@@ -576,21 +595,42 @@ final class Provisioner
     }
 
     /**
-     * رمز عبور رمزگشایی‌شدهٔ یک پنل.
+     * کلاینتِ آمادهٔ کار با یک پنل مشخص.
+     *
+     * ⭐️ **چرا این متد وجود دارد**
+     *
+     * شارژ پنل (`PUT /api/admin/{username}`) با نام کاربری و رمز انجام می‌شد.
+     * حالا ربات رمز نمی‌گیرد، پس باید با **کلیدِ همان ردیف** کار کند — و رمزگشایی
+     * این کلید فقط در `PanelAccess` انجام می‌شود.
+     *
+     * اگر اینجا اشتباه شود و مستقیم سراغ `plainPassword()` برود، خریدار پول
+     * می‌دهد، ربات ۴۰۱ می‌گیرد و سفارش «ناموفق» می‌شود — یعنی دقیقاً همان
+     * چیزی که این تغییر برای جلوگیری از آن انجام شده.
      *
      * @param  array<string, mixed> $panel
-     * @return array{0:string, 1:string}|null [panelUsername, password]
+     * @return array{0:PasarGuardClient, 1:string, 2:string}|null [client, panelUsername, apiKey]
      */
-    public function credentialsOf(array $panel): ?array
+    public function panelClientFor(array $panel): ?array
     {
-        $panelUsername = trim((string) ($panel['panel_username'] ?? ''));
-        $password      = $this->panels->plainPassword($panel);
+        $access = new PanelAccess($this->panels);
 
-        if ($panelUsername === '' || $password === '') {
+        $credentials = $access->credentialsOf($panel);
+
+        if ($credentials === null) {
             return null;
         }
 
-        return [$panelUsername, $password];
+        $client = $access->clientForPanel($panel, $this->panel);
+
+        if ($client === null) {
+            return null;
+        }
+
+        $panelUsername = trim((string) ($panel['panel_username'] ?? ''));
+
+        return $panelUsername === ''
+            ? null
+            : [$client, $panelUsername, $credentials['credential']];
     }
 
     /**

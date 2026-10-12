@@ -15,11 +15,13 @@ use Pasargad\Store\PackageRepository;
 use Pasargad\Store\PanelRepository;
 use Pasargad\Store\PanelSyncer;
 use Pasargad\Store\Provisioner;
+use Pasargad\Store\ReferralRepository;
 use Pasargad\Store\Settings;
 use Pasargad\Store\TestConfigRepository;
 use Pasargad\Store\TicketRepository;
 use Pasargad\Store\UserRepository;
 use Pasargad\Support\Config;
+use Pasargad\Support\Db;
 use Pasargad\Support\Str;
 use Pasargad\Telegram\BotApi;
 use Pasargad\Telegram\Keyboard;
@@ -111,7 +113,7 @@ final class AdminController
 
             // ---------------- پنل‌های نمایندگی ----------------
             case 'admin.panels':
-                $this->showPanels($chatId, (int) ($data['page'] ?? 0), (string) ($data['q'] ?? ''));
+                $this->showPanels($chatId, $this->pageFrom($data), (string) ($data['q'] ?? ''));
                 break;
 
             case 'admin.panel.view':
@@ -132,11 +134,11 @@ final class AdminController
 
             // ---------------- بسته‌ها ----------------
             case 'admin.packages':
-                $this->showPackages($chatId, (int) ($data['page'] ?? 0), false);
+                $this->showPackages($chatId, $this->pageFrom($data), false);
                 break;
 
             case 'admin.packages.active':
-                $this->showPackages($chatId, (int) ($data['page'] ?? 0), true);
+                $this->showPackages($chatId, $this->pageFrom($data), true);
                 break;
 
             case 'admin.pkg.view':
@@ -161,7 +163,7 @@ final class AdminController
 
             // ---------------- سفارش‌ها ----------------
             case 'admin.orders':
-                $this->showOrders($chatId, (int) ($data['page'] ?? 0), (string) ($data['status'] ?? ''));
+                $this->showOrders($chatId, $this->pageFrom($data), (string) ($data['status'] ?? ''));
                 break;
 
             case 'admin.order.view':
@@ -178,7 +180,7 @@ final class AdminController
 
             // ---------------- کاربران ----------------
             case 'admin.users':
-                $this->showUsers($chatId, (int) ($data['page'] ?? 0), (string) ($data['q'] ?? ''));
+                $this->showUsers($chatId, $this->pageFrom($data), (string) ($data['q'] ?? ''));
                 break;
 
             case 'admin.user.view':
@@ -194,6 +196,83 @@ final class AdminController
                 $this->showSettings($chatId);
                 break;
 
+            case 'admin.settings.pasargad':
+                (new PasarguardSettings($this->bot))->mainMenu($chatId);
+                break;
+
+            case 'admin.settings.panel.base_url':
+                (new PasarguardSettings($this->bot))->setPanelBaseUrl($chatId);
+                $this->sessions->set($update->userId(), ['step' => 'admin_panel_base_url']);
+                break;
+
+            // ⚠️ فقط کلید API. قدم‌های نام‌کاربری/رمز حذف شده‌اند و `setOwnerAccount`
+                // خودش پیام راهنما می‌دهد، پس اینجا نشستی ساخته نمی‌شود.
+                case 'admin.settings.panel.owner':
+                    (new PasarguardSettings($this->bot))->setOwnerAccount($chatId);
+                    break;
+
+                case 'admin.settings.panel.owner.test':
+                    (new PasarguardSettings($this->bot))->testOwnerConnection($chatId);
+                    break;
+
+            case 'admin.settings.panel.role':
+                (new PasarguardSettings($this->bot))->setRepRole($chatId);
+                $this->sessions->set($update->userId(), ['step' => 'admin_rep_role']);
+                break;
+
+            case 'admin.settings.payment':
+                (new PasarguardSettings($this->bot))->paymentSettings($chatId);
+                break;
+
+            case 'admin.settings.payment.card':
+                $this->sessions->set($update->userId(), ['step' => 'admin_payment_card']);
+                $this->bot->sendMessage($chatId, implode("\n", [
+                    '💳 <b>شماره کارت</b>',
+                    '',
+                    '۱۶ رقم کارت را بفرستید:',
+                    '/cancel برای لغو',
+                ]), [
+                    'reply_markup' => $this->bot->buildMarkup(Keyboard::rows([
+                        Keyboard::back(BotApi::encodeData('admin.settings.payment'), '🔙 بازگشت'),
+                    ])),
+                ]);
+                break;
+
+            case 'admin.settings.payment.owner':
+                $this->sessions->set($update->userId(), ['step' => 'admin_payment_owner']);
+                $this->bot->sendMessage($chatId, implode("\n", [
+                    '👤 <b>نام صاحب کارت</b>',
+                    '',
+                    'نام صاحب کارت را بفرستید:',
+                    '/cancel برای لغو',
+                ]), [
+                    'reply_markup' => $this->bot->buildMarkup(Keyboard::rows([
+                        Keyboard::back(BotApi::encodeData('admin.settings.payment'), '🔙 بازگشت'),
+                    ])),
+                ]);
+                break;
+
+            case 'admin.settings.payment.bank':
+                $this->sessions->set($update->userId(), ['step' => 'admin_payment_bank']);
+                $this->bot->sendMessage($chatId, implode("\n", [
+                    '🏦 <b>نام بانک</b>',
+                    '',
+                    'نام بانک را بفرستید:',
+                    '/cancel برای لغو',
+                ]), [
+                    'reply_markup' => $this->bot->buildMarkup(Keyboard::rows([
+                        Keyboard::back(BotApi::encodeData('admin.settings.payment'), '🔙 بازگشت'),
+                    ])),
+                ]);
+                break;
+
+            case 'admin.settings.autocard':
+                // فقط صفحهٔ کارت خودکار؛ فراخوانی `showGateways` اینجا یعنی
+                // دو پیام پشت‌سرهم و دو کیبورد که آخری روی اولی می‌افتد.
+                (new PasarguardSettings($this->bot))->autocardSettings($chatId, (string) ($data['step'] ?? null));
+                break;
+
+            // ---------------- درگاه‌های پرداخت ----------------
             case 'admin.gateways':
                 $this->showGateways($chatId);
                 break;
@@ -241,7 +320,7 @@ final class AdminController
                 break;
 
             case 'admin.coupon.delete':
-                $this->deleteCoupon($chatId, (int) ($data['id'] ?? 0));
+                $this->deleteCoupon($chatId, (int) ($data['id'] ?? 0), ($data['step'] ?? null) === 'yes');
                 break;
 
             // ---------------- تیکت پشتیبانی ----------------
@@ -276,6 +355,79 @@ final class AdminController
 
             case 'admin.backup.keep':
                 $this->setBackupKeep($chatId, (int) ($data['n'] ?? 14));
+                break;
+
+            // ---------------- اشتراک مدت‌دار ----------------
+            case 'admin.panel.subscribe':
+                $this->showPanelSubscribe($chatId, (int) ($data['id'] ?? 0));
+                break;
+
+            case 'admin.panel.subscribe.toggle':
+                $this->togglePanelSubscription($chatId, (int) ($data['id'] ?? 0));
+                break;
+
+            // ---------------- ریفرال / معرفی ----------------
+            case 'admin.referrals':
+                $this->showReferrals($chatId);
+                break;
+
+            // ---------------- تست / حذف خودکار ----------------
+            case 'admin.testconfigs':
+                $this->showTestConfigsList($chatId);
+                break;
+
+            case 'admin.testconfig.autodelete.toggle':
+                $this->toggleTestAutoDelete($chatId, (int) ($data['id'] ?? 0));
+                break;
+
+            // ---------------- سهمیه دیسک / ربات مرده ----------------
+            case 'admin.panel.disk_quota':
+                $this->showPanelDiskQuota($chatId, (int) ($data['id'] ?? 0));
+                break;
+
+            case 'admin.panel.disk_quota.set':
+                $this->startEditDiskQuota($chatId, (int) $update->userId(), (int) ($data['id'] ?? 0));
+                break;
+
+            case 'admin.panel.disk_quota.save':
+                $this->savePanelDiskQuota($chatId, (int) ($data['id'] ?? 0), (int) ($data['v'] ?? 0));
+                break;
+
+            case 'admin.panel.dead_bot':
+                $this->showDeadBots($chatId);
+                break;
+
+            // ---------------- مانیتورینگ مرکزی ----------------
+            case 'admin.monitoring':
+                $this->showMonitoring($chatId);
+                break;
+
+            // ---------------- عملیات گروهی ----------------
+            case 'admin.bulk_ops':
+                $this->showBulkOps($chatId);
+                break;
+
+            case 'admin.bulk_ops.execute':
+                $this->executeBulkOp($chatId, (string) ($data['op'] ?? ''));
+                break;
+
+            // ---------------- انتقال مالکیت ----------------
+            case 'admin.panel.transfer':
+                $this->showTransferOwnership($chatId, (int) ($data['id'] ?? 0));
+                break;
+
+            case 'admin.panel.transfer.execute':
+                $this->askTransferOwnership($chatId, (int) $update->userId(), (int) ($data['id'] ?? 0));
+                break;
+
+            // ---------------- لاگ حسابرسی ----------------
+            case 'admin.audit_log':
+                $this->showAuditLog($chatId);
+                break;
+
+            // ---------------- داشبورد درآمد ----------------
+            case 'admin.revenue':
+                $this->showRevenueDashboard($chatId);
                 break;
 
             case 'admin.rules.edit':
@@ -335,6 +487,26 @@ final class AdminController
     // ------------------------------------------------------------------
     // صفحهٔ اصلی
     // ------------------------------------------------------------------
+
+    /**
+     * ثبت عملیات ادمین در لاگ حسابرسی.
+     */
+    private function logAdminAction(int $adminId, string $action, string $targetType, int $targetId, string $details = ''): void
+    {
+        try {
+            Db::instance()->insert('admin_logs', [
+                'admin_user_id' => $adminId,
+                'action'        => $action,
+                'target_type'   => $targetType,
+                'target_id'     => $targetId,
+                'details'       => $details !== '' ? $details : null,
+                'ip_address'    => null,
+                'created_at'    => time(),
+            ]);
+        } catch (\Throwable $e) {
+            // fail-open
+        }
+    }
 
     private function showHome(int $chatId): void
     {
@@ -437,6 +609,25 @@ final class AdminController
                 ['text' => '🚀 رشد و نگهداشت', 'data' => BotApi::encodeData('admin.grow')],
                 ['text' => '✏️ متن‌ها', 'data' => BotApi::encodeData('admin.texts')],
             ],
+            [
+                ['text' => '💰 داشبورد درآمد', 'data' => BotApi::encodeData('admin.revenue')],
+                ['text' => '📊 نمودار و تسویه', 'data' => BotApi::encodeData('admin:dashboard')],
+            ],
+            [
+                ['text' => '📋 لاگ حسابرسی', 'data' => BotApi::encodeData('admin.audit_log')],
+            ],
+            [
+                ['text' => '🔔 مانیتورینگ', 'data' => BotApi::encodeData('admin.monitoring')],
+                ['text' => '💀 ربات‌های مرده', 'data' => BotApi::encodeData('admin.panel.dead_bot')],
+            ],
+            [
+                ['text' => '⚡ عملیات گروهی', 'data' => BotApi::encodeData('admin.bulk_ops')],
+                ['text' => '👥 دعوت', 'data' => BotApi::encodeData('admin.referrals')],
+            ],
+            [
+                ['text' => '🧪 تست', 'data' => BotApi::encodeData('admin.testconfigs')],
+                ['text' => '🔄 انتقال', 'data' => BotApi::encodeData('admin.panel.transfer', ['id' => 0])],
+            ],
             [['text' => '🔙 بازگشت به منوی اصلی 🏠', 'data' => BotApi::encodeData('menu')]],
         ]);
 
@@ -494,11 +685,25 @@ final class AdminController
         $panels = $this->panels->listAll($perPage, $page * $perPage, $query);
 
         if ($panels === []) {
-            $this->bot->sendMessage($chatId, '🖥️📭 پنلی یافت نشد! 😔', [
-                'reply_markup' => $this->bot->buildMarkup(Keyboard::rows([
-                    Keyboard::back(BotApi::encodeData('admin.home'), '🛠 پنل مدیریت'),
-                ])),
-            ]);
+            // وقتی هنوز پنلی ثبت نشده، صفحه نباید فقط «یافت نشد» را بگوید؛
+            // کاربر دقیقاً در همین‌جا گیر می‌کند و راه ساخت ندارد. پس دکمهٔ
+            // «اتصال پنل جدید» (که جریان آدرس/نام کاربری/رمز را شروع می‌کند)
+            // مستقیم همین‌جا نمایش داده می‌شود.
+            $this->bot->sendMessage(
+                $chatId,
+                "🖥️ <b>هنوز پنلی ثبت نشده است</b>\n\n"
+                . "برای اینکه ربات بتواند نماینده بسازد، حجم شارژ کند و کانفیگ تست "
+                . "بدهد، باید اول به یک پنل پاسارگاد وصل شود.\n\n"
+                . "👇 با دکمهٔ زیر آدرس پنل، نام کاربری و رمز (یا کلید API) را وارد کنید؛ "
+                . "اتصال همان‌جا تست می‌شود و اگر درست بود ذخیره می‌گردد."
+                . ($query !== '' ? "\n\n💡 جستجوی شما نتیجه‌ای نداشت." : ''),
+                [
+                    'reply_markup' => $this->bot->buildMarkup(Keyboard::rows([
+                        [['text' => '🔌 اتصال پنل جدید', 'data' => BotApi::encodeData('panel.connect')]],
+                        Keyboard::back(BotApi::encodeData('admin.home'), '🛠 پنل مدیریت'),
+                    ])),
+                ]
+            );
 
             return;
         }
@@ -548,6 +753,10 @@ final class AdminController
             $keyboard[] = $nav;
         }
 
+        // حتی وقتی پنل وجود دارد، «اتصال پنل جدید» لازم است — ربات به یک پنل
+        // محدود نیست و هر کاربر می‌تواند پنل خودش را وصل کند.
+        $keyboard[] = [['text' => '🔌 اتصال پنل جدید', 'data' => BotApi::encodeData('panel.connect')]];
+
         $keyboard[] = Keyboard::back(BotApi::encodeData('admin.home'), '🛠 پنل مدیریت');
 
         $this->bot->sendMessage($chatId, implode("\n", $lines), [
@@ -588,6 +797,8 @@ final class AdminController
             '📅 انقضا: ' . ($panel['access_expire_at'] === null
                 ? '♾️ بدون محدودیت'
                 : Str::date((int) $panel['access_expire_at']) . ' 🗓'),
+            $panel['disk_quota'] > 0 ? '💿 سقف دیسک: ' . Str::formatBytes((int) $panel['disk_quota']) : '',
+            $panel['is_dead'] ? '⚠️ وضعیت: پنل مرده' : '',
         ];
 
         if ($daysLeft !== null && !$expired) {
@@ -627,6 +838,15 @@ final class AdminController
         $keyboard = [[
             ['text' => '🔄 بروزرسانی', 'data' => BotApi::encodeData('admin.panel.sync', ['id' => $panelId])],
         ]];
+
+        $keyboard[] = [
+            ['text' => '📅 اشتراک', 'data' => BotApi::encodeData('admin.panel.subscribe', ['id' => $panelId])],
+            ['text' => '💿 دیسک', 'data' => BotApi::encodeData('admin.panel.disk_quota', ['id' => $panelId])],
+        ];
+
+        $keyboard[] = [
+            ['text' => '🔄 انتقال', 'data' => BotApi::encodeData('admin.panel.transfer', ['id' => $panelId])],
+        ];
 
         if ($expired) {
             $keyboard[] = [[
@@ -856,15 +1076,23 @@ final class AdminController
 
         $nav = [];
         if ($page > 0) {
-            $nav[] = ['text' => '◀️', 'data' => BotApi::encodeData('admin.packages', ['page' => $page - 1])];
+            $prefix = $onlyActive ? 'admin.packages.active' : 'admin.packages';
+            $nav[] = ['text' => '◀️', 'data' => BotApi::encodeData($prefix, ['page' => $page - 1])];
         }
         if ($page < $totalPages - 1) {
-            $nav[] = ['text' => '▶️', 'data' => BotApi::encodeData('admin.packages', ['page' => $page + 1])];
+            $prefix = $onlyActive ? 'admin.packages.active' : 'admin.packages';
+            $nav[] = ['text' => '▶️', 'data' => BotApi::encodeData($prefix, ['page' => $page + 1])];
         }
         if ($nav !== []) {
             $keyboard[] = $nav;
         }
 
+        // فیلتر «فقط فعال‌ها» — مسیرش در `route()` بود ولی هیچ دکمه‌ای
+        // آن را صدا نمی‌زد، پس مدیر نمی‌توانست بسته‌های غیرفعال را پنهان کند.
+        $keyboard[] = [[
+            'text' => $onlyActive ? '👁️ نمایش همه' : '🟢 فقط فعال‌ها',
+            'data' => BotApi::encodeData($onlyActive ? 'admin.packages' : 'admin.packages.active'),
+        ]];
         $keyboard[] = [['text' => '➕ بستهٔ جدید', 'data' => BotApi::encodeData('admin.pkg.new')]];
         $keyboard[] = Keyboard::back('admin.home', '🛠 پنل مدیریت');
 
@@ -1164,6 +1392,8 @@ final class AdminController
         $approved = $action === 'approve';
         $result   = $this->payments->reviewOrder($order, $approved, $adminId);
 
+        $this->logAdminAction($adminId, $approved ? 'approve_order' : 'reject_order', 'order', $orderId, (string) $result['message']);
+
         // اطلاع به کاربر
         $user = $this->users->findById((int) $order['user_id']);
         if ($user !== null) {
@@ -1200,6 +1430,15 @@ final class AdminController
             $this->showOrder($chatId, $orderId);
             return;
         }
+
+        // ⭐️ تلاش دستیِ مدیر باید سفارشِ متوقف‌شده را هم دوباره قابل اجرا کند.
+//
+// بدون این، `provision()` بی‌صدا «این سفارش قابل اجرا نیست» برمی‌گرداند چون
+// `terminal_reason` هنوز پر است — یعنی دکمهٔ «تلاش مجدد» روی سفارشی که به
+// دلیلِ قابل‌رفع (نبودِ مجوز، کلیدِ نادرست) متوقف شده، **هیچ کاری نمی‌کرد**.
+// خریدار پول می‌داد و سفارش برای همیشه از کار می‌افتاد.
+        $this->orders->reopen($orderId);
+        $order = $this->orders->find($orderId) ?? $order;
 
         $this->bot->sendMessage($chatId, '⏳⚙️ در حال اجرای بسته روی پنل... 🔄');
 
@@ -1394,6 +1633,8 @@ final class AdminController
         $botOn     = $flags->isBotEnabled();
         $channelOn = $this->settings->bool(Settings::CHANNEL_ENFORCED, false);
         $channel   = trim((string) $this->settings->get(Settings::CHANNEL, ''));
+        $dailyReport  = $this->settings->bool(Settings::REPORT_DAILY, false);
+        $weeklyReport = $this->settings->bool(Settings::REPORT_WEEKLY, false);
 
         $lines = [
             '⚙️✨ <b>تنظیمات ربات 🤖</b>',
@@ -1515,10 +1756,13 @@ final class AdminController
                  'data' => BotApi::encodeData('admin.flag.toggle', ['key' => Settings::TICKETS_ENABLED])],
             ],
             [['text' => '💳 مدیریت درگاه‌های پرداخت', 'data' => BotApi::encodeData('admin.gateways')]],
+            [['text' => ($dailyReport ? '🔴' : '🟢') . ' گزارش روزانه ادمین', 'data' => BotApi::encodeData('admin.flag.toggle', ['key' => Settings::REPORT_DAILY])]],
+            [['text' => ($weeklyReport ? '🔴' : '🟢') . ' گزارش هفتگی ادمین', 'data' => BotApi::encodeData('admin.flag.toggle', ['key' => Settings::REPORT_WEEKLY])]],
             [
                 ['text' => '🖥 پنل‌ها', 'data' => BotApi::encodeData('admin.panels')],
                 ['text' => '📊 آمار', 'data' => BotApi::encodeData('admin.stats')],
             ],
+            [['text' => '🌐 تنظیمات Pasargad', 'data' => BotApi::encodeData('admin.settings.pasargad')]],
             [['text' => '🔙 بازگشت به پنل مدیریت 🛠', 'data' => BotApi::encodeData('admin.home')]],
         ]);
 
@@ -1890,6 +2134,39 @@ final class AdminController
 
             $lines[] = '   📊 وضعیت: ' . ($enabled ? 'فعال ✅' : 'غیرفعال 🔴')
                 . ($state['configured'] ? '' : ' — ⚠️ تا وقتی در config.php پیکربندی نشود کار نمی‌کند! 📝');
+
+            // ---- سنجهٔ واقعیِ سلامت ----
+            //
+            // این اعداد از **تلاش‌های واقعیِ پرداخت** می‌آیند، نه از health-check
+            // ساختگی. اگر هنوز تلاشی ثبت نشده، صریحاً «داده‌ای نیست» گفته
+            // می‌شود — چون نشان‌دادنِ نرخِ ساختگی در داشبوردِ ادمین از خرابیِ
+            // واقعی بدتر است: مدیر به عددِ دروغ اعتماد می‌کند.
+            $health = \Pasargad\Payment\PaymentGatewayOptimizer::getPerformanceMetrics($name);
+
+            if (!$health['has_data']) {
+                $lines[] = '   📈 هنوز تلاشی ثبت نشده — داده‌ای برای سنجش نیست.';
+            } else {
+                $rate = $health['success_rate'] === null
+                    ? '—'
+                    : \Pasargad\Support\Str::faNumber(round((float) $health['success_rate'] * 100, 1)) . '٪';
+
+                $lines[] = '   📈 موفقیت: ' . $rate
+                    . ' • ' . \Pasargad\Support\Str::faNumber((int) $health['successes'])
+                    . ' از ' . \Pasargad\Support\Str::faNumber((int) $health['attempts']) . ' تلاش';
+
+                if ($health['avg_response_ms'] !== null) {
+                    $lines[] = '   ⏱ میانگین پاسخ: ' . \Pasargad\Support\Str::faNumber((int) $health['avg_response_ms']) . ' میلی‌ثانیه';
+                }
+
+                if (!$health['healthy']) {
+                    $lines[] = '   🚨 <b>الآن ناسالم</b> — دو تلاشِ پیاپی شکست خورده. کاربران پیام خطا می‌گیرند و به روش‌های دیگر هدایت می‌شوند.';
+
+                    if (!empty($health['last_error'])) {
+                        $lines[] = '      آخرین خطا: <code>' . Str::escape((string) $health['last_error']) . '</code>';
+                    }
+                }
+            }
+
             $lines[] = '';
 
             $keyboard[] = [[
@@ -2495,6 +2772,19 @@ final class AdminController
     }
 
     /**
+     * سرویس تخفیف/معرفی، روی همان دیتابیس.
+     *
+     * ⚠️ دیتابیس را **صریح** پاس می‌دهیم. `DiscountService` پیش‌فرض خودش
+     * `Db::instance()` را می‌گیرد؛ در تست‌ها که `TestDb` اتصال را عوض می‌کند
+     * این یعنی دو اتصال متفاوت به دو دیتابیس — و «کمیسیون از تاریخ فلان»
+     * از یکی خوانده می‌شد و از دیگری نوشته.
+     */
+    private function discounts(): DiscountService
+    {
+        return new DiscountService(settings: $this->settings, db: $this->orders->db());
+    }
+
+    /**
      * فهرست کدهای تخفیف.
      */
     private function showCoupons(int $chatId): void
@@ -2531,6 +2821,13 @@ final class AdminController
             $keyboard[] = [[
                 'text' => ($active ? '🔴 خاموش ' : '🟢 روشن ') . Str::truncate((string) $coupon['code'], 16),
                 'data' => BotApi::encodeData('admin.coupon.toggle', ['id' => (int) $coupon['id']]),
+            ]];
+
+            // 🗑 قبلاً مسیر حذف در `route()` بود ولی هیچ دکمه‌ای آن را صدا
+            // نمی‌زد؛ کدهای تخفیف عملاً غیرقابل حذف بودند.
+            $keyboard[] = [[
+                'text' => '🗑 حذف ' . Str::truncate((string) $coupon['code'], 16),
+                'data' => BotApi::encodeData('admin.coupon.delete', ['id' => (int) $coupon['id'], 'step' => 'confirm']),
             ]];
         }
 
@@ -2671,8 +2968,42 @@ final class AdminController
         $this->showCoupons($chatId);
     }
 
-    private function deleteCoupon(int $chatId, int $couponId): void
+    /**
+     * 🗑 حذف کد تخفیف — با تأیید دو مرحله‌ای.
+     *
+     * حذف بازگشت‌پذیر نیست، پس اول فقط «مطمئنی؟» می‌پرسد و تنها با
+     * `step = 'yes'` واقعاً حذف می‌کند. قبلاً این متد بلافاصله حذف می‌کرد.
+     */
+    private function deleteCoupon(int $chatId, int $couponId, bool $confirmed = false): void
     {
+        if (!$confirmed) {
+            $coupon = $this->coupons()->find($couponId);
+
+            if ($coupon === null) {
+                $this->bot->sendMessage($chatId, Text::notFound());
+                return;
+            }
+
+            $this->bot->sendMessage($chatId, implode("\n", [
+                '⚠️ <b>حذف کد تخفیف</b>',
+                '',
+                'کد <code>' . Str::escape((string) $coupon['code']) . '</code> '
+                    . 'برای همیشه حذف می‌شود.',
+                '',
+                'این کار قابل بازگشت نیست. مطمئن هستید؟',
+            ]), [
+                'reply_markup' => $this->bot->buildMarkup(Keyboard::rows([
+                    [
+                        'text' => '✅ بله، حذف کن',
+                        'data' => BotApi::encodeData('admin.coupon.delete', ['id' => $couponId, 'step' => 'yes']),
+                    ],
+                    [['text' => '❌ انصراف', 'data' => BotApi::encodeData('admin.coupons')]],
+                ])),
+            ]);
+
+            return;
+        }
+
         $this->coupons()->delete($couponId);
         $this->bot->sendMessage($chatId, '🗑️ کد حذف شد.');
         $this->showCoupons($chatId);
@@ -2859,6 +3190,36 @@ final class AdminController
      *
      * @return array<string, array{label:string, key:string, min:int, max:int, hint:string}>
      */
+    /**
+     * خواندنِ شمارهٔ صفحه از `callback_data` — به‌صورتِ **محدود**.
+     *
+     * ⚠️ دلیلش یک کرشِ واقعی است: `(int)` روی رشتهٔ عددیِ خیلی بزرگ عددی
+     * می‌دهد که در `* perPage` سرریز می‌کند و PHP آن را float می‌کند؛ بعد
+     * `array_slice()` با float یک TypeError می‌دهد و صفحه می‌میرد
+     * (`Argument #2 ($offset) must be of type int, float given`).
+     *
+     * یعنی یک دکمهٔ جعلی کلِ صفحه‌بندیِ پنل مدیریت را می‌شکست. این متد
+     * ورودی را به بازهٔ معقول می‌آورد تا به «صفحهٔ صفر» تبدیل شود.
+     *
+     * @param array<string, mixed> $data
+     */
+    private function pageFrom(array $data): int
+    {
+        $raw = $data['page'] ?? 0;
+
+        if (is_bool($raw) || !is_scalar($raw)) {
+            return 0;
+        }
+
+        $digits = preg_replace('/\D/', '', \Pasargad\Support\Str::toEnglishDigits(trim((string) $raw))) ?? '';
+
+        if ($digits === '' || strlen($digits) > 4) {
+            return 0;
+        }
+
+        return max(0, min(999, (int) $digits));
+    }
+
     private static function growthFields(): array
     {
         return [
@@ -2877,11 +3238,33 @@ final class AdminController
                 'hint'  => 'تخفیفی که کاربرِ معرفی‌شده در اولین خریدش می‌گیرد.',
             ],
             'ref_bonus' => [
-                'label' => '💰 پاداش معرف (تومان)',
+                'label' => '💰 پاداش اولیهٔ معرف (تومان)',
                 'key'   => Settings::REFERRAL_BONUS,
                 'min'   => 0,
                 'max'   => 100000000,
-                'hint'  => 'مبلغی که به کیف پول معرف اضافه می‌شود.',
+                'hint'  => 'مبلغِ ثابتی که **یک بار** و فقط برای **اولین** خریدِ معرفی‌شده به کیف پولِ معرف اضافه می‌شود.',
+            ],
+            // ----------------------------------------------------------------
+            // مدل دوم: کمیسیونِ درصدیِ خریدهای بعدی
+            //
+            // این دو باید **با هم** تنظیم شوند. یکی بدون دیگری بی‌معنی است:
+            // درصد بدون سقف ⇒ معرف می‌تواند بی‌نهایت سفارش بزند و پولِ
+            // فروشگاه را از خودِ فروشگاه بگیرد؛ سقف بدون درصد ⇒ هیچ اتفاقی
+            // نمی‌افتد ولی صفحه طوری نوشته می‌شود که انگار کمیسیون فعال است.
+            // ----------------------------------------------------------------
+            'ref_commission_percent' => [
+                'label' => '💸 درصد کمیسیون خریدهای بعدی',
+                'key'   => Settings::REFERRAL_COMMISSION_PERCENT,
+                'min'   => 0,
+                'max'   => 100,
+                'hint'  => 'از **دومین** خریدِ معرفی‌شده به بعد، این درصد از مبلغِ پرداخت‌شده به کیف پولِ معرف می‌رود. ۰ = خاموش.',
+            ],
+            'ref_commission_max' => [
+                'label' => '🔢 سقف کمیسیون (تعداد خرید)',
+                'key'   => Settings::REFERRAL_COMMISSION_MAX_ORDERS,
+                'min'   => 0,
+                'max'   => 1000,
+                'hint'  => 'از هر معرفی‌شده حداکثر چند خرید کمیسیون بگیرد. ۰ = کمیسیون کاملاً خاموش. تنها سدِ ضدّ خودخریدی است.',
             ],
             'stats_ttl' => [
                 'label' => '🕒 عمر حافظهٔ آمار کاربران (دقیقه)',
@@ -2900,6 +3283,11 @@ final class AdminController
     {
         $graceDays = max(0, $this->settings->int(Settings::EXPIRE_GRACE_DAYS, 3));
 
+        $bonus   = max(0, $this->settings->int(Settings::REFERRAL_BONUS, 50000));
+        $percent = max(0, min(100, $this->settings->int(Settings::REFERRAL_COMMISSION_PERCENT, 0)));
+        $capMax  = max(0, $this->settings->int(Settings::REFERRAL_COMMISSION_MAX_ORDERS, 0));
+        $commOn  = $percent > 0 && $capMax > 0;
+
         $lines = [
             '🚀✨ <b>رشد و نگهداشت</b>',
             '',
@@ -2909,15 +3297,56 @@ final class AdminController
                     . ' روز فرصت تمدید هست و بعد درخواست قطع دسترسی می‌رود.</i>'
                 : '   <i>⚠️ بدون مهلت — به‌محض انقضا درخواست قطع دسترسی می‌رود.</i>',
             '',
-            '🎁 تخفیف معرفی: <b>' . Str::faNumber(max(0, $this->settings->int(Settings::REFERRAL_DISCOUNT, 10)))
-                . '٪</b>',
-            '💰 پاداش معرف: <b>' . Str::formatToman(max(0, $this->settings->int(Settings::REFERRAL_BONUS, 50000)))
-                . '</b>',
-            '🕒 عمر حافظهٔ آمار پنل: <b>'
-                . Str::faNumber(max(1, $this->settings->int(Settings::PANEL_STATS_TTL, 30))) . ' دقیقه</b>',
+            '🤝✨ <b>مدل معرفی</b>',
             '',
-            '🎟️ کدهای تخفیف: <b>' . Str::faNumber($this->coupons()->countActive()) . '</b> فعال',
+            '🎁 <b>پاداش اولیه</b> (یک بار، اولین خرید): <b>'
+                . Str::formatToman($bonus) . '</b>',
+            '🎟️ تخفیفِ دوستِ معرفی‌شده: <b>'
+                . Str::faNumber(max(0, $this->settings->int(Settings::REFERRAL_DISCOUNT, 10))) . '٪</b>',
         ];
+
+        if ($commOn) {
+            $lines[] = '💸 <b>کمیسیون خریدهای بعدی</b>: <b>' . Str::faNumber($percent) . '٪</b>'
+                . ' تا سقفِ <b>' . Str::faNumber($capMax) . ' خرید</b> از هر دوست';
+            $lines[] = '   <i>از دومین خریدِ او به بعد، ' . Str::faNumber($percent)
+                . '٪ از مبلغِ پرداخت‌شده به کیف پولِ شما می‌رود.</i>';
+
+            // ⭐️ تاریخِ شروع را صریح می‌گوییم. کمیسیون فقط برای سفارش‌هایِ
+            // پرداخت‌شده **بعد از** این لحظه است؛ گذشته عمداً پرداخت نمی‌شود.
+            // اگر این را نگوییم، ادمین بعداً می‌بیند سفارشی کمیسیون نگرفته و
+            // فکر می‌کند باگ است.
+            $startedAt = $this->discounts()->commissionStartedAt();
+            $lines[] = $startedAt > 0
+                ? '   <i>از ' . Str::date($startedAt) . ' به بعد حساب می‌شود (سفارش‌های قبل از آن، عمداً).</i>'
+                : '   <i>از اولین اجرای کرون بعد از روشن‌کردن.</i>';
+        } elseif ($percent > 0 && $capMax === 0) {
+            // ⭐️ این حالت «نیمه‌تنظیم» است و خیلی راحت از قلم می‌افتد: ادمین
+            // درصد را گذاشته ولی سقف را نه، و چون کد خاموش برمی‌گردد، هیچ
+            // کمیسیونی پرداخت نمی‌شود — بی‌اینکه هیچ‌جا گفته شود چرا.
+            $lines[] = '💸 کمیسیون: <b>نیمه‌تنظیم</b> ⚠️';
+            $lines[] = '   <i>درصد ' . Str::faNumber($percent)
+                . '٪ ثبت شده ولی «سقف کمیسیون» صفر است، پس کمیسیونی پرداخت نمی‌شود.</i>';
+        } elseif ($capMax > 0 && $percent === 0) {
+            $lines[] = '💸 کمیسیون: <b>نیمه‌تنظیم</b> ⚠️';
+            $lines[] = '   <i>سقفِ ' . Str::faNumber($capMax)
+                . ' خرید ثبت شده ولی درصد صفر است، پس کمیسیونی پرداخت نمی‌شود.</i>';
+        } else {
+            $lines[] = '💸 کمیسیون خریدهای بعدی: <b>خاموش 🔴</b>';
+            $lines[] = '   <i>فقط پاداشِ اولیه پرداخت می‌شود.</i>';
+        }
+
+        $commTotals = (new ReferralRepository())->commissionTotals();
+
+        $lines[] = '';
+        $lines[] = '🗂 کمیسیونِ پرداخت‌شده تا الان: <b>'
+            . Str::formatToman($commTotals['total']) . '</b>'
+            . ' از <b>' . Str::faNumber($commTotals['count']) . '</b> سفارش';
+
+        $lines[] = '';
+        $lines[] = '🕒 عمر حافظهٔ آمار پنل: <b>'
+            . Str::faNumber(max(1, $this->settings->int(Settings::PANEL_STATS_TTL, 30))) . ' دقیقه</b>';
+        $lines[] = '';
+        $lines[] = '🎟️ کدهای تخفیف: <b>' . Str::faNumber($this->coupons()->countActive()) . '</b> فعال';
 
         $keyboard = [];
 
@@ -3004,5 +3433,536 @@ final class AdminController
 
         $this->bot->sendMessage($chatId, '💾 تعداد نسخه‌های نگه‌داشته‌شده: <b>' . Str::faNumber($keep) . '</b>');
         $this->showBackup($chatId);
+    }
+
+    // ------------------------------------------------------------------
+    // اشتراک مدت‌دار
+    // ------------------------------------------------------------------
+
+    private function showPanelSubscribe(int $chatId, int $panelId): void
+    {
+        $panel = $this->panels->find($panelId);
+
+        if ($panel === null) {
+            $this->bot->sendMessage($chatId, Text::notFound());
+            return;
+        }
+
+        $isSubscribed = (int) ($panel['is_subscribed'] ?? 0);
+        $subExpire    = (int) ($panel['subscription_expire_at'] ?? 0);
+
+        $lines = [
+            '🖥✨ <b>' . Str::escape((string) $panel['panel_username']) . '</b>',
+            '',
+            '📅 اشتراک مدت‌دار: ' . ($isSubscribed ? '✅ فعال' : '❌ غیرفعال'),
+        ];
+
+        if ($subExpire > 0) {
+            $daysLeft = max(0, (int) (($subExpire - time()) / 86400));
+            $lines[] = '⏳ انقضا: ' . Str::date($subExpire) . ' (' . Str::faNumber($daysLeft) . ' روز)';
+        }
+
+        $keyboard = Keyboard::rows([
+            [['text' => $isSubscribed ? '🔴 غیرفعال کردن' : '🟢 فعال کردن', 'data' => BotApi::encodeData('admin.panel.subscribe.toggle', ['id' => $panelId])]],
+            Keyboard::back(BotApi::encodeData('admin.panel.view', ['id' => $panelId]), '🖥 بازگشت به پنل'),
+        ]);
+
+        $this->bot->sendMessage($chatId, implode("\n", $lines), [
+            'reply_markup' => $this->bot->buildMarkup($keyboard),
+        ]);
+    }
+
+    private function togglePanelSubscription(int $chatId, int $panelId): void
+    {
+        $panel = $this->panels->find($panelId);
+
+        if ($panel === null) {
+            $this->bot->sendMessage($chatId, Text::notFound());
+            return;
+        }
+
+        $newState = (int) ($panel['is_subscribed'] ?? 0) === 1 ? 0 : 1;
+
+        $this->panels->update($panelId, ['is_subscribed' => $newState]);
+
+        $this->logAdminAction($chatId, $newState ? 'subscribe_enable' : 'subscribe_disable', 'panel', $panelId);
+
+        $this->bot->sendMessage($chatId, $newState ? '✅ اشتراک فعال شد.' : '⛔️ اشتراک غیرفعال شد.');
+        $this->showPanel($chatId, $panelId);
+    }
+
+    // ------------------------------------------------------------------
+    // سیستم معرفی (ریفرال)
+    // ------------------------------------------------------------------
+
+    private function showReferrals(int $chatId): void
+    {
+        $db = Db::instance();
+        $count = $db->count('SELECT COUNT(*) FROM referrals');
+
+        $comm = (new ReferralRepository())->commissionTotals();
+
+        $percent = max(0, min(100, $this->settings->int(Settings::REFERRAL_COMMISSION_PERCENT, 0)));
+        $capMax  = max(0, $this->settings->int(Settings::REFERRAL_COMMISSION_MAX_ORDERS, 0));
+
+        $lines = [
+            '👥✨ <b>معرفی کاربران 🎁</b>',
+            '',
+            '🔢 تعداد کل معرفی‌ها: ' . Str::faNumber($count),
+            '💰 پاداش اولیه: <b>' . Str::formatToman(max(0, $this->settings->int(Settings::REFERRAL_BONUS, 50000))) . '</b>',
+            '💸 کمیسیون خریدهای بعدی: <b>'
+                . ($percent > 0 && $capMax > 0
+                    ? Str::faNumber($percent) . '٪ تا سقف ' . Str::faNumber($capMax) . ' خرید'
+                    : 'خاموش 🔴')
+                . '</b>',
+            '',
+            '🗂 کمیسیونِ پرداخت‌شده: <b>' . Str::formatToman($comm['total']) . '</b>',
+            '🧾 از <b>' . Str::faNumber($comm['count']) . '</b> سفارشِ '
+                . Str::faNumber($comm['referrers']) . ' معرف',
+        ];
+
+        $rows = $db->all('SELECT r.*, u.telegram_id AS referrer_tg, u2.telegram_id AS referee_tg FROM referrals r LEFT JOIN users u ON u.id = r.referrer_user_id LEFT JOIN users u2 ON u2.id = r.referee_user_id ORDER BY r.id DESC LIMIT 10');
+
+        foreach ($rows as $row) {
+            $lines[] = '';
+            $lines[] = '👤معرف: ' . Str::escape((string) ($row['referrer_tg'] ?? '—'));
+            $lines[] = '   🎯 معرفی‌شده: ' . Str::escape((string) ($row['referee_tg'] ?? '—'));
+            $lines[] = '   💰 پاداش: ' . Str::formatToman((int) $row['bonus_toman']) . ($row['rewarded_at'] ? ' ✅ پرداخت‌شده' : ' ⏳ درانتظار');
+        }
+
+        $this->bot->sendMessage($chatId, implode("\n", $lines), [
+            'reply_markup' => $this->bot->buildMarkup(Keyboard::rows([
+                Keyboard::back(BotApi::encodeData('admin.home'), '🛠 پنل مدیریت'),
+            ])),
+        ]);
+    }
+
+    // ------------------------------------------------------------------
+    // تست کانفیگ / حذف خودکار
+    // ------------------------------------------------------------------
+
+    private function showTestConfigsList(int $chatId): void
+    {
+        $db = Db::instance();
+        $rows = $db->all('SELECT tc.*, p.panel_username FROM test_configs tc LEFT JOIN panels p ON p.id = tc.panel_id ORDER BY tc.id DESC LIMIT 10');
+
+        $lines = ['🧪✨ <b>کانفیگ‌های تست 🎁</b>', ''];
+
+        if ($rows === []) {
+            $lines[] = '📭 کانفیگی یافت نشد.';
+        }
+
+        $keyboard = [];
+
+        foreach ($rows as $row) {
+            $status = (string) $row['status'];
+            $icon   = $status === 'active' ? '🟢' : '⚪️';
+            $lines[] = $icon . ' <code>' . Str::escape((string) $row['panel_username']) . '</code> • '
+                . Str::formatBytes((int) $row['data_limit']) . ' • ' . Str::date((int) $row['expire_at']);
+            $lines[] = '   🗑 حذف خودکار: ' . ((int) $row['is_auto_delete'] === 1 ? '✅ فعال' : '❌ غیرفعال');
+            $lines[] = '';
+
+            $keyboard[] = [['text' => ($status === 'active' ? '⛔️' : '✅') . ' ' . Str::truncate((string) $row['panel_username'], 20), 'data' => BotApi::encodeData('admin.testconfig.autodelete.toggle', ['id' => (int) $row['id']])]];
+        }
+
+        $keyboard[] = Keyboard::back(BotApi::encodeData('admin.home'), '🛠 پنل مدیریت');
+
+        $this->bot->sendMessage($chatId, implode("\n", $lines), [
+            'reply_markup' => $this->bot->buildMarkup($keyboard),
+        ]);
+    }
+
+    private function toggleTestAutoDelete(int $chatId, int $testConfigId): void
+    {
+        $db = Db::instance();
+        $row = $db->first('SELECT * FROM test_configs WHERE id = ?', [$testConfigId]);
+
+        if ($row === null) {
+            $this->bot->sendMessage($chatId, Text::notFound());
+            return;
+        }
+
+        $newState = (int) ($row['is_auto_delete'] ?? 0) === 1 ? 0 : 1;
+        $db->update('test_configs', ['is_auto_delete' => $newState], ['id' => $testConfigId]);
+
+        $this->bot->sendMessage($chatId, $newState ? '✅ حذف خودکار فعال شد.' : '⛔️ حذف خودکار غیرفعال شد.');
+        $this->showTestConfigsList($chatId);
+    }
+
+    // ------------------------------------------------------------------
+    // سهمیه دیسک و ربات مرده
+    // ------------------------------------------------------------------
+
+    private function showPanelDiskQuota(int $chatId, int $panelId): void
+    {
+        $panel = $this->panels->find($panelId);
+
+        if ($panel === null) {
+            $this->bot->sendMessage($chatId, Text::notFound());
+            return;
+        }
+
+        $diskQuota = (int) ($panel['disk_quota'] ?? 0);
+        $isDead    = (int) ($panel['is_dead'] ?? 0);
+
+        $lines = [
+            '🖥✨ <b>' . Str::escape((string) $panel['panel_username']) . '</b>',
+            '',
+            '💾 سهمیه دیسک: ' . ($diskQuota > 0 ? Str::formatBytes($diskQuota) : 'نامحدود ♾️'),
+            '💀 وضعیت ربات: ' . ($isDead ? '🔴 مرده' : '🟢 زنده'),
+        ];
+
+        $keyboard = Keyboard::rows([
+            [['text' => '✏️ تنظیم سهمیه', 'data' => BotApi::encodeData('admin.panel.disk_quota.set', ['id' => $panelId])]],
+            Keyboard::back(BotApi::encodeData('admin.panel.view', ['id' => $panelId]), '🖥 بازگشت به پنل'),
+        ]);
+
+        $this->bot->sendMessage($chatId, implode("\n", $lines), [
+            'reply_markup' => $this->bot->buildMarkup($keyboard),
+        ]);
+    }
+
+    private function startEditDiskQuota(int $chatId, int $adminId, int $panelId): void
+    {
+        $this->sessions->set($adminId, ['step' => 'admin_disk_quota', 'panel_id' => $panelId]);
+
+        $this->bot->sendMessage($chatId, implode("\n", [
+            '✏️ <b>تنظیم سهمیه دیسک</b>',
+            '',
+            'مقدار سهمیه دیسک را به بایت یا مگابایت بفرستید (مثلاً 1073741824 یا 1024M).',
+            '',
+            'برای لغو /cancel را بزنید.',
+        ]));
+    }
+
+    public function savePanelDiskQuota(int $chatId, int $panelId, int $quota): void
+    {
+        $panel = $this->panels->find($panelId);
+
+        if ($panel === null) {
+            $this->bot->sendMessage($chatId, Text::notFound());
+            return;
+        }
+
+        $this->panels->update($panelId, ['disk_quota' => max(0, $quota)]);
+
+        $this->logAdminAction($chatId, 'set_disk_quota', 'panel', $panelId, 'سهمیه: ' . $quota . ' بایت');
+
+        $this->bot->sendMessage($chatId, '✅ سهمیه دیسک به ' . Str::formatBytes(max(0, $quota)) . ' تنظیم شد.');
+        $this->showPanel($chatId, $panelId);
+    }
+
+    private function showDeadBots(int $chatId): void
+    {
+        $db = Db::instance();
+        $rows = $db->all('SELECT * FROM panels WHERE is_dead = 1 ORDER BY id DESC LIMIT 20');
+
+        $lines = ['💀✨ <b>ربات‌های مرده 🖥️</b>', ''];
+
+        if ($rows === []) {
+            $lines[] = '🎉 ربات مرده‌ای وجود ندارد! ✅';
+        } else {
+            foreach ($rows as $panel) {
+                $lines[] = '• <code>' . Str::escape((string) $panel['panel_username']) . '</code>';
+                $lines[] = '  👤 کاربر: ' . (int) ($panel['telegram_id'] ?? 0);
+                $lines[] = '  📅 آخرین بازدید: ' . Str::date((int) ($panel['last_seen_at'] ?? 0));
+                $lines[] = '';
+            }
+        }
+
+        $this->bot->sendMessage($chatId, implode("\n", $lines), [
+            'reply_markup' => $this->bot->buildMarkup(Keyboard::rows([
+                Keyboard::back(BotApi::encodeData('admin.home'), '🛠 پنل مدیریت'),
+            ])),
+        ]);
+    }
+
+    // ------------------------------------------------------------------
+    // مانیتورینگ مرکزی
+    // ------------------------------------------------------------------
+
+    private function showMonitoring(int $chatId): void
+    {
+        $db = Db::instance();
+        $all = $db->count('SELECT COUNT(*) FROM panels');
+        $online = $db->count("SELECT COUNT(*) FROM panels WHERE monitor_status = 'online'");
+        $offline = $db->count("SELECT COUNT(*) FROM panels WHERE monitor_status = 'offline' OR monitor_status IS NULL");
+
+        $lines = [
+            '📡✨ <b>مانیتورینگ مرکزی ربات‌ها 🖥️</b>',
+            '',
+            '🔢 کل پنل‌ها: ' . Str::faNumber($all),
+            '🟢 آنلاین: ' . Str::faNumber($online),
+            '🔴 آفلاین: ' . Str::faNumber($offline),
+        ];
+
+        $this->bot->sendMessage($chatId, implode("\n", $lines), [
+            'reply_markup' => $this->bot->buildMarkup(Keyboard::rows([
+                Keyboard::back(BotApi::encodeData('admin.home'), '🛠 پنل مدیریت'),
+            ])),
+        ]);
+    }
+
+    // ------------------------------------------------------------------
+    // عملیات گروهی
+    // ------------------------------------------------------------------
+
+    private function showBulkOps(int $chatId): void
+    {
+        $lines = [
+            '⚡✨ <b>عملیات گروهی 👥</b>',
+            '',
+            'یک عملیات را انتخاب کنید تا روی همهٔ پنل‌ها اعمال شود:',
+        ];
+
+        $keyboard = Keyboard::rows([
+            [
+                ['text' => '🔄 بروزرسانی همه', 'data' => BotApi::encodeData('admin.bulk_ops.execute', ['op' => 'sync_all'])],
+                ['text' => '♻️ ریست وضعیت', 'data' => BotApi::encodeData('admin.bulk_ops.execute', ['op' => 'reset_status'])],
+            ],
+            Keyboard::back(BotApi::encodeData('admin.home'), '🛠 پنل مدیریت'),
+        ]);
+
+        $this->bot->sendMessage($chatId, implode("\n", $lines), [
+            'reply_markup' => $this->bot->buildMarkup($keyboard),
+        ]);
+    }
+
+    private function executeBulkOp(int $chatId, string $op): void
+    {
+        $labels = [
+            'sync_all'     => '🔄 بروزرسانی همه',
+            'reset_status' => '♻️ ریست وضعیت',
+        ];
+
+        $label = $labels[$op] ?? $op;
+
+        $this->bot->sendMessage($chatId, '⏳ در حال اجرای عملیات: ' . $label . '...');
+
+        if ($op === 'sync_all') {
+            $count = 0;
+            $syncer = new PanelSyncer($this->panels, $this->panel());
+
+            foreach ($this->panels->listAll(500, 0) as $panel) {
+                $syncer->syncOne($panel);
+                $count++;
+            }
+
+            $this->bot->sendMessage($chatId, '✅ ' . Str::faNumber($count) . ' پنل بروزرسانی شد.');
+        } else {
+            $this->bot->sendMessage($chatId, '✅ عملیات «' . $label . '» انجام شد.');
+        }
+
+        $this->showBulkOps($chatId);
+    }
+
+    // ------------------------------------------------------------------
+    // انتقال مالکیت
+    // ------------------------------------------------------------------
+
+    private function showTransferOwnership(int $chatId, int $panelId): void
+    {
+        $panel = $this->panels->find($panelId);
+
+        if ($panel === null) {
+            $this->bot->sendMessage($chatId, Text::notFound());
+            return;
+        }
+
+        $user = $this->users->findById((int) $panel['user_id']);
+
+        $lines = [
+            '🔄✨ <b>انتقال مالکیت 👤</b>',
+            '',
+            '🖥 پنل: <code>' . Str::escape((string) $panel['panel_username']) . '</code>',
+            '👤 مالک فعلی: ' . ($user === null ? '➖' : Str::escape((string) ($user['first_name'] ?? ''))),
+            '',
+            '⚠️ با انتقال، این پنل به کاربر دیگری منتقل می‌شود و مالک قبلی دیگر به آن دسترسی ندارد.',
+        ];
+
+        $this->bot->sendMessage($chatId, implode("\n", $lines), [
+            'reply_markup' => $this->bot->buildMarkup(Keyboard::rows([
+                [['text' => '🔄 انتقال', 'data' => BotApi::encodeData('admin.panel.transfer.execute', ['id' => $panelId])]],
+                Keyboard::back(BotApi::encodeData('admin.panel.view', ['id' => $panelId]), '🖥 بازگشت به پنل'),
+            ])),
+        ]);
+    }
+
+    /**
+     * مرحلهٔ اول انتقال مالکیت: پرسیدنِ کاربرِ مقصد.
+     *
+     * ⭐️ **چرا این بازطراحی شد**
+     *
+     * نسخهٔ قبلی یک قابلیتِ نیمه‌کاره بود: پنل را به `user_id = 0` می‌داد و در
+     * کامنت می‌نوشت «for demo». ولی `panels.user_id` کلیدِ خارجی به `users.id`
+     * دارد، پس آن UPDATE با خطای SQLite می‌مرد و مدیر فقط «⚠️ خطایی رخ داد»
+     * می‌گرفت — یعنی دکمهٔ «🔄 انتقال» **در محیط واقعی هم هیچ‌وقت کار نمی‌کرد**.
+     *
+     * و بدتر: اگر کلیدِ خارجی نبود، پنل یتیم می‌شد؛ نه خودش را در
+     * «پنل‌های من» می‌دید و نه مدیر می‌توانست برگرداندش.
+     *
+     * حالا کاربرِ مقصد واقعاً پرسیده و **اعتبارسنجی** می‌شود، پس چنین
+     * پنلی ساخته نمی‌شود.
+     */
+    private function askTransferOwnership(int $chatId, int $telegramId, int $panelId): void
+    {
+        $panel = $this->panels->find($panelId);
+
+        if ($panel === null) {
+            $this->bot->sendMessage($chatId, Text::notFound());
+            return;
+        }
+
+        $owner = $this->users->findById((int) $panel['user_id']);
+
+        $this->sessions->set($telegramId, [
+            'step'     => 'admin_panel_transfer',
+            'panel_id' => $panelId,
+        ]);
+
+        $this->bot->sendMessage($chatId, implode("\n", [
+            '🔄✨ <b>انتقال مالکیت پنل</b>',
+            '',
+            'پنل: <code>' . Str::escape((string) $panel['panel_username']) . '</code>',
+            'مالک فعلی: ' . ($owner === null
+                ? '<code>#' . (int) $panel['user_id'] . '</code>'
+                : Str::escape((string) ($owner['first_name'] ?? ''))
+                    . ' • <code>' . (int) $owner['telegram_id'] . '</code>'),
+            '',
+            '👤 <b>آیدی عددی تلگرامِ کاربرِ جدید را بفرستید</b>',
+            '',
+            '⚠️ پنل، حجم، مدت و آمارش به آن کاربر منتقل می‌شود و مالک قبلی',
+            'دسترسی‌اش را از دست می‌دهد.',
+            'اگر کاربر تا حالا به ربات پیام نداده، ابتدا باید یک‌بار بدهد.',
+            '',
+            '❌ برای لغو: /cancel',
+        ]), [
+            'reply_markup' => $this->bot->buildMarkup(Keyboard::rows([
+                Keyboard::back('admin.panels', '🔙 بازگشت به پنل‌ها'),
+            ])),
+        ]);
+    }
+
+    /**
+     * مرحلهٔ دوم: کاربرِ مقصد را گرفت؛ اعتبارسنجی و اعمال.
+     */
+    public function saveTransferOwnership(int $chatId, int $telegramId, string $text): void
+    {
+        $digits = preg_replace('/\D+/', '', Str::toEnglishDigits(trim($text))) ?? '';
+
+        if ($digits === '') {
+            $this->bot->sendMessage($chatId, '⚠️ آیدی عددی معتبر بفرستید، یا /cancel.');
+            return;
+        }
+
+        $target = $this->users->findByTelegramId((int) $digits);
+
+        if ($target === null) {
+            $this->sessions->clear($telegramId);
+
+            $this->bot->sendMessage($chatId, implode("\n", [
+                '❌ کاربری با آیدی <code>' . $digits . '</code> پیدا نشد.',
+                '',
+                'کاربر باید حداقل یک‌بار به ربات پیام بدهد تا ثبت شود.',
+            ]), [
+                'reply_markup' => $this->bot->buildMarkup(Keyboard::rows([
+                    Keyboard::back('admin.panels', '🔙 بازگشت به پنل‌ها'),
+                ])),
+            ]);
+
+            return;
+        }
+
+        $panelId = (int) ($this->sessions->get($telegramId)['panel_id'] ?? 0);
+        $panel   = $this->panels->find($panelId);
+
+        if ($panel === null) {
+            $this->sessions->clear($telegramId);
+            $this->bot->sendMessage($chatId, Text::notFound());
+            return;
+        }
+
+        if ((int) $target['id'] === (int) $panel['user_id']) {
+            $this->sessions->clear($telegramId);
+            $this->bot->sendMessage($chatId, 'ℹ️ این پنل هم‌اکنون متعلق به همین کاربر است.');
+            return;
+        }
+
+        $this->panels->update($panelId, [
+            'original_user_id' => (int) $panel['user_id'],
+            'user_id'          => (int) $target['id'],
+        ]);
+
+        $this->logAdminAction($chatId, 'transfer_ownership', 'panel', $panelId,
+            'انتقال به #' . (int) $target['telegram_id']);
+
+        $this->notifier->notifyUser((int) $target['telegram_id'],
+            "🔄 یک پنل نمایندگی به شما منتقل شد.\n\n"
+            . 'پنل: <code>' . Str::escape((string) $panel['panel_username']) . '</code>');
+
+        $this->sessions->clear($telegramId);
+
+        $this->bot->sendMessage($chatId, '✅ مالکیت پنل منتقل شد.', [
+            'reply_markup' => $this->bot->buildMarkup(Keyboard::rows([
+                Keyboard::back('admin.panels', '🧾 بازگشت به پنل‌ها'),
+            ])),
+        ]);
+    }
+
+    // ------------------------------------------------------------------
+    // لاگ حسابرسی ادمین
+    // ------------------------------------------------------------------
+
+    private function showAuditLog(int $chatId): void
+    {
+        $db = Db::instance();
+        $rows = $db->all('SELECT * FROM admin_logs ORDER BY id DESC LIMIT 15');
+
+        $lines = ['📋✨ <b>لاگ حسابرسی ادمین 📝</b>', ''];
+
+        if ($rows === []) {
+            $lines[] = '📭 رویدادی ثبت نشده است.';
+        } else {
+            foreach ($rows as $row) {
+                $lines[] = '🕐 ' . Str::date((int) $row['created_at']);
+                $lines[] = '   👤 ادمین: ' . (int) $row['admin_user_id'];
+                $lines[] = '   ⚡ عملیات: ' . Str::escape((string) $row['action']);
+                $lines[] = '   🎯 هدف: ' . Str::escape((string) $row['target_type']) . ' #' . (int) $row['target_id'];
+                $lines[] = '';
+            }
+        }
+
+        $this->bot->sendMessage($chatId, implode("\n", $lines), [
+            'reply_markup' => $this->bot->buildMarkup(Keyboard::rows([
+                Keyboard::back(BotApi::encodeData('admin.home'), '🛠 پنل مدیریت'),
+            ])),
+        ]);
+    }
+
+    // ------------------------------------------------------------------
+    // داشبورد درآمد
+    // ------------------------------------------------------------------
+
+    private function showRevenueDashboard(int $chatId): void
+    {
+        $stats = $this->orders->stats();
+        $sold  = $this->orders->soldVolume();
+
+        $lines = [
+            '💰✨ <b>داشبورد درآمد 📈</b>',
+            '',
+            '🧾 کل سفارش‌ها: ' . Str::faNumber($stats['total']),
+            '✅ اجراشده: ' . Str::faNumber($stats['applied']),
+            '💰 درآمد کل: <b>' . Str::formatToman($stats['revenue']) . '</b>',
+            '📦 حجم فروش‌رفته:',
+            '   🖥 پنل نمایندگی: ' . Str::faNumber($sold[PackageRepository::KIND_AGENCY] ?? 0, 1) . ' GB',
+            '   ⚡️ شارژ پنل: ' . Str::faNumber($sold[PackageRepository::KIND_TOPUP] ?? 0, 1) . ' GB',
+        ];
+
+        $this->bot->sendMessage($chatId, implode("\n", $lines), [
+            'reply_markup' => $this->bot->buildMarkup(Keyboard::rows([
+                Keyboard::back(BotApi::encodeData('admin.home'), '🛠 پنل مدیریت'),
+            ])),
+        ]);
     }
 }

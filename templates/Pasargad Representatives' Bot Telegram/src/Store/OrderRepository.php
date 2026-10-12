@@ -225,6 +225,60 @@ final class OrderRepository
     }
 
     /**
+     * بازگرداندن یک سفارشِ «متوقف با دلیلِ قابل‌رفع» به صف اجرا.
+     *
+     * ⭐️ **چرا لازم است**
+     *
+     * `markTerminal()` برای خطاهایی مثل `permission_denied` هم استفاده
+     * می‌شود. ولی «نبودِ مجوز» چیزی نیست که برای همیشه بسته باشد: کلید درست
+     * می‌شود و همه‌چیز کار می‌کند.
+     *
+     * مشکل: `markApplying()` شرط `terminal_reason IS NULL` دارد و **هیچ مسیری
+     * آن را پاک نمی‌کرد**. یعنی سفارشِ متوقف‌شده با دلیلِ قابل‌رفع برای همیشه
+     * از کار افتاده بود — حتی با دکمهٔ «تلاش مجدد» ادمین. نتیجه: خریدار پول
+     * می‌داد، خطا گزارش می‌شد، و بسته هرگز اعمال نمی‌شد.
+     *
+     * فقط دلایلِ **قابل‌رفع** پاک می‌شوند. سفارشِ ردشده/لغوشده (که وضعیتش
+     * نهایی است) دست‌نخورده می‌ماند — پولِ برگشت‌خورده نباید دوباره بسته تولید
+     * کند، و همین شرط `isTerminal()` تضمینش می‌کند.
+     *
+     * @return bool آیا سفارش دوباره قابل اجرا شد؟
+     */
+    public function reopen(int $id): bool
+    {
+        $fixable = [
+            'permission_denied',
+            'auth_error',
+            'panel_unlinked',
+            'panel_missing',
+            'non_retryable',
+            'max_attempts',
+            'agency_not_configured',
+            'kind_retired',
+        ];
+
+        $row = $this->find($id);
+
+        if ($row === null || $this->isTerminal((string) ($row['status'] ?? ''))) {
+            return false;
+        }
+
+        if (!in_array((string) ($row['terminal_reason'] ?? ''), $fixable, true)) {
+            return false;
+        }
+
+        $this->db->update('orders', [
+            'terminal_reason' => null,
+            'next_attempt_at' => null,
+            'attempts'        => 0,
+            'status'          => self::STATUS_PAID,
+            'updated_at'      => time(),
+        ], ['id' => $id]);
+
+        return true;
+    }
+
+    /**
      * محاسبهٔ زمان تلاش مجدد بعدی (نمایی).
      */
     public function nextAttemptDelay(int $attempts): int
@@ -611,6 +665,133 @@ final class OrderRepository
         $out = [];
         foreach ($rows as $row) {
             $out[(string) $row['kind']] = (float) $row['total_gb'];
+        }
+
+        return $out;
+    }
+
+    // ------------------------------------------------------------------
+    //  ⬇️ آمار تجمیعی  (برای AdminDashboard)
+    // ------------------------------------------------------------------
+
+    /**
+     * ستون‌هایی که جمع بستنشان مجاز است.
+     *
+     * مثل `updateField`، نام ستون نمی‌تواند پارامتری شود؛ پس از فهرست
+     * بسته رد می‌شود.
+     *
+     * @var array<int, string>
+     */
+    private const SUMMABLE_FIELDS = [
+        'price_toman',
+        'discount_toman',
+        'revenue_share_toman',
+        'original_price_toman',
+    ];
+
+    public function count(): int
+    {
+        return $this->db->count('SELECT COUNT(*) FROM orders');
+    }
+
+    public function countCreatedAfter(int $timestamp): int
+    {
+        return $this->db->count('SELECT COUNT(*) FROM orders WHERE created_at >= ?', [$timestamp]);
+    }
+
+    /**
+     * جمع یک ستون عددی. فیلد ناشناخته به‌جای خطای SQL، صفر برمی‌گرداند.
+     */
+    public function sumByField(string $field): int
+    {
+        if (!in_array($field, self::SUMMABLE_FIELDS, true)) {
+            return 0;
+        }
+
+        return (int) ($this->db->value("SELECT COALESCE(SUM({$field}), 0) FROM orders") ?? 0);
+    }
+
+    public function sumByFieldAfter(string $field, int $timestamp): int
+    {
+        if (!in_array($field, self::SUMMABLE_FIELDS, true)) {
+            return 0;
+        }
+
+        return (int) ($this->db->value(
+            "SELECT COALESCE(SUM({$field}), 0) FROM orders WHERE created_at >= ?",
+            [$timestamp]
+        ) ?? 0);
+    }
+
+    /**
+     * بازهٔ نیم‌باز: `$from` شامل، `$to` غیر شامل — تا بازه‌ها هم‌پوشانی نداشته باشند.
+     */
+    public function sumByFieldBetween(string $field, int $from, int $to): int
+    {
+        if (!in_array($field, self::SUMMABLE_FIELDS, true)) {
+            return 0;
+        }
+
+        return (int) ($this->db->value(
+            "SELECT COALESCE(SUM({$field}), 0) FROM orders WHERE created_at >= ? AND created_at < ?",
+            [$from, $to]
+        ) ?? 0);
+    }
+
+    /**
+     * تعداد سفارش به تفکیک وضعیت.
+     *
+     * @return array<string, int>
+     */
+    public function countByStatus(): array
+    {
+        $rows = $this->db->all('SELECT status, COUNT(*) AS n FROM orders GROUP BY status');
+
+        $out = [];
+        foreach ($rows as $row) {
+            $out[(string) $row['status']] = (int) $row['n'];
+        }
+
+        return $out;
+    }
+
+    public function sumByStatus(string $status): int
+    {
+        return (int) ($this->db->value(
+            'SELECT COALESCE(SUM(price_toman), 0) FROM orders WHERE status = ?',
+            [$status]
+        ) ?? 0);
+    }
+
+    /**
+     * پولی که واقعاً از درگاه برگشته — یعنی سفارش‌هایی که `paid_at` دارند.
+     *
+     * مبنای مقایسه با `sumByStatus('applied')` است تا اختلاف تسویه معلوم شود.
+     */
+    public function sumPaidByGateway(): int
+    {
+        return (int) ($this->db->value(
+            'SELECT COALESCE(SUM(price_toman), 0) FROM orders WHERE paid_at IS NOT NULL'
+        ) ?? 0);
+    }
+
+    /**
+     * آخرین سفارش‌ها برای «فعالیت‌های اخیر».
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    public function fetchRecent(int $limit = 10): array
+    {
+        $rows = $this->db->all(
+            'SELECT * FROM orders ORDER BY id DESC LIMIT ?',
+            [max(1, min(50, $limit))]
+        );
+
+        $out = [];
+
+        foreach ($rows as $row) {
+            $row['created_at'] = (int) $row['created_at'];
+            $out[] = $row;
         }
 
         return $out;

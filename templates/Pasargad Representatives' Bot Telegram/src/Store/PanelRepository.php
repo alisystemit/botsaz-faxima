@@ -60,6 +60,23 @@ final class PanelRepository
         return $this->db;
     }
 
+    /**
+     * نام ستون‌های واقعی جدول `panels` (با کش، چون اسکیما در هر درخواست عوض نمی‌شود).
+     *
+     * @return array<int, string>
+     */
+    private function columnNames(): array
+    {
+        /** @var array<int, string>|null $cached */
+        static $cached = null;
+
+        if ($cached === null) {
+            $cached = array_column($this->db->all('PRAGMA table_info("panels")'), 'name');
+        }
+
+        return $cached;
+    }
+
     // ------------------------------------------------------------------
     // خواندن
     // ------------------------------------------------------------------
@@ -201,6 +218,65 @@ final class PanelRepository
         return $this->db->count('SELECT COUNT(*) FROM panels');
     }
 
+    // ------------------------------------------------------------------
+    //  ⬇️ آمار کلی  (برای AdminDashboard)
+    // ------------------------------------------------------------------
+
+    public function count(): int
+    {
+        return $this->db->count('SELECT COUNT(*) FROM panels');
+    }
+
+    /**
+     * تعداد پنل‌ها با یک وضعیت مشخص.
+     *
+     * وضعیت نمی‌تواند پارامتر SQL باشد، ولی اینجا مقدار ثابت داخل کد است،
+     * نه ورودی کاربر — پس خطری ندارد.
+     */
+    public function countByStatus(string $status): int
+    {
+        return $this->db->count('SELECT COUNT(*) FROM panels WHERE panel_status = ?', [$status]);
+    }
+
+    /**
+     * وضعیت همگام‌سازی همهٔ پنل‌ها برای صفحهٔ «وضعیت پنل‌ها».
+     *
+     * «موفق» یعنی `stats_at` در ۲۴ ساعت گذشته پر شده؛ `is_dead` هم پرچم
+     * پایش است، نه نتیجهٔ آخرین همگام‌سازی — پس هر دو جدا حساب می‌شوند.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    public function getAllWithSyncStatus(int $limit = 100): array
+    {
+        $since = time() - 86400;
+
+        $rows = $this->db->all(
+            'SELECT id, panel_username, stats_at, is_dead, monitor_status, monitor_last_check
+             FROM panels
+             ORDER BY COALESCE(stats_at, 0) ASC
+             LIMIT ?',
+            [max(1, min(500, $limit))]
+        );
+
+        $out = [];
+
+        foreach ($rows as $row) {
+            $statsAt = (int) ($row['stats_at'] ?? 0);
+
+            $out[] = [
+                'id'                  => (int) $row['id'],
+                'panel_username'      => (string) $row['panel_username'],
+                'last_sync_at'        => $statsAt > 0 ? $statsAt : null,
+                'last_sync_success'   => $statsAt >= $since,
+                'is_dead'             => (int) ($row['is_dead'] ?? 0) === 1,
+                'monitor_status'      => (string) ($row['monitor_status'] ?? 'unknown'),
+                'monitor_last_check'  => (int) ($row['monitor_last_check'] ?? 0),
+            ];
+        }
+
+        return $out;
+    }
+
     /**
      * آیا کاربر حداقل یک پنل دارد؟ (یعنی «نماینده» است)
      */
@@ -233,15 +309,37 @@ final class PanelRepository
     {
         $now = time();
 
+        $apiKey = (string) ($data['api_key'] ?? '');
+        unset($data['api_key']);
+
         return $this->db->insert('panels', array_merge([
             'user_id'        => $userId,
             'panel_username' => trim($panelUsername),
             'panel_password' => $password === '' ? '' : Crypto::encrypt($password),
+            'api_key'        => $apiKey === '' ? '' : Crypto::encrypt($apiKey),
             'panel_status'   => self::STATUS_ACTIVE,
             'source'         => self::SOURCE_BOT,
             'created_at'     => $now,
             'updated_at'     => $now,
         ], $data));
+    }
+
+    /**
+     * نوشتن (یا پاک کردن) کلید API روی یک ردیف.
+     *
+     * رمزنگاری اینجا انجام می‌شود نه در فراخواننده — وگرنه روزی یک `api_key`
+     * خام در دیتابیس می‌نشست. رشتهٔ خالی یعنی «کلیدی نداریم» و روش اصلی به
+     * رمز عبور برمی‌گردد.
+     */
+    public function setApiKey(int $panelId, string $apiKey): void
+    {
+        $apiKey = trim($apiKey);
+
+        $this->db->update('panels', [
+            'api_key'    => $apiKey === '' ? '' : Crypto::encrypt($apiKey),
+            'auth_mode'  => $apiKey === '' ? null : PanelAccess::MODE_API_KEY,
+            'updated_at' => time(),
+        ], ['id' => $panelId]);
     }
 
     /**
@@ -254,7 +352,7 @@ final class PanelRepository
      * @param array<string, mixed> $adminDetails پاسخ پنل
      * @return int شناسهٔ پنل
      */
-    public function upsertFromPanel(int $userId, string $panelUsername, string $password, array $adminDetails, string $source = self::SOURCE_BOT): int
+    public function upsertFromPanel(int $userId, string $panelUsername, string $password, array $adminDetails, string $source = self::SOURCE_BOT, array $extra = []): int
     {
         $existing = $this->findByPanelUsername($panelUsername);
 
@@ -274,6 +372,35 @@ final class PanelRepository
             'synced_at'      => time(),
             'updated_at'     => time(),
         ];
+
+        // ستون‌های اختیاری (مثل `login_url` در جریان «اتصال پنل جدید») فقط وقتی
+        // واقعاً داده شده باشند نوشته می‌شوند تا با payload ثابت قاطی نشوند.
+        //
+        // ⚠️ نام ستون حتماً باید در جدول `panels` وجود داشته باشد. نوشتن ستونِ
+        // ناموجود «no such column» می‌دهد و کل ذخیرهٔ پنل را از بین می‌برد،
+        // پس اینجا در برابر typo محافظت می‌کنیم.
+        foreach ($extra as $column => $value) {
+            if (!is_string($column) || !in_array($column, $this->columnNames(), true)) {
+                Logger::warning('Ignoring unknown column in panel upsert', ['column' => $column]);
+
+                continue;
+            }
+
+            // کلید API از فراخواننده **خام** می‌آید و اینجا رمزنگاری می‌شود.
+            // اگر رمزنگاری را به فراخواننده می‌سپردیم، یک روز یک `api_key`
+            // خام در دیتابیس می‌نشست — دقیقاً همان اتفاقی که برای رمز عبور
+            // افتاده بود و کلاس را مجبور کرد این الگو را داشته باشد.
+            if ($column === 'api_key') {
+                $key = trim((string) $value);
+
+                $payload['api_key']   = $key === '' ? '' : Crypto::encrypt($key);
+                $payload['auth_mode'] = $key === '' ? null : PanelAccess::MODE_API_KEY;
+
+                continue;
+            }
+
+            $payload[$column] = $value;
+        }
 
         // تعداد کاربران پنل از خودِ پاسخ getAdmin (ارزان‌تر از walk کامل).
         // فقط وقتی می‌نویسیم که عدد معتبر باشد تا آمار تازه‌تر خراب نشود.

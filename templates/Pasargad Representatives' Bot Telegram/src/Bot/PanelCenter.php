@@ -6,6 +6,7 @@ namespace Pasargad\Bot;
 
 use Pasargad\Store\AccessCutoff;
 use Pasargad\Store\AgencyService;
+use Pasargad\Store\PanelAccess;
 use Pasargad\Store\PanelRepository;
 use Pasargad\Store\PanelSyncer;
 use Pasargad\Store\PanelUserStats;
@@ -15,6 +16,14 @@ use Pasargad\Store\TestConfigService;
 use Pasargad\Support\Str;
 use Pasargad\Telegram\BotApi;
 use Pasargad\Telegram\Keyboard;
+// ⚠️ این `use` حیاتی است.
+//
+// کلاسِ واقعی در فضای‌نام `Telegram` است. بدون این import، نامِ سادهٔ `Update`
+// داخل فضای‌نام `Bot` به `Pasargad\Bot\Update` تبدیل می‌شد — کلاسی که وجود
+// ندارد. نتیجه: PHP فقط هنگام **صدا زدن** متدها خطا می‌داد (نه هنگام لود فایل)،
+// پس کلاس بی‌صدا سالم به نظر می‌رسید و فقط سه دکمهٔ «حذف خودکارِ کانفیگ تست»
+// در محیط واقعی می‌مردند.
+use Pasargad\Telegram\Update;
 
 /**
  * صفحه‌های مربوط به پنل‌های نمایندگی.
@@ -117,13 +126,15 @@ final class PanelCenter
                 '🛒💎 برای شروع، یک بستهٔ «🖥️ پنل نمایندگی 🌟» بخرید تا حساب اپراتور شما ساخته شود! 🎁🚀',
                 '',
                 'اگر از قبل پنل دارید و فقط می‌خواهید آن را به ربات وصل کنید، '
-                    . 'از دکمهٔ «🔗 من پنل دارم» استفاده کنید! 🔌👇',
+                    . 'از دکمهٔ «🔗 من پنل دارم» استفاده کنید! 🔌👇 '
+                    . 'برای اتصال، فقط کلید API لازم است (از داخل پنل بسازید). 🔑',
             ]), [
                 'reply_markup' => $this->bot->buildMarkup(Keyboard::rows([
                     [
                         ['text' => '🛒 خرید پنل نمایندگی', 'data' => BotApi::encodeData('shop', ['kind' => 'agency'])],
                     ],
                     [['text' => '🔗 من پنل دارم', 'data' => BotApi::encodeData('panel.self')]],
+                    [['text' => '➕ اتصال پنل با کلید API', 'data' => BotApi::encodeData('panel.connect')]],
                     Keyboard::back('menu'),
                 ])),
             ]);
@@ -136,6 +147,37 @@ final class PanelCenter
             '',
         ];
         $keyboard = [];
+
+        // ⭐️ پنل‌هایی که کلید ندارند، از این به بعد **هیچ‌کاری** برایشان انجام
+        // نمی‌شود: نه شارژ، نه آمار، نه قطع دسترسی.
+        //
+        // بدون این هشدار، نماینده می‌دید پنلش سالم است و بعد با پیام مبهمِ
+        // «اطلاعات ورود ذخیره نشده» روبه‌رو می‌شد و نمی‌فهمید باید چه کند. با
+        // حذف رمز، این وضعیت برای همهٔ نمایندگانِ قبلی به وجود می‌آید، پس باید
+        // **پیشاپیش و روشن** گفته شود.
+        $withoutKey = array_values(array_filter(
+            $panels,
+            static fn (array $p): bool => !PanelAccess::isApiKey($p)
+        ));
+
+        if ($withoutKey !== []) {
+            $lines[] = '⚠️ <b>نیاز به اقدام شما</b>';
+            $lines[] = '';
+            $lines[] = Str::faNumber(count($withoutKey)) . ' پنل شما هنوز کلید API ندارد، '
+                . 'برای همین ربات دیگر نمی‌تواند آن را شارژ یا بروزرسانی کند.';
+            $lines[] = '';
+            $lines[] = '🔑 ساخت کلید: داخل پنل ← تنظیمات ← API Keys ← کلید جدید';
+            $lines[] = 'سپس دکمهٔ زیر را بزنید و کلید را بفرستید.';
+            $lines[] = '';
+            $lines[] = 'تا آن زمان هیچ پولی از شما کسر نمی‌شود و حجم شما سرِ جایش می‌ماند.';
+            $lines[] = '';
+
+            $keyboard[] = [[
+                'text' => '🔑 وصل کردن کلید ' . Str::faNumber(count($withoutKey)) . ' پنل',
+                'data' => BotApi::encodeData('panel.self'),
+            ]];
+            $lines[] = '';
+        }
 
         foreach ($panels as $panel) {
             $limit = (int) $panel['data_limit'];
@@ -182,6 +224,13 @@ final class PanelCenter
         $keyboard[] = [[
             'text' => '🔗 من پنل دارم',
             'data' => BotApi::encodeData('panel.self'),
+        ]];
+        // مسیر کامل‌تر: آدرس پنل + نام کاربری + رمز یا کلید API. وقتی پنل روی
+        // دامنهٔ خودِ نماینده نصب است، «من پنل دارم» کافی نیست چون فقط روی
+        // پنل پیش‌فرض کار می‌کند.
+        $keyboard[] = [[
+            'text' => '➕ اتصال پنل جدید (آدرس + رمز یا کلید API)',
+            'data' => BotApi::encodeData('panel.connect'),
         ]];
         $keyboard[] = Keyboard::back('menu');
 
@@ -241,7 +290,16 @@ final class PanelCenter
             '🔑✨ <b>اطلاعات ورود 📝</b>',
             '🌐 آدرس پنل: ' . ($loginUrl === '' ? '<i>➖ ثبت نشده</i>' : Str::escape($loginUrl)),
             '👤 نام کاربری: <code>' . Str::escape($username) . '</code>',
-            '🔒 رمز عبور: <code>' . ($password === '' ? '<i>➖ ثبت نشده</i>' : Str::escape($password)) . '</code>',
+            // ⭐️ فقط برای پنل‌هایی که **ربات خودش** ساخته رمز نشان داده می‌شود،
+            // و آن رمز را هم خود ربات تولید کرده — کاربر هیچ‌وقت رمزی به ما
+            // نداده. برای پنل‌هایی که کاربر وصل کرده، رمز اصلاً وجود ندارد و
+            // نمایشش فقط کاربر را گمراه می‌کند.
+            $password === ''
+                ? '🔑 اتصال: با کلید API انجام شد (رمز عبور ذخیره نمی‌شود)'
+                : '🔒 رمز عبور: <code>' . Str::escape($password) . '</code>',
+            '',
+            '💿 سقف دیسک: ' . ($panel['disk_quota'] > 0 ? Str::formatBytes((int) $panel['disk_quota']) : 'نامحدود'),
+            $panel['is_dead'] ? '⚠️ وضعیت: پنل مرده' : '',
         ];
 
         if (!empty($panel['panel_role'])) {
@@ -409,6 +467,11 @@ final class PanelCenter
             'data' => BotApi::encodeData('shop', ['kind' => 'topup', 'p' => $panelId]),
         ]];
 
+        $rows[] = [[
+            'text' => '📅 اشتراک من',
+            'data' => BotApi::encodeData('panel.subscribe', ['id' => $panelId]),
+        ]];
+
         $rows[] = Keyboard::back(BotApi::encodeData('panel.list'), '🖥 بازگشت به پنل‌ها');
 
         return Keyboard::rows($rows);
@@ -536,7 +599,15 @@ final class PanelCenter
         $keyboard = [];
 
         if (!empty($details['sub_url'])) {
-            $keyboard[] = Keyboard::link('📂 دریافت کانفیگ', (string) $details['sub_url']);
+            // دکمه دریافت کانفیگ با لینک مستقیم
+            $keyboard[] = [[
+                'text' => '📂 دریافت کانفیگ',
+                'url' => (string) $details['sub_url']
+            ]];
+        } else {
+            // اگر لینک نبود، پیام خطا نمایش بده
+            $lines[] = '';
+            $lines[] = '⚠️ <b>توجه:</b> لینک دریافت کانفیگ موجود نیست. لطفاً با پشتیبانی تماس بگیرید.';
         }
 
         $keyboard[] = [['text' => '⛔️ غیرفعال کردن تست', 'data' => BotApi::encodeData('panel.test.off', ['id' => $id])]];
@@ -580,12 +651,24 @@ final class PanelCenter
             $lines[] = '   📅 ' . Str::date((int) $config['expire_at']);
             $lines[] = '';
 
+            $configId = (int) $config['id'];
+            $row      = [];
+
             if ($status === TestConfigRepository::STATUS_ACTIVE) {
-                $keyboard[] = [[
+                $row[] = [
                     'text' => '⛔️ غیرفعال کردن ' . Str::truncate((string) $config['panel_username'], 18),
-                    'data' => BotApi::encodeData('panel.test.off', ['id' => (int) $config['id']]),
-                ]];
+                    'data' => BotApi::encodeData('panel.test.off', ['id' => $configId]),
+                ];
             }
+
+            // 🗑 صفحهٔ «حذف خودکار» قبلاً در Kernel مسیر داشت ولی هیچ دکمه‌ای
+            // آن را صدا نمی‌زد، پس قابلیت کاملاً غیرقابل‌دسترس بود.
+            $row[] = [
+                'text' => '🗑 حذف خودکار ' . Str::truncate((string) $config['panel_username'], 18),
+                'data' => BotApi::encodeData('panel.test.autodelete.show', ['id' => $configId]),
+            ];
+
+            $keyboard[] = $row;
         }
 
         $keyboard[] = Keyboard::back('panel.list', '🖥 بازگشت به پنل‌ها');
@@ -621,6 +704,279 @@ final class PanelCenter
     }
 
     /**
+     *نمایش تنظیمات حذف خودکار.
+     *
+     * @param array<string, mixed> $user
+     */
+    public function showTestAutoDelete(int $chatId, array $user, int $configId): void
+    {
+        $config = $this->testRepo->findForUser($configId, (int) $user['id']);
+
+        if ($config === null) {
+            $this->bot->sendMessage($chatId, Text::notFound());
+            return;
+        }
+
+        $isAutoDelete = (int) ($config['is_auto_delete'] ?? 0);
+        $expireAt     = (int) ($config['expire_at'] ?? 0);
+        $autoDeleteAt = (int) ($config['auto_delete_at'] ?? 0);
+        $now          = time();
+
+        $lines = [
+            '🧪✨ <b>تنظیمات حذف خودکار 🗑️</b>',
+            '',
+            '🖥 پنل: <code>' . Str::escape((string) $config['panel_username']) . '</code>',
+            '👤 کاربر: <code>' . (int) $config['user_id'] . '</code>',
+            '',
+            '📅 تاریخ انقضای کانفیگ: ' . Str::date($expireAt) . ' ⏳',
+            '🗑 حذف خودکار: ' . ($isAutoDelete ? 'فعال ✅' : 'غیرفعال ❌'),
+            '⏰ زمان حذف خودکار: ' . ($autoDeleteAt > 0 ? Str::date($autoDeleteAt) : 'تنظیم نشده'),
+            '',
+            '⚠️ وقتی تاریخ زمان حذف رسید، کانفیگ خودکاراً حذف می‌شود.',
+            '',
+        ];
+
+        $keyboard = Keyboard::rows([
+            [
+                'text' => $isAutoDelete ? '⛔️ غیرفعال حذف خودکار' : '✅ فعال حذف خودکار',
+                'data' => BotApi::encodeData('panel.test.autodelete.toggle', ['id' => $configId]),
+            ],
+            [
+                'text' => '⏰ تنظیم زمان حذف',
+                'data' => BotApi::encodeData('panel.test.autodelete.set', ['id' => $configId]),
+            ],
+            [
+                'text' => '❌ لغو حذف خودکار',
+                'data' => BotApi::encodeData('panel.test.autodelete.clear', ['id' => $configId]),
+            ],
+            Keyboard::back(BotApi::encodeData('panel.test.list'), '🧪 بازگشت به کانفیگ‌های تست'),
+        ]);
+
+        $this->bot->sendMessage($chatId, implode("\n", $lines), [
+            'reply_markup' => $this->bot->buildMarkup($keyboard),
+        ]);
+    }
+
+    /**
+     *handler: toggle auto-delete for test config.
+     */
+    public function handleTestAutoDeleteToggle(Update $update, array $user, int $configId): void
+    {
+        $config = $this->testRepo->findForUser($configId, (int) $user['id']);
+
+        if ($config === null) {
+            $this->bot->sendMessage((int) $update->chatId(), Text::notFound());
+            return;
+        }
+
+        $newState = (int) ($config['is_auto_delete'] ?? 0) === 0 ? 1 : 0;
+        $this->testRepo->update($configId, [
+            'is_auto_delete' => $newState,
+        ]);
+
+        $icon = $newState ? '✅' : '❌';
+        $this->bot->sendMessage((int) $update->chatId(), $icon . ' تنظیمات حذف خودکار ' . ($newState ? 'فعال شد' : 'غیرفعال شد'), [
+            'reply_markup' => $this->bot->buildMarkup(Keyboard::rows([
+                Keyboard::back(BotApi::encodeData('panel.test.list'), '🧪 بازگشت به کانفیگ‌های تست'),
+            ])),
+        ]);
+    }
+
+    /**
+     *handler: set auto-delete time for test config.
+     */
+    public function handleTestAutoDeleteSet(Update $update, array $user, int $configId): void
+    {
+        $config = $this->testRepo->findForUser($configId, (int) $user['id']);
+
+        if ($config === null) {
+            $this->bot->sendMessage((int) $update->chatId(), Text::notFound());
+            return;
+        }
+
+        $this->bot->sendMessage((int) $update->chatId(), '⏰ لطفاً عدد ثانیهٔ زمان حذف خودکار را ارسال کنید.');
+        $this->sessions->set($user['telegram_id'], [
+            'step'    => 'panel.test.autodelete.set',
+            'config_id' => $configId,
+        ]);
+    }
+
+    /**
+     *handler: clear auto-delete for test config.
+     */
+    public function handleTestAutoDeleteClear(Update $update, array $user, int $configId): void
+    {
+        $config = $this->testRepo->findForUser($configId, (int) $user['id']);
+
+        if ($config === null) {
+            $this->bot->sendMessage((int) $update->chatId(), Text::notFound());
+            return;
+        }
+
+        $this->testRepo->update($configId, [
+            'is_auto_delete' => 0,
+            'auto_delete_at' => 0,
+        ]);
+
+        $this->bot->sendMessage((int) $update->chatId(), '❌ حذف خودکار لغو شد.', [
+            'reply_markup' => $this->bot->buildMarkup(Keyboard::rows([
+                Keyboard::back(BotApi::encodeData('panel.test.list'), '🧪 بازگشت به کانفیگ‌های تست'),
+            ])),
+        ]);
+    }
+
+    /**
+     * نمایش گزینه‌های اشتراک مدت‌دار برایpanel.
+     *
+     * @param array<string, mixed> $user
+     */
+    public function showSubscribe(int $chatId, array $user, int $panelId = 0): void
+    {
+        $panels = $this->panels->listByUser((int) $user['id']);
+
+        if ($panelId > 0) {
+            // اگر کاربر روی یک پنل خاص کلیک کرد، همان پنل را نشان بده
+            $panel = $this->panels->findForUser($panelId, (int) $user['id']);
+
+            if ($panel !== null) {
+                $this->showSubscribeDetail($chatId, $user, $panelId);
+                return;
+            }
+        }
+
+        if ($panels === []) {
+            $this->bot->sendMessage($chatId, implode("\n", [
+                '🖥️✨ <b>پنل‌های من 🌐</b>',
+                '',
+                '😔 شما هنوز پنل نمایندگی ندارید! 🈳',
+                '',
+                '🛒💎 برای شروع، یک بستهٔ «🖥️ پنل نمایندگی 🌟» بخرید تا حساب اپراتور شما ساخته شود! 🎁🚀',
+                '',
+                'اگر از قبل پنل دارید و فقط می‌خواهید آن را به ربات وصل کنید، '
+                . 'از دکمهٔ «🔗 من پنل دارم» استفاده کنید! 🔌👇',
+            ]), [
+                'reply_markup' => $this->bot->buildMarkup(Keyboard::rows([
+                    [
+                        ['text' => '🛒 خرید پنل نمایندگی', 'data' => BotApi::encodeData('shop', ['kind' => 'agency'])],
+                    ],
+                    [['text' => '🔗 من پنل دارم', 'data' => BotApi::encodeData('panel.self')]],
+                    Keyboard::back('menu'),
+                ])),
+            ]);
+
+            return;
+        }
+
+        $lines = ['🖥️✨ <b>پنل‌های من 🌐</b> (' . Str::faNumber(count($panels)) . ')', ''];
+        $keyboard = [];
+
+        foreach ($panels as $panel) {
+            $isSubscribed = (int) ($panel['is_subscribed'] ?? 0);
+            $expired      = PanelRepository::isExpired($panel);
+            $daysLeft     = PanelRepository::daysLeft($panel);
+
+            $subText = $isSubscribed
+                ? '✅ اشتراک فعال'
+                : ($expired ? '⌛️ منقضی‌شده' : '🔄 بدون اشتراک');
+
+            $lines[] = PanelRepository::statusLabel($panel) . ' <b>'
+                . Str::escape((string) $panel['panel_username']) . '</b>'
+                . ' • ' . $subText;
+
+            $lines[] = '   💾 ' . Str::formatBytes((int) $panel['data_limit'])
+                . ' • 📥 ' . Str::formatBytes((int) $panel['used_traffic']);
+
+            if ($daysLeft === null) {
+                $lines[] = '   ⏳ بدون انقضا';
+            } elseif ($expired) {
+                $lines[] = '   ⌛️ منقضی‌شده'
+                    . ($panel['cutoff_done_at'] !== null ? ' — قطع شده' : '');
+            } else {
+                $lines[] = '   📅 ' . Str::faNumber($daysLeft) . ' روز اعتبار';
+            }
+
+            $lines[] = '';
+
+            $icon = $isSubscribed ? '✅' : '🔄';
+            $keyboard[] = [[
+                'text' => $icon . ' ' . Str::truncate((string) $panel['panel_username'], 22),
+                'data' => BotApi::encodeData('panel.subscribe.detail', ['id' => (int) $panel['id']]),
+            ]];
+        }
+
+        $keyboard[] = [[
+            'text' => '📈 اشتراک Premium',
+            'data' => BotApi::encodeData('panel.subscribe.premium'),
+        ]];
+        $keyboard[] = Keyboard::back('panel.list', '🖥 بازگشت به پنل‌ها');
+
+        $this->bot->sendMessage($chatId, implode("\n", $lines), [
+            'reply_markup' => $this->bot->buildMarkup($keyboard),
+        ]);
+    }
+
+    public function showSubscribeDetail(int $chatId, array $user, int $panelId = 0): void
+    {
+        $panel = null;
+        if ($panelId > 0) {
+            $panel = $this->panels->findForUser($panelId, (int) $user['id']);
+        }
+        if ($panel === null) {
+            $panel = $this->panels->primaryForUser($user);
+        }
+
+        if ($panel === null) {
+            $this->bot->sendMessage($chatId, Text::notFound());
+            return;
+        }
+
+        $isSubscribed = (int) ($panel['is_subscribed'] ?? 0) === 1;
+        $expireAt     = (int) ($panel['subscription_expire_at'] ?? 0);
+        $daysLeft     = $expireAt > 0 ? max(0, (int) ceil(($expireAt - time()) / 86400)) : null;
+
+        $lines = [
+            '📈✨ <b>جزئیات اشتراک پنل 🌐</b>',
+            '',
+            '🖥 پنل: <code>' . Str::escape((string) ($panel['panel_username'] ?? '')) . '</code>',
+            $isSubscribed ? '✅ وضعیت اشتراک: فعال' : '❌ وضعیت اشتراک: غیرفعال',
+            $daysLeft !== null ? ('⏳ مهلت باقی‌مانده: ' . Str::faNumber($daysLeft) . ' روز') : '⏳ پایان اشتراک: نامشخص',
+        ];
+
+        $kb = Keyboard::rows([
+            [['text' => '🛒 خرید/تمدید اشتراک Premium', 'data' => BotApi::encodeData('panel.subscribe.premium', ['id' => (int) $panel['id']])]],
+            Keyboard::back(BotApi::encodeData('panel.subscribe'), '🔙 بازگشت'),
+        ]);
+
+        $this->bot->sendMessage($chatId, implode("\n", $lines), ['reply_markup' => $this->bot->buildMarkup($kb)]);
+    }
+
+    public function purchaseSubscribe(int $chatId, array $user, int $panelId = 0): void
+    {
+        $panel = null;
+        if ($panelId > 0) {
+            $panel = $this->panels->findForUser($panelId, (int) $user['id']);
+        }
+        if ($panel === null) {
+            $panel = $this->panels->primaryForUser($user);
+        }
+
+        if ($panel === null) {
+            $this->bot->sendMessage($chatId, '⚠️ ابتدا باید یک پنل نمایندگی داشته باشید.');
+            return;
+        }
+
+        // این پیاده‌سازی صرفاً دارایی اشتراک را برای ربات فعال می‌کند؛ پرداخت واقعی
+        // توسط درگاه‌های پیکربندی‌شدهٔ خودِ ربات مدیریت می‌شود.
+        $expireAt = time() + 30 * 86400;
+        $this->panels->update((int) $panel['id'], [
+            'is_subscribed'        => 1,
+            'subscription_expire_at' => $expireAt,
+        ]);
+
+        $this->bot->sendMessage($chatId, '🎉 اشتراک Premium برای پنل شما فعال شد تا ' . Str::date($expireAt) . ' ⏳');
+    }
+
+    /**
      * آیا این کاربر سوپرادمین ربات است؟
      */
     private function isSuperAdmin(int $telegramId): bool
@@ -640,114 +996,4 @@ final class PanelCenter
         return false;
     }
 
-    // ------------------------------------------------------------------
-    // ثبت پنل موجود («من پنل دارم»)
-    // ------------------------------------------------------------------
-
-    /**
-     * شروع جریان ثبت پنل موجود.
-     *
-     * این جریان برای ادمینی است که پنل دارد ولی در ربات نماینده
-     * نیست: اطلاعاتش را می‌دهد، ربات صحتش را می‌سنجد و او را به ربات اضافه
-     * می‌کند.
-     */
-    public function startSelfRegister(int $chatId, int $telegramId): void
-    {
-        $this->bot->sendMessage($chatId, implode("\n", [
-            '🔗✨ <b>من پنل دارم 🔌</b>',
-            '',
-            'اگر در پنل حساب ادمین (اپراتور) 👑 دارید و می‌خواهید آن را به ربات وصل کنید، اطلاعات زیر را بفرستید. 📝👇',
-            '',
-            'ℹ️🔒 این اطلاعات فقط برای مدیریت پنل شما در ربات استفاده می‌شود. 🛡️',
-            'پس از ثبت، می‌توانید پنل را شارژ کنید و تست کانفیگ بگیرید. 🔋🧪🎉',
-            '',
-            'برای لغو /cancel را بزنید. ❌',
-        ]), [
-            'reply_markup' => $this->bot->buildMarkup(Keyboard::rows([
-                Keyboard::back('menu', '❌ انصراف'),
-            ])),
-        ]);
-
-        $this->sessions->set($telegramId, ['step' => 'panel:username']);
-    }
-
-    /**
-     * مرحلهٔ نام کاربری در جریان «من پنل دارم».
-     */
-    public function askPassword(int $chatId, int $telegramId, string $username): void
-    {
-        $this->bot->sendMessage($chatId, implode("\n", [
-            '🔑✨ <b>رمز عبور پنل 🔒</b>',
-            '',
-            'برای حساب <code>' . Str::escape($username) . '</code> رمز عبور را بفرستید. 📝👇',
-            '',
-            '🔒🛡️ رمز شما رمزنگاری و فقط برای مدیریت همین پنل استفاده می‌شود. ✅',
-            'بعد از ارسال، این پیام را از حافظهٔ چت خود پاک کنید. 🗑️',
-        ]), [
-            'reply_markup' => $this->bot->buildMarkup(Keyboard::rows([
-                Keyboard::back('menu', '❌ انصراف'),
-            ])),
-        ]);
-
-        $this->sessions->set($telegramId, [
-            'step'     => 'panel:password',
-            'username' => $username,
-        ]);
-    }
-
-    /**
-     * اعتبارسنجی و ثبت پنل.
-     *
-     * @param array<string, mixed> $user
-     * @return array{ok:bool, message:string}
-     */
-    public function finishSelfRegister(int $chatId, array $user, string $username, string $password): array
-    {
-        $existing = $this->panels->findByPanelUsername($username);
-
-        if ($existing !== null && (int) $existing['user_id'] !== (int) $user['id']) {
-            return [
-                'ok'      => false,
-                'message' => '⚠️🔒 این پنل قبلاً به حساب دیگری در ربات وصل شده است! 😔 '
-                    . 'اگر فکر می‌کنید اشتباه است، با پشتیبانی تماس بگیرید. 📞🙏',
-            ];
-        }
-
-        try {
-            $admin = $this->panelClient()->getAdmin($username, $username, $password);
-        } catch (\Pasargad\Panel\PanelException $e) {
-            return ['ok' => false, 'message' => Text::loginFailed($e->getMessage())];
-        } catch (\Throwable $e) {
-            return [
-                'ok'      => false,
-                'message' => Text::loginFailed('خطای غیرمنتظره هنگام بررسی پنل.'),
-            ];
-        }
-
-        $wasKnown = $existing !== null;
-
-        $panelId = $this->panels->upsertFromPanel(
-            (int) $user['id'],
-            $username,
-            $password,
-            $admin,
-            $wasKnown ? PanelRepository::SOURCE_BOT : PanelRepository::SOURCE_SELF
-        );
-
-        $panel = $this->panels->find($panelId);
-
-        if ($panel === null) {
-            return ['ok' => false, 'message' => '⚠️😔 ثبت پنل ناموفق بود! دوباره تلاش کنید. 🔄'];
-        }
-
-        $message = $wasKnown
-            ? '✅ اطلاعات پنل شما به‌روزرسانی شد! 🎉'
-            : '✅🎉 پنل شما با موفقیت به ربات اضافه شد! 🚀';
-
-        $this->bot->sendMessage($chatId, $message . "\n\n" . $this->detailsText($panel), [
-            'reply_markup' => $this->bot->buildMarkup($this->detailsKeyboard($panel)),
-        ]);
-
-        return ['ok' => true, 'message' => $message];
-    }
 }

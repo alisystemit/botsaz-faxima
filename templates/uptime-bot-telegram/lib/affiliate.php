@@ -1,0 +1,357 @@
+<?php
+/**
+ * ===== برنامهٔ همکاری و کسب‌درآمد =====
+ *
+ * مدل:
+ *   • کد دعوت منحصر
+ *   • ۲۰% کمیسیون از هر خرید
+ *   • پرداخت ماهانه
+ *   • Dashboard برای پیگیری
+ */
+
+class AffiliateProgram
+{
+    /**
+     * ثبت کاربر به برنامهٔ همکاری
+     */
+    public static function register(int $userId): array
+    {
+        try {
+            // بررسی عضویت قبلی
+            $existing = Db::one(
+                'SELECT `id` FROM `affiliates` WHERE `user_id` = ?',
+                [$userId]
+            );
+
+            if ($existing) {
+                return [
+                    'ok' => true,
+                    'message' => 'شما قبلاً در برنامه ثبت‌شده‌اید',
+                    'code' => Db::val('SELECT `code` FROM `affiliates` WHERE `user_id` = ?', [$userId]),
+                ];
+            }
+
+            // ایجاد کد منحصر
+            $code = self::generateCode($userId);
+
+            // درج در دیتابیس
+            Db::q(
+                'INSERT INTO `affiliates` 
+                 (`user_id`, `code`, `commission_rate`, `status`)
+                 VALUES (?, ?, ?, ?)',
+                [$userId, $code, 20, 'active']  // ۲۰% کمیسیون
+            );
+
+            Db::logEvent($userId, 'affiliate_register', 'کد: ' . $code);
+
+            return [
+                'ok' => true,
+                'message' => 'شما به برنامهٔ همکاری اضافه شدید',
+                'code' => $code,
+                'referral_link' => self::referralLink($code),
+            ];
+        } catch (Throwable $e) {
+            uptimeLog('error', 'affiliate_register: ' . $e->getMessage());
+            return ['ok' => false, 'error' => $e->getMessage()];
+        }
+    }
+
+    /**
+     * پیگیری signup از طریق کد affilia
+     */
+    public static function trackSignup(string $code): void
+    {
+        try {
+            $affiliate = Db::one('SELECT `id` FROM `affiliates` WHERE `code` = ?', [$code]);
+            if (!$affiliate) return;
+
+            Db::q(
+                'UPDATE `affiliates` SET `signup_count` = `signup_count` + 1, `last_signup` = NOW() 
+                 WHERE `id` = ?',
+                [$affiliate['id']]
+            );
+        } catch (Throwable $e) {
+            uptimeLog('error', 'trackSignup: ' . $e->getMessage());
+        }
+    }
+
+    /**
+     * پیگیری پرداخت و محاسبهٔ کمیسیون
+     */
+    public static function trackPayment(string $code, int $amountToman): void
+    {
+        try {
+            $affiliate = Db::one('SELECT * FROM `affiliates` WHERE `code` = ?', [$code]);
+            if (!$affiliate) return;
+
+            $commission = (int)($amountToman * ($affiliate['commission_rate'] / 100));
+
+            Db::q(
+                'INSERT INTO `affiliate_earnings` 
+                 (`affiliate_id`, `amount`, `commission`, `type`, `payment_id`)
+                 VALUES (?, ?, ?, ?, ?)',
+                [
+                    $affiliate['id'],
+                    $amountToman,
+                    $commission,
+                    'referral_payment',
+                    0,
+                ]
+            );
+
+            // به‌روزرسانی مجموع کمیسیون
+            Db::q(
+                'UPDATE `affiliates` SET `total_commission` = `total_commission` + ? WHERE `id` = ?',
+                [$commission, $affiliate['id']]
+            );
+
+            // درخواست خودکار برای پرداخت اگر به ۱۰۰۰۰۰ تومان رسید
+            if (($affiliate['total_commission'] + $commission) >= 100000) {
+                self::createPayoutRequest($affiliate['id']);
+            }
+        } catch (Throwable $e) {
+            uptimeLog('error', 'trackPayment: ' . $e->getMessage());
+        }
+    }
+
+    /**
+     * قلاب فعال‌سازی پرداخت: اگر خریدار با کد دعوت آمده بود، کمیسیون ثبت می‌شود.
+     * کد در settings با کلید `ref_<userId>` نگه داشته می‌شود (از handleStartPayload).
+     */
+    public static function onPayment(int $buyerUserId, int $amountToman): void
+    {
+        if ($buyerUserId <= 0 || $amountToman <= 0) return;
+        try {
+            $code = (string)Db::get('ref_' . $buyerUserId, '');
+            if ($code === '') return;
+            self::trackPayment($code, $amountToman);
+        } catch (Throwable $e) {
+            uptimeLog('error', 'AffiliateProgram::onPayment: ' . $e->getMessage());
+        }
+    }
+
+    /**
+     * داشبورد affiliate
+     */
+    public static function getDashboard(int $affiliateId): array
+    {
+        $affiliate = Db::one(
+            'SELECT * FROM `affiliates` WHERE `user_id` = ?',
+            [$affiliateId]
+        );
+
+        if (!$affiliate) {
+            return ['ok' => false, 'error' => 'شما در برنامه ثبت‌نشده‌اید'];
+        }
+
+        // درآمدهای قابل پرداخت (هنوز پرداخت‌نشده)
+        $unpaid = (int)Db::val(
+            'SELECT SUM(`commission`) FROM `affiliate_earnings` 
+             WHERE `affiliate_id` = ? AND `paid_at` IS NULL',
+            [$affiliate['id']]
+        );
+
+        // کل درآمدهای پرداخت‌شده
+        $paid = (int)Db::val(
+            'SELECT SUM(`commission`) FROM `affiliate_earnings` 
+             WHERE `affiliate_id` = ? AND `paid_at` IS NOT NULL',
+            [$affiliate['id']]
+        );
+
+        // آخرین ۱۰ درآمد
+        $earnings = Db::all(
+            'SELECT * FROM `affiliate_earnings` 
+             WHERE `affiliate_id` = ? 
+             ORDER BY `created_at` DESC LIMIT 10',
+            [$affiliate['id']]
+        );
+
+        return [
+            'ok' => true,
+            'code' => $affiliate['code'],
+            'referral_link' => self::referralLink((string)$affiliate['code']),
+            'stats' => [
+                'signup_count' => (int)$affiliate['signup_count'],
+                'total_commission' => (int)$affiliate['total_commission'],
+                'unpaid_commission' => $unpaid,
+                'paid_commission' => $paid,
+                'commission_rate' => (int)$affiliate['commission_rate'],
+            ],
+            'earnings' => $earnings,
+            'payout_status' => $unpaid >= 100000 ? 'ready' : 'waiting',
+            'next_payout' => $unpaid >= 100000 ? 'قابل درخواست' : 'تا ' . (100000 - $unpaid) . ' تومان دیگر',
+        ];
+    }
+
+    /**
+     * درخواست پرداخت
+     */
+    public static function requestPayout(int $affiliateId, string $method = 'card'): array
+    {
+        try {
+            $affiliate = Db::one(
+                'SELECT * FROM `affiliates` WHERE `user_id` = ?',
+                [$affiliateId]
+            );
+
+            if (!$affiliate) {
+                return ['ok' => false, 'error' => 'همکار یافت نشد'];
+            }
+
+            $unpaid = (int)Db::val(
+                'SELECT SUM(`commission`) FROM `affiliate_earnings` 
+                 WHERE `affiliate_id` = ? AND `paid_at` IS NULL',
+                [$affiliate['id']]
+            );
+
+            if ($unpaid < 100000) {
+                return ['ok' => false, 'error' => 'حداقل مبلغ: ۱۰۰۰۰۰ تومان'];
+            }
+
+            // جلوگیری از درخواست تکراری: تا وقتی یک درخواستِ در انتظار هست،
+            // درخواست جدید ساخته نمی‌شود (وگرنه با هر بار زدن دکمه، همان مبلغ
+            // دوباره ثبت و بعداً دو بار پرداخت می‌شد).
+            $pending = (int)Db::val(
+                "SELECT COUNT(*) FROM `affiliate_payouts` WHERE `affiliate_id` = ? AND `status` = 'pending'",
+                [$affiliate['id']]
+            );
+            if ($pending > 0) {
+                return ['ok' => false, 'error' => 'درخواست پرداخت قبلی شما در انتظار بررسی است'];
+            }
+
+            // ایجاد درخواست
+            Db::q(
+                'INSERT INTO `affiliate_payouts` 
+                 (`affiliate_id`, `amount`, `method`, `status`)
+                 VALUES (?, ?, ?, ?)',
+                [$affiliate['id'], $unpaid, $method, 'pending']
+            );
+            $requestId = (int)Db::pdo()->lastInsertId();
+
+            // علامت‌زدن درآمدها به‌عنوان در‌حال‌پرداخت
+            Db::q(
+                'UPDATE `affiliate_earnings` SET `payout_id` = ? 
+                 WHERE `affiliate_id` = ? AND `paid_at` IS NULL',
+                [$requestId, $affiliate['id']]
+            );
+
+            return [
+                'ok' => true,
+                'message' => 'درخواست پرداخت ارسال شد',
+                'request_id' => $requestId,
+                'amount' => $unpaid,
+            ];
+        } catch (Throwable $e) {
+            uptimeLog('error', 'requestPayout: ' . $e->getMessage());
+            return ['ok' => false, 'error' => $e->getMessage()];
+        }
+    }
+
+    /**
+     * تکمیل پرداخت توسط ادمین
+     */
+    public static function completePayout(int $payoutId): bool
+    {
+        try {
+            $payout = Db::one(
+                'SELECT * FROM `affiliate_payouts` WHERE `id` = ?',
+                [$payoutId]
+            );
+
+            if (!$payout) return false;
+
+            // به‌روزرسانی درآمدها
+            Db::q(
+                'UPDATE `affiliate_earnings` SET `paid_at` = NOW() 
+                 WHERE `payout_id` = ?',
+                [$payoutId]
+            );
+
+            // به‌روزرسانی درخواست
+            Db::q(
+                'UPDATE `affiliate_payouts` SET `status` = ?, `completed_at` = NOW() 
+                 WHERE `id` = ?',
+                ['completed', $payoutId]
+            );
+
+            return true;
+        } catch (Throwable $e) {
+            uptimeLog('error', 'completePayout: ' . $e->getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Leaderboard affiliate
+     */
+    public static function getLeaderboard(int $limit = 20): array
+    {
+        return Db::all(
+            'SELECT a.*, u.name FROM `affiliates` a 
+             JOIN `user` u ON u.id = a.user_id
+             WHERE a.total_commission > 0
+             ORDER BY a.total_commission DESC
+             LIMIT ?',
+            [$limit]
+        );
+    }
+
+    /**
+     * لینک دعوت صحیح: t.me/<bot_username>?start=aff_<code>
+     * (قبلاً از domain ساخته می‌شد که هیچ ربطی به تلگرام نداشت)
+     */
+    private static function referralLink(string $code): string
+    {
+        $cfg = appConfig();
+        $username = trim((string)($cfg['bot_username'] ?? ''));
+        if ($username === '') return '';
+        return 'https://t.me/' . ltrim($username, '@') . '?start=aff_' . $code;
+    }
+
+    /**
+     * تولید کد منحصر
+     */
+    private static function generateCode(int $userId): string
+    {
+        for ($i = 0; $i < 100; $i++) {
+            $code = strtoupper(substr(
+                md5($userId . time() . rand(0, 9999)),
+                0,
+                6
+            ));
+
+            $exists = Db::val(
+                'SELECT COUNT(*) FROM `affiliates` WHERE `code` = ?',
+                [$code]
+            );
+
+            if ($exists == 0) {
+                return $code;
+            }
+        }
+
+        return 'AFF' . substr(md5($userId . time()), 0, 9);
+    }
+
+    private static function createPayoutRequest(int $affiliateId): void
+    {
+        // ارسال اطلاع به affiliate
+        $affiliate = Db::one(
+            'SELECT `user_id` FROM `affiliates` WHERE `id` = ?',
+            [$affiliateId]
+        );
+
+        if ($affiliate) {
+            tgSend(
+                $affiliate['user_id'],
+                "💰 <b>کمیسیون شما برای پرداخت آماده است</b>\n\n"
+                . "مبلغ: " . faNum((int)Db::val(
+                    'SELECT SUM(`commission`) FROM `affiliate_earnings` 
+                     WHERE `affiliate_id` = ? AND `paid_at` IS NULL',
+                    [$affiliateId]
+                )) . " تومان\n\n"
+                . "💳 برای درخواست پرداخت به بخش الحاقات مراجعه کنید"
+            );
+        }
+    }
+}

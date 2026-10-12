@@ -1,0 +1,220 @@
+/* ============================================================
+   کلاینت API — مسیر appapi.php خودکار نسبت به webapp/
+   ویژگی‌ها: تایم‌اوت، لغو درخواست، کش حافظه‌ای، تلاش مجدد
+   ============================================================ */
+(function (NS) {
+  'use strict';
+
+  var API = new URL('../appapi.php', location.href).href;
+  var TIMEOUT = 15000;
+  var CACHE_TTL = 25000;          // اعتبار کش (میلی‌ثانیه)
+
+  var inflight = {};              // لغو درخواست‌های هم‌نام
+  var cache = {};                 // کش پاسخ GET
+
+  /* ---------- ساخت URL ---------- */
+  // initData علاوه بر هدر، در query string هم فرستاده می‌شود.
+  // دلیل: بعضی پروکسی‌ها/WAFها هدرهای سفارشی را حذف یا دستکاری
+  // می‌کنند، ولی query string چون بخشی از مسیر درخواست است سالم می‌ماند.
+  // سرور (appapi.php) هر دو را می‌خواند و هرکدام سالم باشد کافی است.
+  function buildUrl(action, params, initData) {
+    var q = '?a=' + encodeURIComponent(action);
+    if (params) {
+      Object.keys(params).forEach(function (k) {
+        if (params[k] === undefined || params[k] === null) return;
+        q += '&' + encodeURIComponent(k) + '=' + encodeURIComponent(params[k]);
+      });
+    }
+    if (initData) {
+      q += '&initData=' + encodeURIComponent(initData);
+    }
+    return API + q;
+  }
+
+  /* ---------- پیام فارسی خطاها ---------- */
+  function err(kind, detail) {
+    var map = {
+      auth: 'احراز هویت انجام نشد. لطفاً اپ را از داخل ربات باز کنید.',
+      database: 'اختلال در دیتابیس. کمی بعد دوباره تلاش کنید.',
+      blocked: 'حساب شما مسدود شده است.',
+      capacity: 'ظرفیت کاربران تکمیل است.',
+      access: 'دسترسی شما فعال نیست. از ربات دستور /start بفرستید.',
+      method: 'درخواست نامعتبر است.',
+      not_found: 'موردی پیدا نشد.',
+      json: 'پاسخ سرور قابل خواندن نیست.',
+      internal: 'خطای داخلی. دوباره تلاش کنید.',
+      timeout: 'پاسخی از سرور نرسید. اینترنت را بررسی کنید.',
+      network: 'اتصال برقرار نشد.',
+      unknown: 'خطای ناشناخته.'
+    };
+    var base = map[kind] || kind || 'خطا در ارتباط با سرور';
+
+    // وقتی سرور HTML یا متن خام برگردانده، جزئیاتش کمک زیادی می‌کند
+    if (kind === 'json' && detail) {
+      if (/<!DOCTYPE|<html/i.test(detail)) {
+        return base + ' (سرور صفحهٔ HTML برگرداند — احتمالاً خطای PHP یا ریدایرکت)';
+      }
+      if (/Fatal error|Parse error|Warning:|Deprecated:|Notice:/i.test(detail)) {
+        var m = detail.match(/(Fatal error|Parse error|Warning|Deprecated|Notice)[^<]{0,140}/i);
+        return 'خطای PHP روی سرور: ' + (m ? m[0] : detail.slice(0, 120));
+      }
+      if (detail.length > 8) return base + ' → ' + detail.slice(0, 120);
+    }
+    return base;
+  }
+
+  /* ---------- خواندن پاسخ با تایم‌اوت و ابورت ---------- */
+
+  /**
+   * صبر کن تا SDK تلگرام initData را بدهد.
+   * اگر اسکریپت SDK دیر بارگذاری شود، بدون این انتظار درخواست
+   * با initData خالی ارسال می‌شد و سرور 401 (auth) برمی‌گرداند.
+   */
+  function waitInitData(maxWait) {
+    return new Promise(function (resolve) {
+      var deadline = Date.now() + (maxWait || 4000);
+      (function poll() {
+        var v = '';
+        try { v = (NS.tg.liveInitData ? NS.tg.liveInitData() : NS.tg.initData) || ''; } catch (e) { v = ''; }
+        if (v) return resolve(v);
+        if (Date.now() < deadline) return setTimeout(poll, 40);
+        resolve(v);
+      })();
+    });
+  }
+
+  function request(url, opts, useCache) {
+    var isGet = (opts.method || 'GET') === 'GET';
+    // فقط درخواست‌های GET خوانا ابورت خودکار دارند؛
+    // POSTهای عملیاتی (مثل چک همزمانِ چند سایت) نباید یکدیگر را بکشند.
+    var ctlKey = isGet ? ('GET ' + url) : null;
+    if (ctlKey && inflight[ctlKey]) { try { inflight[ctlKey].abort(); } catch (e) {} }
+
+    var controller = null;
+    try { controller = new AbortController(); } catch (e) { controller = null; }
+
+    var timeout = null;
+    // initData از قبل توسط waitInitData آماده شده؛ اگر خالی بود یک‌بار
+    // دیگر به‌صورت زنده از SDK خوانده می‌شود.
+    var liveInit = opts.initData || '';
+    if (!liveInit) {
+      try { liveInit = (NS.tg.liveInitData ? NS.tg.liveInitData() : NS.tg.initData) || ''; } catch (e) { liveInit = ''; }
+    }
+    var options = {
+      method: opts.method || 'GET',
+      headers: {
+        'X-Telegram-Init-Data': liveInit,
+        'Accept': 'application/json'
+      },
+      cache: 'no-store'
+    };
+    if (options.method !== 'GET') {
+      options.headers['Content-Type'] = 'application/x-www-form-urlencoded; charset=UTF-8';
+      options.body = opts.body || '';
+    }
+    if (controller) options.signal = controller.signal;
+
+    if (ctlKey) inflight[ctlKey] = controller;
+
+    return new Promise(function (resolve) {
+      var settled = false;
+      function done(v) {
+        if (settled) return;
+        settled = true;
+        if (timeout) clearTimeout(timeout);
+        if (ctlKey && inflight[ctlKey] === controller) delete inflight[ctlKey];
+        resolve(v);
+      }
+
+      timeout = setTimeout(function () {
+        if (controller) { try { controller.abort(); } catch (e) {} }
+        done({ status: 0, json: { ok: false, error: 'timeout' }, _offline: true });
+      }, TIMEOUT);
+
+      fetch(url, options).then(function (r) {
+        return r.text().then(function (txt) {
+          // برخی سرورها BOM یا فاصلهٔ ابتدایی اضافه می‌کنند که
+          // JSON.parse را می‌شکند. پیش از تجزیه پاکش می‌کنیم.
+          var clean = String(txt || '').replace(/^﻿/, '').trim();
+
+          var j;
+          try { j = JSON.parse(clean); }
+          catch (e) {
+            // پاسخ JSON نیست. علت واقعی را نگه می‌داریم تا بتوان
+            // تشخیص داد (صفحهٔ HTML خطای PHP، ریدایرکت، یا بدنهٔ خالی)
+            var snippet = String(txt || '').replace(/\s+/g, ' ').slice(0, 300);
+            if (window.console && console.warn) {
+              console.warn('[NS.api] پاسخ JSON نبود — status=' + r.status
+                + ' url=' + String(url).split('&initData=')[0]
+                + '\n  ct=' + (r.headers && r.headers.get ? r.headers.get('content-type') : '?')
+                + '\n  body=' + (snippet || '(خالی)'));
+            }
+            return done({
+              status: r.status,
+              json: { ok: false, error: 'json', detail: snippet, empty: !txt },
+              _raw: txt
+            });
+          }
+          if (j && j.ok) { if (useCache && options.method === 'GET') cache[url] = { t: Date.now(), d: j }; }
+          done({ status: r.status, json: j });
+        });
+      }).catch(function (e) {
+        var kind = (e && e.name === 'AbortError') ? 'timeout' : 'network';
+        done({ status: 0, json: { ok: false, error: kind }, _offline: true });
+      });
+    });
+  }
+
+  /**
+   * درخواست به API
+   * @param {string} action
+   * @param {object|null} params
+   * @param {string} method GET|POST
+   * @param {boolean} useCache اجازهٔ استفاده از کش کوتاه‌مدت (GET)
+   */
+  function call(action, params, method, useCache) {
+    method = method || 'GET';
+
+    // initData در هر دو مسیر فرستاده می‌شود:
+    //   • هدر  X-Telegram-Init-Data
+    //   • query string  ?initData=...
+    // اول صبر می‌کنیم تا SDK آماده شود، بعد URL را می‌سازیم چون
+    // buildUrl به initData نیاز دارد.
+    return waitInitData(4000).then(function (liveInit) {
+      // params در URL هر دو متد GET و POST قرار می‌گیرند، چون سرور
+      // (appapi.php) شناسهٔ `id` را از query string می‌خواند؛ فرستادن آن
+      // فقط در بدنهٔ POST باعث می‌شد عملیات چک/توقف/حذف همیشه id=0 بگیرد.
+      var url = buildUrl(action, params, liveInit);
+
+      if (method === 'GET' && useCache) {
+        var c = cache[url];
+        if (c && (Date.now() - c.t) < CACHE_TTL) {
+          return { status: 200, json: c.d, _cached: true };
+        }
+      }
+
+      var body = '';
+      if (method !== 'GET' && params) {
+        body = Object.keys(params).map(function (k) {
+          return encodeURIComponent(k) + '=' + encodeURIComponent(params[k]);
+        }).join('&');
+        // initData در بدنهٔ POST هم قرار می‌گیرد (مثل ربات مرجع)
+        if (liveInit) body += (body ? '&' : '') + 'initData=' + encodeURIComponent(liveInit);
+      }
+
+      return request(url, { method: method, body: body, initData: liveInit }, useCache);
+    });
+  }
+
+  /* ---------- باطل کردن کش ---------- */
+  // کلید کش، URL کاملِ درخواست است (شامل دامنه، پس با «http…» شروع می‌شود)،
+  // نه فقط «?a=…». پس باید «?a=action» را در هر جای کلید جستجو کرد، وگرنه
+  // هیچ‌وقت چیزی باطل نمی‌شد و لیست تا CACHE_TTL قدیمی می‌ماند.
+  function bust(action) {
+    var needle = '?a=' + encodeURIComponent(action);
+    Object.keys(cache).forEach(function (k) { if (k.indexOf(needle) !== -1) delete cache[k]; });
+  }
+  function bustAll() { cache = {}; }
+
+  NS.api = { call: call, err: err, bust: bust, bustAll: bustAll, url: API };
+})(window.NS = window.NS || {});

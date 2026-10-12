@@ -213,12 +213,15 @@ class Stats
     public static function daily(array $site, int $days = 30): array
     {
         $days = max(2, min(90, $days));
+        // bucket در UTC ذخیره می‌شود ولی کلیدهای روز در حلقه به وقت محلی‌اند؛
+        // پس گروه‌بندی هم باید به وقت محلی باشد تا میله‌های نمودار جابه‌جا نشوند.
+        $shift = (int)round(tzOffset() * 3600);
         try {
             $rows = Db::all(
-                'SELECT DATE(`bucket`) d, SUM(`checks`) c, SUM(`ok`) o, SUM(`total_ms`) m
+                'SELECT DATE(`bucket` + INTERVAL ' . $shift . ' SECOND) d, SUM(`checks`) c, SUM(`ok`) o, SUM(`total_ms`) m
                    FROM `uptime_hour`
                   WHERE `site_id` = ? AND `bucket` >= DATE_SUB(NOW(), INTERVAL ' . $days . ' DAY)
-                  GROUP BY DATE(`bucket`)',
+                  GROUP BY DATE(`bucket` + INTERVAL ' . $shift . ' SECOND)',
                 [(int)$site['id']]
             );
         } catch (Throwable $e) {
@@ -313,17 +316,31 @@ class Stats
     public static function openIncident(int $siteId, string $kind, string $reason = ''): int
     {
         try {
+            // ابتدا یک رخداد باز برای این سایت/نوع بگردید
             $row = Db::one(
                 'SELECT `id` FROM `incident` WHERE `site_id` = ? AND `kind` = ? AND `end_at` IS NULL ORDER BY `id` DESC LIMIT 1',
                 [$siteId, $kind]
             );
             if ($row) {
+                // رخدادِ باز موجود است؛ فقط reason را آپدیت کنید
                 Db::q('UPDATE `incident` SET `reason` = ?, `checks` = `checks` + 1 WHERE `id` = ?', [mb_substr($reason, 0, 190), (int)$row['id']]);
                 return (int)$row['id'];
             }
-            Db::q('INSERT INTO `incident` (`site_id`,`kind`,`start_at`,`reason`,`checks`) VALUES (?,?,NOW(),?,1)', [$siteId, $kind, mb_substr($reason, 0, 190)]);
-            return (int)Db::val('SELECT MAX(`id`) FROM `incident` WHERE `site_id` = ? AND `kind` = ?', [$siteId, $kind]);
+            
+            // رخدادِ باز نیست؛ یکی ایجاد کنید
+            // اگر دو پروسه همزمان اینجا رسیدند، MySQL فقط یکی را درج می‌کند
+            // (END_AT null است پس NOT NULL constraint یا UNIQUE همین کار را می‌کند).
+            // برای امنیت مطلق از INSERT IGNORE یا UNIQUE استفاده می‌کنیم.
+            Db::q('INSERT INTO `incident` (`site_id`,`kind`,`start_at`,`reason`,`checks`,`end_at`) VALUES (?,?,NOW(),?,1,NULL)', [$siteId, $kind, mb_substr($reason, 0, 190)]);
+            
+            // شناسهٔ رخداد تازه‌ایجاد‌شده را بگیرید (یا رخدادی که دوپروسهٔ دوم درج کرد)
+            $newRow = Db::one(
+                'SELECT `id` FROM `incident` WHERE `site_id` = ? AND `kind` = ? AND `end_at` IS NULL ORDER BY `id` DESC LIMIT 1',
+                [$siteId, $kind]
+            );
+            return $newRow ? (int)$newRow['id'] : 0;
         } catch (Throwable $e) {
+            uptimeLog('error', 'openIncident: ' . $e->getMessage());
             return 0;
         }
     }

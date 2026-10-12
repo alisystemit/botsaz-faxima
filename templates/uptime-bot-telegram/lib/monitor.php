@@ -150,6 +150,30 @@ class Monitor
     {
         return ['ok' => false, 'ms' => 0, 'code' => $code, 'error' => $err];
     }
+    
+    /** پیام خطا را بهتر و واضح‌تر کن */
+    private static function friendlyError(string $err, int $code = 0): string
+    {
+        // خطاهای curl را به فارسی تبدیل کن
+        $curlErrors = [
+            'Operation timed out' => 'سایت بسیار کند پاسخ می‌دهد (تجاوز ۹ ثانیه)',
+            'Connection timed out' => 'ارتباط برقرار نشد — سرویس شاید خاموش است',
+            'Connection refused' => 'سرویس درخواست‌ها را قبول نمی‌کند',
+            'Temporary failure' => 'مشکل DNS — دامنه حل نشد',
+            'Name or service not known' => 'دامنه یافت نشد',
+            'Temporary failure in name resolution' => 'مشکل DNS موقتی',
+        ];
+        
+        foreach ($curlErrors as $en => $fa) {
+            if (stripos($err, $en) !== false) return $fa;
+        }
+        
+        if ($code === 0 && stripos($err, 'write') === false) {
+            return 'هیچ پاسخی دریافت نشد — سایت شاید خاموش یا بسیار کند است';
+        }
+        
+        return $err;
+    }
 
     // ---------------------------------------------------------------- HTTP
 
@@ -210,58 +234,62 @@ class Monitor
 
         $running = null;
         $deadline = microtime(true) + 12;
-        do {
-            $status = curl_multi_exec($mh, $running);
-            if ($running && microtime(true) < $deadline) curl_multi_select($mh, 0.2);
-        } while ($running && $status === CURLM_OK && microtime(true) < $deadline);
+        try {
+            do {
+                $status = curl_multi_exec($mh, $running);
+                if ($running && microtime(true) < $deadline) curl_multi_select($mh, 0.2);
+            } while ($running && $status === CURLM_OK && microtime(true) < $deadline);
 
-        foreach ($map as $item) {
-            $ch = $item['ch'];
-            $s = $item['site'];
-            $id = (int)$s['id'];
-            $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            $total = (float)curl_getinfo($ch, CURLINFO_TOTAL_TIME);
-            $startT = (float)curl_getinfo($ch, CURLINFO_STARTTRANSFER_TIME);
-            $err = (string)curl_error($ch);
-            $ms = (int)round(max($total, $startT) * 1000);
-            if ($total <= 0) $ms = (int)round((microtime(true) - $item['start']) * 1000);
-            $body = (string)$item['buf']->body;
-            $truncated = (bool)$item['buf']->trunc;
+            foreach ($map as $item) {
+                $ch = $item['ch'];
+                $s = $item['site'];
+                $id = (int)$s['id'];
+                $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+                $total = (float)curl_getinfo($ch, CURLINFO_TOTAL_TIME);
+                $startT = (float)curl_getinfo($ch, CURLINFO_STARTTRANSFER_TIME);
+                $err = (string)curl_error($ch);
+                $ms = (int)round(max($total, $startT) * 1000);
+                if ($total <= 0) $ms = (int)round((microtime(true) - $item['start']) * 1000);
+                $body = (string)$item['buf']->body;
+                $truncated = (bool)$item['buf']->trunc;
 
-            if ($code > 0) {
-                // سرور جواب داده است؛ فقط خطای سری ۵۰۰ یعنی سرویس از کار افتاده
-                $ok = $code < 500;
-                $res = [
-                    'ok' => $ok,
-                    'ms' => $ms,
-                    'code' => $code,
-                    'error' => $ok ? '' : ('پاسخ سرور: HTTP ' . $code),
-                    'detail' => 'HTTP ' . $code,
-                ];
-                // ---- بررسی کلیدواژه (اختیاری) ----
-                $kw = trim((string)($s['keyword'] ?? ''));
-                if ($ok && $kw !== '') {
-                    if (!$truncated && mb_stripos($body, $kw) === false) {
-                        $res['ok'] = false;
-                        $res['error'] = 'کلیدواژهٔ «' . mb_substr($kw, 0, 40) . '» در پاسخ پیدا نشد';
-                    } elseif ($truncated) {
-                        $res['detail'] .= ' • کلیدواژه ناقص';
+                if ($code > 0) {
+                    // سرور جواب داده است؛ فقط خطای سری ۵۰۰ یعنی سرویس از کار افتاده
+                    $ok = $code < 500;
+                    $res = [
+                        'ok' => $ok,
+                        'ms' => $ms,
+                        'code' => $code,
+                        'error' => $ok ? '' : ('پاسخ سرور: HTTP ' . $code),
+                        'detail' => 'HTTP ' . $code,
+                    ];
+                    // ---- بررسی کلیدواژه (اختیاری) ----
+                    $kw = trim((string)($s['keyword'] ?? ''));
+                    if ($ok && $kw !== '') {
+                        if (!$truncated && mb_stripos($body, $kw) === false) {
+                            $res['ok'] = false;
+                            $res['error'] = 'کلیدواژهٔ «' . mb_substr($kw, 0, 40) . '» در پاسخ پیدا نشد';
+                        } elseif ($truncated) {
+                            $res['detail'] .= ' • کلیدواژه ناقص';
+                        }
                     }
+                    $out[$id] = $res;
+                } else {
+                    $out[$id] = [
+                        'ok' => false,
+                        'ms' => $ms,
+                        'code' => 0,
+                        'error' => $err !== '' && stripos($err, 'write') === false ? $err : 'پاسخی دریافت نشد (Timeout یا بسته شدن اتصال)',
+                        'detail' => 'no response',
+                    ];
                 }
-                $out[$id] = $res;
-            } else {
-                $out[$id] = [
-                    'ok' => false,
-                    'ms' => $ms,
-                    'code' => 0,
-                    'error' => $err !== '' && stripos($err, 'write') === false ? $err : 'پاسخی دریافت نشد (Timeout یا بسته شدن اتصال)',
-                    'detail' => 'no response',
-                ];
+                curl_multi_remove_handle($mh, $ch);
+                unset($ch); // curl_close() از PHP 8.0 بی‌اثر و در 8.5 deprecated است
             }
-            curl_multi_remove_handle($mh, $ch);
-            curl_close($ch);
+        } finally {
+            // جلوگیری از تسریب حافظه حتی اگر استثنا رخ داده باشد
+            curl_multi_close($mh);
         }
-        curl_multi_close($mh);
         return $out;
     }
 
@@ -283,7 +311,8 @@ class Monitor
                 $out[$id] = self::fail('پورتی تعیین نشده');
                 continue;
             }
-            if (filter_var($host, FILTER_VALIDATE_IP) === false && strpos($host, ':') !== false) $host = '[' . $host . ']';
+            // IPv6 باید داخل براکت باشد تا URI معتبر بماند
+            if (strpos($host, ':') !== false && $host[0] !== '[') $host = '[' . $host . ']';
             $errno = 0; $errstr = '';
             $fp = @stream_socket_client('tcp://' . $host . ':' . $port, $errno, $errstr, 0, STREAM_CLIENT_CONNECT | STREAM_CLIENT_ASYNC_CONNECT);
             if (!is_resource($fp)) {
@@ -551,8 +580,21 @@ class Monitor
 
         if ($notifyKind !== null) {
             $stats['alerts'] += self::notify($site, $notifyKind, $err, $outageSec, $ms) ? 1 : 0;
+            // افزونه‌ها: وبهوک/Slack/Discord — غیرهمزمان از طریق صف
+            $ev = match ($notifyKind) {
+                'down', 'down_repeat' => 'down',
+                'up'                  => 'up',
+                'slow'                => 'slow',
+                default               => '',
+            };
+            if ($ev !== '') {
+                try { Addons::siteEvent($site, $ev, $err, $ms); } catch (Throwable $e) { /* بی‌اهمیت */ }
+            }
         } elseif ($isSlow !== $wasSlow) {
             $stats['alerts'] += self::notify($site, $isSlow ? 'slow' : 'slow_ok', $err, 0, $ms) ? 1 : 0;
+            if ($isSlow) {
+                try { Addons::siteEvent($site, 'slow', $err, $ms); } catch (Throwable $e) { /* بی‌اهمیت */ }
+            }
         }
     }
 
@@ -771,6 +813,7 @@ class Monitor
                 tgSend($cid, $text);
             }
             Db::logEvent((int)$s['user_id'], 'alert_ssl', (string)$s['target']);
+            try { Addons::sslEvent($s); } catch (Throwable $e) { /* بی‌اهمیت */ }
         }
 
         // ---------- ۲) انقضای دامنه (WHOIS) ----------

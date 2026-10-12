@@ -13,10 +13,19 @@ use Pasargad\Support\Str;
 /**
  * ساخت حساب اپراتور (ادمین پنل) برای نمایندهٔ جدید.
  *
- * وقتی کاربری بستهٔ «پنل نمایندگی» می‌خرد، ربات با اکانت **owner** پنل یک
- * حساب ادمین تازه می‌سازد و نقش آن را روی اپراتور می‌گذارد. از این لحظه
- * نماینده از داخل خودِ پنل دسترسی عملیاتی دارد (ساخت کاربر برای
- * مشتریانش، دیدن آمار و…).
+ * وقتی کاربری بستهٔ «پنل نمایندگی» می‌خرد، ربات یک حساب ادمین تازه
+ * می‌سازد و نقش آن را روی اپراتور می‌گذارد. از این لحظه نماینده از داخل
+ * خودِ پنل دسترسی عملیاتی دارد (ساخت کاربر برای مشتریانش، دیدن آمار و…).
+ *
+ * ## ساخت روی کدام پنل؟
+ *
+ * اولویت با **پنلی است که خودِ کاربر وصل کرده** (`$creator`)، و اگر
+ * نداشته باشد به اکانت owner سراسریِ `config.php` برمی‌گردیم.
+ *
+ * چ��یی که قبلاً اینجا اشتباه بود: خرید همیشه روی `panel.base_url` و با
+ * اکانت owner انجام می‌شد. یعنی نماینده‌ای که پنلش را روی دامنهٔ خودش
+ * نصب کرده و وصل کرده بود، بسته می‌خرید و پنلش زیر **سرور دیگری** ساخته
+ * می‌شد — یعنی خریدش به کارش نمی‌آمد.
  *
  * چرا ربات این کار را می‌کند و خودِ نماینده؟
  *   • رمز باید یک‌بار تولید و به نماینده داده شود؛ ساخت دستی در پنل، رمز را
@@ -29,14 +38,63 @@ final class AgencyService
 {
     private ?PasarGuardClient $panel;
 
-    public function __construct(?PasarGuardClient $panel = null)
+    /**
+     * آیا کلاینت از بیرون تزریق شده است؟
+     *
+     * کلاینت تزریق‌شده (کلاینت جعلیِ تست‌ها، یا کلاینتی که وبهوک با بودجهٔ
+     * زمانی ساخته) **هرگز** نباید دور ریخته شود. قبلاً `useCreatorPanel()`
+     * همیشه `$this->panel` را صفر می‌کرد و در نتیجه تست‌ها به‌جای کلاینت
+     * جعلی، به پنل واقعی وصل می‌شدند و همه‌شان با «رمز اشتباه» می‌افتادند.
+     */
+    private bool $clientInjected = false;
+
+    /**
+     * منبع اختیار ساخت پنل: ردیف `panels` خودِ خریدار.
+     *
+     * @var array<string, mixed>|null
+     */
+    private ?array $creator = null;
+
+    private PanelAccess $access;
+
+    public function __construct(?PasarGuardClient $panel = null, ?PanelAccess $access = null)
     {
-        $this->panel = $panel;
+        $this->panel          = $panel;
+        $this->clientInjected = $panel !== null;
+        $this->access         = $access ?? new PanelAccess();
+    }
+
+    /**
+     * تعیین می‌کند پنل نمایندگی روی **کدام** پنل ساخته شود.
+     *
+     * @param  array<string, mixed>|null $panel ردیف `panels` خریدار؛ null یعنی
+     *                                      از اکانت owner سراسری استفاده شود.
+     */
+    public function useCreatorPanel(?array $panel): self
+    {
+        $this->creator = $panel;
+
+        // کلاینتی که خودمان ساخته‌ایم با پنل قبلی ساخته شده و با تغییر
+        // مقصد بی‌معنی می‌شود؛ ولی کلاینت تزریق‌شده دست‌نخورده می‌ماند.
+        if (!$this->clientInjected) {
+            $this->panel = null;
+        }
+
+        return $this;
     }
 
     private function panelClient(): PasarGuardClient
     {
         if ($this->panel === null) {
+            // اولویت با پنلی است که خریدار وصل کرده.
+            if ($this->creator !== null) {
+                $client = $this->access->clientFor($this->creator);
+
+                if ($client !== null) {
+                    return $this->panel = $client;
+                }
+            }
+
             $this->panel = new PasarGuardClient();
         }
 
@@ -44,21 +102,34 @@ final class AgencyService
     }
 
     /**
-     * اکانت owner پنل که با آن ادمین جدید ساخته می‌شود.
+     * اکانتی که با آن ادمین جدید ساخته می‌شود.
      *
      * بدون این اکانت، خرید «پنل نمایندگی» قابل اجرا نیست — ولی خرید
      * «شارژ پنل» کار می‌کند چون از اکانت خودِ نماینده استفاده می‌کند.
+     *
+     * اولویت با **کلید پنلی است که خریدار وصل کرده**؛ اگر نداشت، با کلید
+     * سراسریِ ربات (`panel.api_key`) ساخته می‌شود تا خریدارِ بدون پنل هم
+     * بتواند بخرد. رمز عبور دیگر هیچ‌جا در این مسیر پذیرفته نمی‌شود.
+     *
+     * @return array{0:string, 1:string}|null [authUsername, apiKey]
      */
     private function ownerCredentials(): ?array
     {
-        $username = trim(Config::str('panel.owner_username', ''));
-        $password = Config::str('panel.owner_password', '');
+        if ($this->creator !== null) {
+            $credentials = $this->access->credentialsOf($this->creator);
 
-        if ($username === '' || $password === '') {
-            return null;
+            if ($credentials === null) {
+                return null;
+            }
+
+            // در مسیر کلید، نام کاربری بی‌معنی است؛ خودِ کلید نقش را دارد و
+            // `panelClient()` آن را به‌عنوان توکن ثابت ست می‌کند.
+            return ['api', $credentials['credential']];
         }
 
-        return [$username, $password];
+        $globalKey = trim((string) Config::str('panel.api_key', ''));
+
+        return $globalKey === '' ? null : ['api', $globalKey];
     }
 
     /**
@@ -68,16 +139,94 @@ final class AgencyService
      */
     public function canCreatePanels(): array
     {
-        if ($this->ownerCredentials() === null) {
+        if ($this->ownerCredentials() !== null) {
+            return ['ok' => true, 'message' => ''];
+        }
+
+        if ($this->creator !== null) {
+            // کاربر پنل وصل کرده ولی اطلاعاتش ناقص است — پیام باید همان
+            // را بگوید، نه اینکه سراغ تنظیمات سراسری برود.
             return [
                 'ok'      => false,
-                'message' => 'اکانت سازندهٔ پنل در config.php تنظیم نشده است '
-                    . '(panel.owner_username و panel.owner_password). '
-                    . 'تا وقتی تنظیم نشود، خرید پنل نمایندگی ممکن نیست.',
+                'message' => 'پنلی که به حساب شما وصل است اطلاعات ورود کاملی ندارد. '
+                    . 'با دکمهٔ «➕ اتصال پنل جدید» دوباره آدرس و رمز یا کلید API را ثبت کنید.',
             ];
         }
 
-        return ['ok' => true, 'message' => ''];
+        return [
+            'ok'      => false,
+            'message' => 'کلید سازندهٔ پنل تنظیم نشده است. یکی از این دو لازم است:'
+                . "\n• کاربر یک پنل را با کلید API به ربات وصل کند، یا"
+                . "\n• در <code>config.php</code> مقدار <code>panel.api_key</code> تنظیم شود.",
+        ];
+    }
+
+    /**
+     * ساخت کلید API برای ادمینِ تازه‌ساخته.
+     *
+     * ⭐️ **چرا `inherit_permissions = true`**
+     *
+     * کلید تازه **مجوزهای کلید سازنده را به ارث می‌برد**. یعنی اگر کلیدِ ربات
+     * `admins.update` نداشته باشد، کلیدِ پنل نمایندگی هم نخواهد داشت و **شارژ
+     * آن پنل برای همیشه ۴۰۳ می‌دهد** — یعنی خرید موفق، سرویس ناکارآمد.
+     *
+     * این آگاهانه انتخاب شده: دادن مجوزِ صریحِ بیشتر از آنچه کلیدِ سازنده دارد
+     * یا پنل رد می‌کند یا به ارتقای دسترسی تبدیل می‌شود که ناامن است. پس
+     * درست‌تر کار این است که کلیدِ سازنده کامل باشد — و دقیقاً برای همین
+     * `tools/panel_key_check.php` همهٔ مجوزهای لازم را می‌سنجد.
+     *
+     * نام کلید محدود و قابل‌تشخیص است تا اگر مدیر پنل وارد پنل شد، بداند این
+     * کلید مال ربات است و بتواند باطلش کند.
+     *
+     * @return string کلید، یا رشتهٔ خالی اگر ساخته نشد
+     */
+    private function issueApiKeyFor(PasarGuardClient $client, int $adminId, string $username, string $parentKey): string
+    {
+        if ($adminId <= 0) {
+            Logger::warning('Cannot issue panel api key: panel gave no admin id', ['username' => $username]);
+
+            return '';
+        }
+
+        try {
+            $response = $client->createApiKey([
+                'name'                => 'pasargad-bot-' . $username,
+                'admin_id'            => $adminId,
+                'inherit_permissions' => true,
+                'note'                => 'ساخته‌شده توسط ربات پاسارگاد برای مدیریت خودکار',
+            ], $parentKey);
+
+            $key = trim((string) ($response['api_key'] ?? ''));
+
+            if ($key === '') {
+                Logger::warning('Panel returned no api key for new admin', [
+                    'username' => $username,
+                    'admin_id' => $adminId,
+                ]);
+
+                return '';
+            }
+
+            Logger::info('Panel api key issued for new agency admin', [
+                'admin_id' => $adminId,
+                'username' => $username,
+                // یادآوری: مجوزها ارثی می‌رسند. اگر کلید سازنده ناقص باشد،
+                // شارژِ همین پنل بعداً ۴۰۳ می‌دهد.
+                'inherited_from_parent' => true,
+            ]);
+
+            return $key;
+        } catch (\Throwable $e) {
+            // پنلی که مجوز ساخت کلید ندارد اینجا می‌افتد. خرید باید ناموفق
+            // گزارش شود، چون پنلی که کلید ندارد برای ربات قابل مدیریت نیست.
+            Logger::warning('Could not issue panel api key', [
+                'username' => $username,
+                'admin_id' => $adminId,
+                'error'    => $e->getMessage(),
+            ]);
+
+            throw $e;
+        }
     }
 
     /**
@@ -179,24 +328,42 @@ final class AgencyService
      *
      * از کاراکترهای مبهم (0/O، 1/l/I) پرهیز می‌شود چون نماینده این رمز را
      * می‌خواند، کپی می‌کند و داخل فرم پنل دستی تایپ می‌کند.
+     *
+     * ⚠️ **سیاست رمز پنل رعایت می‌شود، و این تصادفی نیست.**
+     *
+     * نسخهٔ قبلی فقط *یک* حرف بزرگ تضمین می‌کرد (یکی از هر دسته). ولی پنل
+     * با پیام «Password must contain at least 2 uppercase letters» رد می‌کرد —
+     * یعنی **هر خرید پنل نمایندگی با ۴۲۲ شکست می‌خورد** و کاربر پول داده ولی
+     * چیزی گیرش نمی‌آمد. این با آزمون زنده کشف شد، نه با حدس.
+     *
+     * پس اینجا حاشیهٔ اطمینان گذاشته شده: دو حرف بزرگ، دو رقم، و یک نویسه.
      */
     public function generatePassword(int $length = 14): string
     {
-        $length = max(8, min($length, 32));
+        $length = max(12, min($length, 32));
 
-        // حروف کوچک + بزرگ + عدد، بدون نویسه‌های مبهم
         $sets = [
+            // حروف کوچک
             'abcdefghijkmnopqrstuvwxyz',
+            // حروف بزرگ
             'ABCDEFGHJKLMNPQRSTUVWXYZ',
+            // ارقام
             '23456789',
+            // نویسه‌ها
+            '!@#$%&*?-_',
         ];
 
-        $all = implode('', $sets);
-        $out = '';
+        // تعداد تضمینی هر دسته — ۲ برای حروف بزرگ و ارقام چون پنل حداقل ۲
+        // حرف بزرگ می‌خواهد و برای ارقام هم سخت‌گیر است.
+        $minimum = [1, 2, 2, 1];
 
-        // تضمین حداقل یک کاراکتر از هر دسته
-        foreach ($sets as $set) {
-            $out .= $set[random_int(0, strlen($set) - 1)];
+        $all  = implode('', $sets);
+        $out  = '';
+
+        foreach ($sets as $index => $set) {
+            for ($i = 0; $i < $minimum[$index]; $i++) {
+                $out .= $set[random_int(0, strlen($set) - 1)];
+            }
         }
 
         while (mb_strlen($out) < $length) {
@@ -226,6 +393,15 @@ final class AgencyService
         $userId   = (int) $botUser['id'];
         $username = $this->generateUsername($order);
         $password = $this->generatePassword();
+
+        Logger::info('Creating agency panel', [
+            'user_id' => $userId,
+            // نشانیِ منبع اختیار، نه خودِ راز.
+            'source'  => $this->creator !== null
+                ? 'user_panel#' . (int) ($this->creator['id'] ?? 0)
+                : 'global_owner',
+            'auth'    => 'apikey',
+        ]);
 
         $payload = [
             'username'   => $username,
@@ -314,11 +490,50 @@ final class AgencyService
 
         $expireAt = $durationDays > 0 ? time() + $durationDays * 86400 : null;
 
+        // آدرسی که واقعاً رویش ساختیم — نه آنچه در config است. این مقدار باید
+        // روی ردیف تازه ثبت شود تا شارژ و بروزرسانی بعدی همان‌جا بروند.
+        //
+        // ⚠️ اگر خریدار پنلی وصل نکرده، عمداً **خالی** می‌ماند: تهی بودن این
+        // ستون یعنی «از `panel.base_url` سراسری استفاده کن» و همین قرارداد
+        // را `PanelAccess` و بقیهٔ مسیرها هم می‌فهمند. نوشتن آدرس سراسری به‌دستی
+        // فقط رکورد را اضافه می‌کرد و اگر بعداً config عوض شود، پنل را به
+        // سرور اشتباه می‌فرستاد.
+        $createdOnBaseUrl = '';
+
+        if ($this->creator !== null) {
+            $createdOnBaseUrl = (string) ($this->access->credentialsOf($this->creator)['base_url'] ?? '');
+        }
+
         // سقف کاربران بسته (۰ = نامحدود ♾️) — جدا از حجم و مدت، روی خود
         // پنل ثبت می‌شود تا نمایش سقف و هشدار پر شدن ممکن باشد.
         $maxUsers = max(0, (int) ($order['max_users'] ?? 0));
 
-        $panels  = new PanelRepository();
+        $panels = new PanelRepository();
+
+        // ⚠️ در بازیابی، رمزِ این تلاش **تازه ساخته شده و روی پنل وجود ندارد**.
+        //
+        // رمز فقط موقع `createAdmin` ساخته می‌شود؛ اگر آن مرحله قبلاً موفق شده
+        // و تلاش بعدی به ۴۰۹ خورد، حساب روی پنل رمزِ **قبلی** را دارد. نوشتن
+        // رمز جدید روی ردیف یعنی: (۱) کاربر رمزی تحویل می‌گیرد که کار نمی‌کند،
+        // و (۲) رمزِ درست برای همیشه از بین می‌رود.
+        //
+        // این مسیر با حذف رمزِ ورودی مهم‌تر شد: ساخت کلید (`POST /api/api_key`)
+        // یک مرحلهٔ تازه و قابل‌شکست است، پس «ساخت شد ولی بعدش شکست خورد» به
+        // مسیری تکرارشونده تبدیل شده که هر بار رمز را خراب می‌کرد.
+        if ($recovered) {
+            $existing = $panels->findByPanelUsername($username);
+            $stored   = $existing === null ? '' : $panels->plainPassword($existing);
+
+            if ($stored !== '') {
+                $password = $stored;
+            } else {
+                Logger::warning('Recovered agency panel has no stored password', [
+                    'order_id' => (int) $order['id'],
+                    'username' => $username,
+                ]);
+            }
+        }
+
         $panelId = $panels->upsertFromPanel($userId, $username, $password, $admin, PanelRepository::SOURCE_BOT);
 
         $panels->update($panelId, [
@@ -328,7 +543,35 @@ final class AgencyService
             'order_id'         => (int) $order['id'],
             'label'            => 'پنل ' . $username,
             'login_url'        => PanelRepository::loginUrl(),
+
+            // ⚠️ این دو ستون حیاتی‌اند و قبلاً همیشه خالی می‌ماندند.
+            //
+            // اگر پنل نمایندگی روی آدرس خریدار ساخته شده باشد ولی آدرسش
+            // ثبت نشود، «شارژ پنل» و «بروزرسانی از پنل» بعداً به پنل
+            // *پیش‌فرض سراسری* می‌روند و روی سرور اشتباه کار می‌کنند یا ۴۰۳
+            // می‌دهند — یعنی کاربر پول داده و سرویسش کار نمی‌کند.
+            'base_url'         => $createdOnBaseUrl,
+            // حساب تازه با کلیدِ سازنده ساخته شده، پس روش احراز هویتش هم
+            // کلید است.
+            'auth_mode'        => PanelAccess::MODE_API_KEY,
         ]);
+
+        // ------------------------------------------------------------------
+        // کلیدِ همین حساب تازه را می‌سازیم.
+        //
+        // چرا حیاتی است: ربات دیگر رمز نمی‌پرسد، پس اگر این ادمین کلید
+        // نداشته باشد، پنلش بعداً نه شارژ می‌شود نه بروزرسانی، نه آمار — یعنی
+        // کاربر پول داده و سرویسش کار نمی‌کند.
+        //
+        // اگر ساخت کلید ناموفق بود، خرید **ناموفق** گزارش می‌شود (نه موفقِ
+        // ناقص): سفارش بعداً تلاش مجدد می‌شود و `AgencyService` با نام کاربریِ
+        // قطعی، حسابِ ازقبل‌ساخته را بازیابی می‌کند و کلید را دوباره می‌سازد.
+        // ------------------------------------------------------------------
+        $issuedKey = $this->issueApiKeyFor($client, (int) ($admin['id'] ?? 0), $username, $ownerPassword);
+
+        if ($issuedKey !== '') {
+            $panels->setApiKey($panelId, $issuedKey);
+        }
 
         Logger::info('Agency panel ready', [
             'user_id'   => $userId,

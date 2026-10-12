@@ -100,6 +100,29 @@ try {
 
     echo 'پردازش صف: ' . json_encode($result, JSON_UNESCAPED_UNICODE) . "\n";
 
+    // ۱-الف) ♻️ پخش دوبارهٔ آپدیت‌هایی که پردازششان نیمه‌کاره مانده بود.
+    //
+    // چرا اینجا و نه داخل درخواستِ وبهوک: تلگرام هر آپدیت را فقط یک‌بار
+    // می‌فرستد. اگر پردازشش خطا بدهد، بدون این مرحله برای همیشه از دست می‌رود
+    // (مشتری رسید می‌فرستد، سفارش باز می‌ماند، کسی خبردار نمی‌شود).
+    //
+    // و چرا اینجا `sleep` نمی‌کنیم: خوابیدن درون وب‌سرور باعث تایم‌اوت تلگرام و
+    // ارسال دوبارهٔ همان آپدیت می‌شد — دو نسخهٔ همزمان از یک پردازشِ پول‌محور.
+    try {
+        $replay = \Pasargad\Bot\WebhookReliability::replay(
+            static function (array $payload): void {
+                (new \Pasargad\Bot\Kernel())->handle(new \Pasargad\Telegram\Update($payload));
+            },
+            20
+        );
+
+        if (($replay['attempted'] ?? 0) > 0) {
+            echo 'پخش دوبارهٔ آپدیت‌ها: ' . json_encode($replay, JSON_UNESCAPED_UNICODE) . "\n";
+        }
+    } catch (Throwable $e) {
+        echo 'خطای پخش دوبارهٔ آپدیت‌ها: ' . $e->getMessage() . "\n";
+    }
+
     // ۱-ب) ⚡️ بررسی خودکار فاکتورهای کارت‌به‌کارت خودکار
     //
     // سفارش‌هایی که با مبلغ یکتا پرداخت شده‌اند، اینجا از روی استعلام کارت
@@ -154,19 +177,47 @@ try {
     $syncer = new PanelSyncer($panels);
 
     if ($flags->isPanelSyncEnabled()) {
-        $synced = $syncer->syncMany($panels->listWatchable(200));
+        // ⚠️ فقط پنل‌هایی که واقعاً نیاز دارند.
+        //
+        // کرون ممکن است هر چند دقیقه یک‌بار اجرا شود، ولی پنلی که ده ثانیه پیش
+        // خوانده شده چیزِ تازه‌ای برای گفتن ندارد. فرستادن درخواستِ بیهوده
+        // بودجهٔ زمانی را می‌خورد و پنل‌های واقعیِ دیگر را بی‌وقت رها می‌کند.
+        $due = \Pasargad\Panel\PanelSyncManager::dueForSync($panels->listWatchable(200));
 
-        if ($synced['synced'] > 0 || $synced['failed'] > 0) {
-            echo sprintf("همگام‌سازی پنل‌ها: %d بررسی، %d موفق، %d ناموفق\n",
-                $synced['checked'], $synced['synced'], $synced['failed']);
+        if ($due === []) {
+            // ⚠️ پیام باید بگوید چند پنل اصلاً بود — وگرنه «همه به‌تازگی همگام
+            // بودند» برای فروشگاهی که هیچ پنلی ندارد، گمراه‌کننده است و یعنی
+            // کسی فکر می‌کند بررسی انجام شده.
+            printf(
+                "همگام‌سازی پنل‌ها: %d پنل دیده شد، نیازی به بررسی نبود.\n",
+                count($panels->listWatchable(200))
+            );
+        } else {
+            $synced = $syncer->syncMany($due);
+
+            if ($synced['synced'] > 0 || $synced['failed'] > 0) {
+                echo sprintf("همگام‌سازی پنل‌ها: %d بررسی، %d موفق، %d ناموفق\n",
+                    $synced['checked'], $synced['synced'], $synced['failed']);
+            }
+
+            // سقف زمانی اجرا را خوردیم ⇒ بقیه در اجرای بعدی بررسی می‌شوند.
+            // بدون این پیام، کسی فکر می‌کند همهٔ پنل‌ها همگام شدند.
+            if ($synced['skipped'] > 0) {
+                echo sprintf(
+                    "⚠️ سقف زمانی همگام‌سازی رسید: %d پنل برای اجرای بعدی ماند.\n",
+                    $synced['skipped']
+                );
+            }
         }
 
-        // سقف زمانی اجرا را خوردیم ⇒ بقیه در اجرای بعدی بررسی می‌شوند.
-        // بدون این پیام، کسی فکر می‌کند همهٔ پنل‌ها همگام شدند.
-        if ($synced['skipped'] > 0) {
+        // پنل‌های بدون کلید بی‌سروصدا از کار می‌افتند؛ این عدد تنها راهِ
+        // دیدنشان است تا برایشان کلید ساخته شود.
+        $report = \Pasargad\Panel\PanelSyncManager::getSyncStatusReport();
+
+        if ($report['unlinked'] > 0) {
             echo sprintf(
-                "⚠️ سقف زمانی همگام‌سازی رسید: %d پنل برای اجرای بعدی ماند.\n",
-                $synced['skipped']
+                "🔑 %d پنل کلید API ندارد و همگام نمی‌شود — نماینده باید کلید بسازد.\n",
+                $report['unlinked']
             );
         }
     }
@@ -215,6 +266,43 @@ try {
         }
     } catch (Throwable $e) {
         echo 'خطای پاداش معرفی: ' . $e->getMessage() . "\n";
+    }
+
+    // ------------------------------------------------------------------
+    // ۲-ب) کمیسیونِ درصدیِ خریدهای بعدی (مدل دوم)
+    //
+    // جدا از پاداشِ اولیه اجرا می‌شود، چون منطقشان فرق دارد: پاداشِ اولیه
+    // «یک بار برای هر معرفی» است، کمیسیون «به ازای هر سفارشِ بعدی، تا سقف».
+    // اگر در یک حلقه قاطی شوند، سقفِ کمیسیون می‌توانست پاداشِ اولیه را هم
+    // بخورد و یک معرف، هم پاداش بگیرد هم بیشتر از سقف کمیسیون.
+    //
+    // متد خودش در حالتِ خاموش فوری برمی‌گردد، پس وقتی کمیسیون غیرفعال است
+    // این خط عملاً هزینه‌ای ندارد.
+    // ------------------------------------------------------------------
+    try {
+        $discounts2  = new \Pasargad\Store\DiscountService(settings: new \Pasargad\Store\Settings($db));
+        $commission  = $discounts2->payCommissions($notifier);
+
+        if ($commission['orders'] > 0) {
+            echo sprintf(
+                "کمیسیون معرفی: %d سفارش از %d معرف، %d تومان 💸\n",
+                $commission['orders'],
+                $commission['referrers'],
+                $commission['toman']
+            );
+        }
+
+        // ⚠️ ردیف‌هایی که در دفتر ثبت شدند ولی پولشان نرسید. عمداً پاک نمی‌شوند
+        // (پاک کردن = کرونِ بعدی دوباره می‌ریزد و پولِ مضاعف می‌دهد)، پس
+        // تنها کاری که می‌کنیم این است که **بلند** گزارش کنیم تا دیده شود.
+        if ($commission['skipped'] > 0) {
+            echo sprintf(
+                "⚠️ کمیسیون: %d مورد رد/ناموفق — بررسی کنید (کرون: 'Referral commission payout failed')\n",
+                $commission['skipped']
+            );
+        }
+    } catch (Throwable $e) {
+        echo 'خطای کمیسیون معرفی: ' . $e->getMessage() . "\n";
     }
 
     // ۳) پاک‌سازی کانفیگ‌های تست قدیمی و نشست‌های منقضی
@@ -272,6 +360,58 @@ try {
         $stats['awaiting'],
         count($panels->listWatchable(500))
     );
+
+    // ۴-ب) گزارش دوره‌ای به ادمین
+    try {
+        $rep = new \Pasargad\Store\Settings($db);
+        $mkReport = function (int $days) use ($db, $alertResult, $panels): string {
+            $since = time() - $days * 86400;
+            $count = (int) $db->value(
+                "SELECT COUNT(*) FROM orders WHERE status IN ('paid','applied') AND paid_at IS NOT NULL AND paid_at >= ?",
+                [$since]
+            );
+            $sum = (int) $db->value(
+                "SELECT COALESCE(SUM(price_toman),0) FROM orders WHERE status IN ('paid','applied') AND paid_at IS NOT NULL AND paid_at >= ?",
+                [$since]
+            );
+            $low  = (int) ($alertResult['low_volume'] ?? 0);
+            $exp  = (int) (($alertResult['expiring'] ?? 0) + ($alertResult['expired'] ?? 0));
+            $watch = count($panels->listWatchable(500));
+
+            return "📊✨ <b>گزارش"
+                . ($days >= 7 ? ' هفتگی' : ' روزانه')
+                . "</b>\n\n"
+                . '🛒 فروش‌ها: <b>' . $count . "</b>\n"
+                . '💰 مبلغ: <b>' . \Pasargad\Support\Str::formatToman($sum) . "</b>\n"
+                . '⚠️ پنل کم‌حجم: <b>' . $low . "</b>\n"
+                . '⌛️ اعتبار تمام‌شده/نزدیک: <b>' . $exp . "</b>\n"
+                . '🟢 پنل‌های فعال: <b>' . $watch . "</b>";
+        };
+
+        if ($rep->bool(\Pasargad\Store\Settings::REPORT_DAILY)) {
+            $last = (int) ($rep->get(\Pasargad\Store\Settings::REPORT_DAILY_LAST) ?? 0);
+            if ($last + 86400 <= time() && $notifier !== null) {
+                foreach ($notifier->adminIds() as $adminId) {
+                    $notifier->notifyUser((int) $adminId, $mkReport(1));
+                }
+                $rep->set(\Pasargad\Store\Settings::REPORT_DAILY_LAST, (string) time());
+                echo "گزارش روزانه ارسال شد.\n";
+            }
+        }
+
+        if ($rep->bool(\Pasargad\Store\Settings::REPORT_WEEKLY)) {
+            $last = (int) ($rep->get(\Pasargad\Store\Settings::REPORT_WEEKLY_LAST) ?? 0);
+            if ($last + 604800 <= time() && $notifier !== null) {
+                foreach ($notifier->adminIds() as $adminId) {
+                    $notifier->notifyUser((int) $adminId, $mkReport(7));
+                }
+                $rep->set(\Pasargad\Store\Settings::REPORT_WEEKLY_LAST, (string) time());
+                echo "گزارش هفتگی ارسال شد.\n";
+            }
+        }
+    } catch (Throwable $e) {
+        echo 'خطای گزارش دوره‌ای: ' . $e->getMessage() . "\n";
+    }
 
     Logger::info('Worker finished', $result);
     exit(0);
