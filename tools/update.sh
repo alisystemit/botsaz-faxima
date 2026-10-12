@@ -136,6 +136,38 @@ clear_stale_git_locks() {
   return 1
 }
 
+# فایل‌های untracked‌ای که با fast-forward تداخل دارند را به پشتیبان منتقل می‌کند.
+# git merge --ff-only اگر فایلِ untracked با مسیری که کامیتِ مقصد می‌آورد تفاوت
+# داشته باشد، با «would be overwritten by merge» رد می‌شود و HEAD جلو نمی‌رود ⇒
+# کدِ جدید هرگز به زنده نمی‌رسد. این فایل‌ها معمولاً محصولِ
+# tools/sync_templates.php در templates/ هستند و Step 5b دوباره از ریپوی هر قالب
+# می‌سازد؛ پس منتقل‌کردنشان بی‌خطر است. data/ و bots/ و config هرگز دست نمی‌خورند.
+# خروجی 0 = حداقل یک فایل جابه‌جا شد (پس تلاش دوبارهٔ merge ارزش دارد).
+relocate_untracked_conflicts() {
+  local target="$1" dst="$BACKUP_DIR/untracked-conflicts" p n=0
+  [ -n "$target" ] || return 1
+  git rev-parse --verify --quiet "$target^{commit}" >/dev/null 2>&1 || return 1
+  mkdir -p "$dst" 2>/dev/null || return 1
+  while IFS= read -r -d '' p; do
+    [ -n "$p" ] || continue
+    case "$p" in
+      data/*|bots/*|config.php|config.example.php) continue ;;
+      /*|*..*) continue ;;
+    esac
+    # فقط مسیرهایی که کامیتِ مقصد هم فایل دارد (وگرنه تداخلی در کار نیست)
+    git cat-file -e "$target:$p" 2>/dev/null || continue
+    mkdir -p "$dst/$(dirname "$p")" 2>/dev/null
+    if mv -f -- "$p" "$dst/$p" 2>/dev/null; then
+      n=$((n + 1))
+    fi
+  done < <(git ls-files --others --exclude-standard -z)
+  if [ "$n" -gt 0 ]; then
+    warn "Moved $n untracked conflict file(s) to $dst (Step 5b regenerates them)"
+    return 0
+  fi
+  return 1
+}
+
 print_help() {
   cat <<'HELP'
   ===== بروزرسانی ربات‌ساز (tools/update.sh) =====
@@ -589,6 +621,25 @@ if [ "$DO_RESET" -eq 1 ]; then
     if [ $? -ne 0 ]; then
       case "$_merge_err" in
         *'not something we can merge'*|*'Already up to date'*|*'Already up-to-date'*) : ;;
+        *'untracked working tree files would be overwritten'*)
+          # سدِ رایج و خاموش این ویرایش: templates/ هم در گیت ردیابی می‌شود و هم
+          # tools/sync_templates.php نسخهٔ untracked می‌سازد؛ پس fast-forward رد
+          # می‌شود، HEAD جا نمی‌زند و Step 5 همان کدِ قدیمی را به زنده می‌برد —
+          # دقیقاً همان «سورس آپدیت شد ولی اعمال نشد». فایل‌های مزاحم را کنار
+          # می‌گذاریم (Step 5b دوباره از ریپوی هر قالب می‌سازد) و merge را تکرار می‌کنیم.
+          if relocate_untracked_conflicts "origin/$CUR_BRANCH"; then
+            _merge_err="$(git merge --ff-only "origin/$CUR_BRANCH" 2>&1)"
+            if [ $? -eq 0 ]; then
+              ok "Fast-forwarded after moving blocking untracked file(s) aside"
+            else
+              warn "git merge --ff-only origin/$CUR_BRANCH still failed after moving untracked files:"
+              printf '%s\n' "$_merge_err" | sed 's/^/   /'
+            fi
+          else
+            warn "git merge --ff-only origin/$CUR_BRANCH blocked by untracked files (nothing could be moved):"
+            printf '%s\n' "$_merge_err" | sed 's/^/   /'
+          fi
+          ;;
         *) warn "git merge --ff-only origin/$CUR_BRANCH did not fast-forward:"; printf '%s\n' "$_merge_err" | sed 's/^/   /' ;;
       esac
     fi
