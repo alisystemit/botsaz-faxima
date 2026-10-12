@@ -326,7 +326,7 @@ class FxRate
         } elseif (self::updatedAt($store) <= 0) {
             $head = '⚪️ <b>نرخ دلار</b> — هنوز از هیچ سرویسی گرفته نشده';
         } elseif (self::isStale($store)) {
-            $head = '🟡 <b>نرخ دلار</b> — کش قدیمی شده (' . self::e(self::ageText($store)) . ')';
+            $head = '🟡 <b>نرخ دلار</b> — کش قدیمی شده (' . Ui::e(self::ageText($store)) . ')';
         } else {
             $head = '🟢 <b>نرخ دلار</b> — تازه از API';
         }
