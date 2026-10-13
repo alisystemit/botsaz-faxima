@@ -155,21 +155,20 @@ try {
     line('bad', 'دسترسی به پنل', $e->getMessage());
 }
 
-$ownerUser = Config::str('panel.owner_username');
-$ownerPass = Config::str('panel.owner_password');
-if ($ownerUser !== '' && $ownerPass !== '') {
+$panelKey = Config::str('panel.api_key');
+if ($panelKey !== '') {
     try {
-        $panel  = new PasarGuardClient();
-        $result = $panel->testConnection($ownerUser, $ownerPass);
-        line($result['ok'] ? 'ok' : 'warn', 'ورود به پنل با حساب سازنده', $result['message']);
+        $panel = new PasarGuardClient();
+        $panel->listRolesWithApiKey($panelKey, ['limit' => 1]);
+        line('ok', 'کلید سازندهٔ پنل', 'کلید معتبر است — فروش پنل نمایندگی فعال است');
     } catch (\Throwable $e) {
-        line('warn', 'ورود به پنل با حساب سازنده', $e->getMessage());
+        line('warn', 'کلید سازندهٔ پنل', $e->getMessage());
     }
 } else {
-    // این فقط یک هشدار نیست: بدون این اکانت، بستهٔ «پنل نمایندگی» قابل فروش
-    // نیست چون ربات نمی‌تواند حساب اپراتور جدید بسازد.
-    line('bad', 'حساب سازندهٔ پنل',
-        'panel.owner_username/password تنظیم نشده — خرید پنل نمایندگی غیرفعال است');
+    // این فقط یک هشدار نیست: بدون این کلید، بستهٔ «پنل نمایندگی» برای کاربری که
+    // پنل خودش را وصل نکرده قابل فروش نیست (نمایندهٔ پنل‌دار از کلید خودش می‌گذرد).
+    line('bad', 'کلید سازندهٔ پنل',
+        'panel.api_key تنظیم نشده — خرید پنل نمایندگی بدون پنلِ وصل‌شده غیرفعال است');
 }
 
 // ------------------------------------------------------------------

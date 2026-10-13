@@ -7,6 +7,7 @@ declare(strict_types=1);
 
 $ROOT = dirname(__DIR__);
 require_once $ROOT . '/src/Store.php';
+require_once $ROOT . '/src/SuperAdmins.php';
 require_once $ROOT . '/src/Manager.php';
 require_once $ROOT . '/src/BuildSettings.php';
 require_once $ROOT . '/src/Payment/Payments.php';
@@ -24,9 +25,11 @@ if (!is_array($cfg)) {
     out(500, ['ok' => false, 'msg' => 'config.php یافت نشد']);
 }
 $TOKEN  = (string)($cfg['main_token'] ?? '');
-$SUPERS = array_map('intval', (array)($cfg['super_admins'] ?? []));
 
 $store = new Store((string)($cfg['manager_db'] ?? ($ROOT . '/data/botsaz.sqlite')), $cfg);
+// سوپرادمین‌های مؤثر = config.php + افزوده‌شده‌ها از پنل (settings.super_admins).
+// قبل از auth استفاده می‌شود تا سوپرادمینِ تازه‌اضافه‌شده هم بتواند وارد شود.
+$SUPERS = SuperAdmins::effective($cfg, $store);
 
 $action = (string)($_REQUEST['action'] ?? '');
 $initData = (string)($_POST['initData'] ?? $_GET['initData'] ?? '');
@@ -58,8 +61,14 @@ try {
             $page = max(1, (int)($_GET['page'] ?? 1));
             $per  = min(100, max(5, (int)($_GET['per'] ?? 30)));
             $off  = ($page - 1) * $per;
-            $total = (int)$pdo->query("SELECT COUNT(*) FROM bots")->fetchColumn();
-            $rows = $pdo->query("SELECT b.*, u.username, u.first_name FROM bots b LEFT JOIN users u ON u.user_id=b.owner_id ORDER BY b.id DESC LIMIT $per OFFSET $off")->fetchAll(PDO::FETCH_ASSOC);
+            // فیلتر اختیاری مالک: «ربات‌های این کاربر» باید سمت سرور فیلتر شود.
+            // قبلاً فقط صفحهٔ اول (۳۰ ربات) گرفته می‌شد و فیلتر در مرورگر انجام
+            // می‌شد؛ برای کاربری که رباتش در صفحه‌های بعد بود «رباتی ندارد»
+            // نشان داده می‌شد، در حالی که ربات داشت.
+            $uidFilter = (int)($_GET['user_id'] ?? $_POST['user_id'] ?? 0);
+            $where = $uidFilter > 0 ? ' WHERE b.owner_id=' . $uidFilter : '';
+            $total = (int)$pdo->query("SELECT COUNT(*) FROM bots b" . $where)->fetchColumn();
+            $rows = $pdo->query("SELECT b.*, u.username, u.first_name FROM bots b LEFT JOIN users u ON u.user_id=b.owner_id" . $where . " ORDER BY b.id DESC LIMIT $per OFFSET $off")->fetchAll(PDO::FETCH_ASSOC);
             foreach ($rows as &$r) { $r['token'] = ''; }
             out(200, ['ok' => true, 'bots' => $rows, 'total' => $total, 'page' => $page, 'per' => $per]);
         }
@@ -90,7 +99,9 @@ try {
             $per  = min(100, max(5, (int)($_GET['per'] ?? 30)));
             $off  = ($page - 1) * $per;
             $total = (int)$pdo->query("SELECT COUNT(*) FROM users")->fetchColumn();
-            $rows = $pdo->query("SELECT user_id, first_name, username, is_admin, is_allowed, bot_limit, build_count, created_at FROM users ORDER BY user_id DESC LIMIT $per OFFSET $off")->fetchAll(PDO::FETCH_ASSOC);
+            // شمارش ربات هر کاربر: هم برای نمایش «ساخته/ربات» در فهرست، هم برای
+            // اینکه ادمین پیش از بازکردن جزئیات بداند هیچ رباتی گم نشده.
+            $rows = $pdo->query("SELECT user_id, first_name, username, is_admin, is_allowed, bot_limit, build_count, created_at, (SELECT COUNT(*) FROM bots b WHERE b.owner_id = users.user_id) AS bots FROM users ORDER BY user_id DESC LIMIT $per OFFSET $off")->fetchAll(PDO::FETCH_ASSOC);
             // سوپرادمین‌ها همیشه مجازند، حتی اگر رکوردشان در جدول نباشد (مثلاً
             // قبل از اولین پیام). بدون این، پنل به ادمینِ خودش «معلق» نشان می‌داد
             // و سقفش هم بی‌معنا بود — در حالی که در ربات کاملاً ادمین است.
@@ -124,6 +135,30 @@ try {
         case 'user_set_limit': {
             $uid2 = (int)($_POST['user_id'] ?? 0); $n = max(0, (int)($_POST['limit'] ?? 0));
             Payments::setUserLimit($store, $uid2, $n);
+            out(200, ['ok' => true]);
+        }
+
+        case 'super_list': {
+            // فهرست سوپرادمین‌های مؤثر: کانفیگ (قابل حذف نیست) + افزوده‌شده‌ها از پنل
+            out(200, ['ok' => true,
+                'config'  => SuperAdmins::fromConfig($cfg),
+                'runtime' => SuperAdmins::runtime($store),
+            ]);
+        }
+
+        case 'super_add': {
+            if (!in_array($uid, $SUPERS, true)) out(403, ['ok' => false, 'msg' => 'فقط سوپرادمین می‌تواند سوپرادمین اضافه کند']);
+            $uid2 = (int)($_POST['user_id'] ?? 0);
+            $r = SuperAdmins::add($cfg, $store, $uid2);
+            if (!$r['ok']) out(400, ['ok' => false, 'msg' => $r['error']]);
+            out(200, ['ok' => true]);
+        }
+
+        case 'super_remove': {
+            if (!in_array($uid, $SUPERS, true)) out(403, ['ok' => false, 'msg' => 'فقط سوپرادمین می‌تواند سوپرادمین حذف کند']);
+            $uid2 = (int)($_POST['user_id'] ?? 0);
+            $r = SuperAdmins::remove($cfg, $store, $uid2);
+            if (!$r['ok']) out(400, ['ok' => false, 'msg' => $r['error']]);
             out(200, ['ok' => true]);
         }
 
@@ -232,16 +267,6 @@ try {
                     break;
                 case 'nowpay_ipn':
                     $store->setSetting('pay_nowpay_ipn_secret', trim($v));
-                    break;
-                case 'child_owner_username':
-                    $store->setSetting('child_owner_username', trim($v));
-                    break;
-                case 'child_owner_password':
-                    $store->setSetting('child_owner_password', trim($v));
-                    break;
-                case 'child_owner_reset':
-                    $store->setSetting('child_owner_username', '');
-                    $store->setSetting('child_owner_password', '');
                     break;
                 default: out(400, ['ok' => false, 'msg' => 'کلید نامعتبر']);
             }
@@ -496,15 +521,6 @@ try {
                 } catch (Throwable $e) { $errs[] = ($bot['folder'] ?? '?') . ': ' . $e->getMessage(); }
             }
             out(200, ['ok' => true, 'updated' => $done, 'skipped' => $skip, 'errors' => $errs]);
-        }
-
-        case 'child_owner_get': {
-            // اکانت سازندهٔ پنل برای قالب‌هایی که «پنل نمایندگی» دارند (پاسارگاد).
-            // اگر خالی باشد، هنگام ساخت ربات خودکار ساخته می‌شود.
-            out(200, ['ok' => true,
-                'username' => (string)($store->getSetting('child_owner_username', '') ?? ''),
-                'password' => (string)($store->getSetting('child_owner_password', '') ?? ''),
-            ]);
         }
 
         case 'system_status': {

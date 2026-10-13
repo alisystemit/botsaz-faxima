@@ -1208,31 +1208,24 @@ public static function validTypes(): array
     }
 
     /**
-     * ساخت config.php قالب پاسارگاد از روی config.example.php.
+     * نوشتن کامل config.php قالب پاسارگاد از روی config.example.php.
      *
-     * دو کار می‌کند که نصب‌کنندهٔ دستی هم لازم دارد و خیلی‌ها فراموشش می‌کنند:
+     * نصب‌کنندهٔ دستی هم همین دو کار را لازم دارد و خیلی‌ها فراموشش می‌کنند:
      *   ۱) کپی نمونه ⇒ config.php
      *   ۲) ساخت webhook_secret و crypto_key تصادفی.
      * بدون این دو، ربات ۴۰۳ می‌دهد و رمزهای پنل کاربران رمزنگاری‌نشده ذخیره می‌شوند.
      *
-     * @return array{secret:string, crypto:string}
-     */
-    /**
-     * نوشتن کامل config.php قالب پاسارگاد از روی config.example.php.
-     *
-     * $ownerUsername/$ownerPassword اختیاری‌اند: اگر ادمین آن‌ها را از قبل
-     * در تنظیمات ربات‌ساز ثبت کرده باشد همان‌ها می‌نویسند، وگرنه یک اکانت
-     * پیش‌فرضِ ساخته‌شده ذخیره می‌شود تا ربات از ابتدا «کامل» باشد و کاربر
-     * مجبور به ویرایش فایل نشود.
+     * نکته: قالب تازه دیگر با «اکانت owner (نام‌کاربری/رمز)» کار نمی‌کند و
+     * کل مسیر پنل با کلید API (`panel.api_key`) انجام می‌شود؛ پس اینجا چیزی
+     * برای آن پچ نمی‌شود. قالب‌های قداتی‌تر که آن کلیدها را دارند هم دیگر
+     * به‌روزرسانی می‌شوند و این مسابقه لازم نیست.
      */
     public static function writePasargadConfig(
         string $botDir,
         string $token,
         int $adminId,
         string $botUsername,
-        string $baseUrl,
-        string $ownerUsername = '',
-        string $ownerPassword = ''
+        string $baseUrl
     ): array {
         $example = $botDir . '/config.example.php';
         $target = $botDir . '/config.php';
@@ -1287,36 +1280,6 @@ public static function validTypes(): array
             $c6
         );
 
-        // ===== اکانت سازندهٔ پنل (owner) =====
-        // بدون این، «خرید پنل نمایندگی» در ربات‌های ساخته‌شده کار نمی‌کند و ربات
-        // پیام خطای «panel.owner_username تنظیم نشده» به کاربر می‌دهد.
-        // اگر ادمین (در مینی‌اپ یا هنگام ساخت) مقداری نداده باشد، خودمان یک
-        // اکانت پیش‌فرضِ امن می‌سازیم تا ربات از همان لحظهٔ نصب کامل باشد.
-        $ownerUser = trim((string)($ownerUsername ?? ''));
-        $ownerPass = trim((string)($ownerPassword ?? ''));
-        if ($ownerUser === '') {
-            $ownerUser = 'owner' . $adminId;
-            if ($ownerPass === '') $ownerPass = self::randomToken(16);
-            $ownerGenerated = true;
-        } else {
-            $ownerGenerated = false;
-            if ($ownerPass === '') $ownerPass = self::randomToken(16);
-        }
-        $esc = static fn(string $s): string => addcslashes($s, "'\\");
-        $new = preg_replace(
-            "/('owner_username'\s*=>\s*)'[^']*'/",
-            "$1'" . $esc($ownerUser) . "'",
-            (string)$new,
-            1,
-            $c7
-        );
-        $new = preg_replace(
-            "/('owner_password'\s*=>\s*)'[^']*'/",
-            "$1'" . $esc($ownerPass) . "'",
-            (string)$new,
-            1,
-            $c8
-        );
         // اگر قالب تازه‌ای کلید rep_role_id را نداشته باشد، پیش‌فرض ۰ درست است
         // (ربات خودش نقش غیرمالک را از پنل پیدا می‌کند).
         // لاگ پنل داخل data/logs است؛ کپی شده و قابل نوشتن است، ولی صریح می‌سازیم
@@ -1325,18 +1288,12 @@ public static function validTypes(): array
         if ((int)$c1 < 1 || (int)$c2 < 1 || (int)$c3 < 1 || (int)$c5 < 1 || (int)$c6 < 1) {
             throw new Exception("پچ config پاسارگاد ناقص ماند — نسخه ناسازگار؟");
         }
-        if ((int)$c7 < 1 || (int)$c8 < 1) {
-            throw new Exception("کلیدهای panel.owner_* در config.example.php پیدا نشد — نسخه ناسازگار؟");
-        }
         if (file_put_contents($target, (string)$new) === false) {
             throw new Exception("خطا در نوشتن config.php پاسارگاد");
         }
         return [
             'secret' => $secret,
             'crypto' => $crypto,
-            'owner_username' => $ownerUser,
-            'owner_password' => $ownerPass,
-            'owner_generated' => $ownerGenerated,
         ];
     }
 

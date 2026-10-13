@@ -78,8 +78,7 @@ In `config.php`:
 - `super_admins` - Array of admin user IDs
 - `base_url` - Your domain (e.g., https://bot.example.com)
 - `panel.base_url` - Your panel URL
-- `panel.owner_username` - Panel owner account
-- `panel.owner_password` - Panel owner password
+- `panel.api_key` - Panel API key (panel Settings → API Keys); needed to sell agency panels to buyers without their own panel
 
 ## Re-running Setup
 

@@ -86,6 +86,15 @@ if (!empty($cfg['super_admins']) && count($cfg['super_admins']) > 0) {
 } else {
     $errors[] = 'config.php: super_admins not set!';
 }
+// سوپرادمین‌های افزوده‌شده از پنل (تنظیم settings.super_admins) — جدا از کانفیگ
+require_once __DIR__ . '/../src/SuperAdmins.php';
+$extraSupers = SuperAdmins::runtime($store);
+if ($extraSupers !== []) {
+    $ok[] = 'سوپرادمین‌های افزوده‌شده از پنل: ' . implode(', ', $extraSupers);
+}
+if (SuperAdmins::effective($cfg, $store) === []) {
+    $errors[] = 'هیچ سوپرادمین مؤثری نیست (نه config.php، نه پنل) — ربات‌ساز برای هیچ‌کس باز نمی‌شود';
+}
 // قبلاً هیچ چکی برای secret_key نبود — کلید خالی/پیش‌فرض/تقلبی کار می‌کند ولی بین همه
 // مشترک است و رمزگذاری توکن فرزندان را بی‌اثر می‌کند. هر دو شکل را می‌گیرد:
 // هم مقدار دقیق Manager::DEFAULT_SECRET_KEY، هم هر مقداری که هنوز «change-this...» باشد.

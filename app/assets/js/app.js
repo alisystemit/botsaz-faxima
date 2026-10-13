@@ -517,9 +517,10 @@ function drawUsers(q){
       ? '<span class="badge b-info">👑 سوپرادمین</span>'
       : '<span class="badge ' + (u.is_allowed?'b-ok':'b-warn') + '">' + (u.is_allowed?'مجاز':'معلق') + '</span>';
     // سقف فقط برای کسانی معنا دارد که مجازند؛ سوپرادمین در ربات سقف ندارد
+    var botCount = Number(u.bots || 0);
     var limitLine = sup
-      ? '<div class="s" style="color:var(--muted);font-size:11px;margin-top:3px">ساخته: ' + u.build_count + ' • دسترسی کامل</div>'
-      : '<div class="s" style="color:var(--muted);font-size:11px;margin-top:3px">ساخته: ' + u.build_count + ' • سقف: ' + u.bot_limit + ' • ادمین: ' + (u.is_admin?'✅':'—') + '</div>';
+      ? '<div class="s" style="color:var(--muted);font-size:11px;margin-top:3px">ربات: ' + botCount + ' • ساخته: ' + u.build_count + ' • دسترسی کامل</div>'
+      : '<div class="s" style="color:var(--muted);font-size:11px;margin-top:3px">ربات: ' + botCount + ' • ساخته: ' + u.build_count + ' • سقف: ' + u.bot_limit + ' • ادمین: ' + (u.is_admin?'✅':'—') + '</div>';
     var btns =
       '<button class="btn btn-ghost btn-sm" onclick="MX.userBots(' + u.user_id + ',\'' + esc(u.first_name || u.username || u.user_id) + '\')">🤖 ربات‌ها</button>';
     if (!sup) {
@@ -690,6 +691,27 @@ function vSettings(){
           '<button class="btn btn-ghost btn-sm" onclick="MX.saveLimitPrice()">💾</button></div>' +
         '<button class="btn btn-acc btn-sm" style="width:100%;margin-top:12px" onclick="MX.saveAllPrices()">💾 ذخیرهٔ همهٔ قیمت‌ها</button>';
     });
+    // سوپرادمین‌ها: کانفیگ (قابل حذف نیست) + افزوده‌شده از پنل
+    call('super_list').then(function(sp){
+      var el = $('#superCard'); if (!el || !sp || !sp.ok) return;
+      var cfgRows = (sp.config||[]).map(function(id){
+        return '<div class="row"><div><div class="t">👑 ' + esc(id) + '</div>' +
+          '<div class="s" style="color:var(--muted);font-size:11px;margin-top:2px">در config.php — از پنل قابل حذف نیست</div></div></div>';
+      }).join('');
+      var runRows = (sp.runtime||[]).map(function(id){
+        return '<div class="row"><div><div class="t">👑 ' + esc(id) + '</div>' +
+          '<div class="s" style="color:var(--muted);font-size:11px;margin-top:2px">افزوده‌شده از پنل</div></div>' +
+          '<button class="btn btn-bad btn-sm" onclick="MX.superRemove(' + id + ')">🗑 حذف</button></div>';
+      }).join('');
+      el.innerHTML =
+        ((cfgRows + runRows) !== ''
+          ? (cfgRows + runRows)
+          : '<div class="s" style="color:var(--muted);font-size:12px">فهرست خالی است — بدون سوپرادمین، ربات‌ساز برای هیچ‌کس باز نمی‌شود.</div>') +
+        '<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">' +
+          '<input id="in_super" type="number" min="1" step="1" inputmode="numeric" placeholder="آیدی عددی تلگرام" style="flex:1;min-width:140px">' +
+          '<button class="btn btn-acc btn-sm" onclick="MX.superAdd()">➕ افزودن</button>' +
+        '</div>';
+    });
     var logPage = 1, logLines = [], logFile = '', logFilter = '';
 function drawLogs(){
   var el = $('#logBox'); if (!el) return;
@@ -730,22 +752,6 @@ function logInit(){
   host.innerHTML = vLogs_init();
   loadLogs(1);
 }
-    call('child_owner_get').then(function(o){
-      var el = $('#ownerCard'); if (!el || !o || !o.ok) return;
-      var empty = !o.username;
-      el.innerHTML =
-        '<p style="margin:0 0 10px;line-height:1.9">' + (empty
-          ? 'هنوز تنظیم نشده. اگر خالی بماند، هنگام ساخت هر ربات یک اکانت امن <b>خودکار</b> ساخته می‌شود و پیامش به شما نشان داده می‌شود.'
-          : 'این اکانت در همهٔ ربات‌هایی که از این به بعد ساخته می‌شوند نوشته می‌شود. ربات‌های قبلاً ساخته‌شده دست‌نخورده می‌مانند.') + '</p>' +
-        '<label class="lbl">نام کاربری</label><input id="in_own_u" type="text" value="' + esc(o.username || '') + '" placeholder="owner123">' +
-        '<label class="lbl">رمز عبور</label><input id="in_own_p" type="text" value="' + esc(o.password || '') + '" placeholder="••••••••">' +
-        '<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">' +
-          '<button class="btn btn-acc btn-sm" onclick="MX.saveOwner()" style="flex:1">💾 ذخیره</button>' +
-          '<button class="btn btn-ghost btn-sm" onclick="MX.genOwner()" style="flex:1">🎲 ساخت تصادفی</button>' +
-          '<button class="btn btn-ghost btn-sm" onclick="MX.resetOwner()" style="flex:1">↺ خودکار</button>' +
-        '</div>' +
-        (empty ? '' : '<button class="btn btn-ghost btn-sm" style="margin-top:8px" onclick="MX.copyUserOwner()">📋 کپی نام کاربری</button>');
-    });
     call('backup_get').then(function(b){
       if (!b || !b.ok) return;
       var on = !!b.settings.enabled;
@@ -799,13 +805,13 @@ function logInit(){
       '<div class="card"><h3>🏷 قیمت قالب‌ها</h3><div id="pricesCard" style="color:var(--muted);font-size:12px">…</div></div>' +
       '<div class="card"><h3>📜 لاگ‌های اخیر <span id="logFile" style="font-size:10px;color:var(--muted);font-weight:400"></span></h3><div id="logsCard" style="color:var(--muted);font-size:12px">…</div></div>' +
       '<div class="card"><h3>💾 بکاپ خودکار دیتابیس</h3><div id="backupCard" style="color:var(--muted);font-size:12px">…</div></div>' +
+      '<div class="card"><h3>👑 سوپرادمین‌ها</h3><div id="superCard" style="color:var(--muted);font-size:12px">…</div></div>' +
       '<div class="card"><h3>💳 پرداخت</h3>' + gw +
         '<label class="lbl">شمارهٔ کارت</label><input id="in_card" type="text" value="'+esc(d.card_number)+'">' +
         '<label class="lbl">صاحب کارت</label><input id="in_owner" type="text" value="'+esc(d.card_owner)+'">' +
         '<label class="lbl">قیمت هر اسلات (تومان)</label><input id="in_price" type="number" value="'+esc(d.limit_price)+'">' +
         '<button class="btn btn-acc btn-sm" style="margin-top:14px" onclick="MX.savePayment()">💾 ذخیره تنظیمات پرداخت</button>' +
       '</div>' +
-      '<div class="card"><h3>🏢 اکانت سازندهٔ پنل</h3><div id="ownerCard" style="color:var(--muted);font-size:12px">…</div></div>' +
       '<div class="card"><h3>🔑 کد پذیرندهٔ درگاه‌ها</h3>' +
         '<p class="hint" style="margin:0 0 10px">بدون ثبت این کدها، روش پرداخت به کاربر نشان داده نمی‌شود. اطلاعات فقط روی سرور شما ذخیره می‌شود.</p>' +
         '<label class="lbl">کد پذیرندهٔ زرین‌پال</label><input id="in_zarin" type="text" value="'+esc(d.zarin_merchant||'')+'" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">' +
@@ -888,14 +894,31 @@ window.MX = {
   lim: function(u, n){ call('user_set_limit', {method:'POST', data:{user_id:u, limit:n}}).then(function(d){ toast(d.ok?'سقف جدید: '+fmt(n):(d.msg||'خطا')); render(); }); },
   adm: function(u, v){ call('user_toggle_admin', {method:'POST', data:{user_id:u, v:v}}).then(function(d){ toast(d.ok?'انجام شد ✅':(d.msg||'خطا')); render(); }); },
   allow: function(u, v){ call('user_toggle_allow', {method:'POST', data:{user_id:u, v:v}}).then(function(d){ toast(d.ok?'انجام شد ✅':(d.msg||'خطا')); render(); }); },
+  superAdd: function(){
+    var v = parseInt((($('#in_super')||{}).value) || '0', 10);
+    if (!v || v <= 0) return bad('آیدی عددی تلگرام را درست وارد کنید');
+    call('super_add', {method:'POST', data:{user_id:v}}).then(function(d){
+      if (d.ok) { ok('سوپرادمین اضافه شد ✅'); render(); } else bad(d.msg || 'خطا');
+    });
+  },
+  superRemove: function(id){
+    askConfirm('حذف سوپرادمین؟', 'این آیدی دیگر دسترسی کامل به ربات‌ساز (و این پنل) ندارد.', function(){
+      call('super_remove', {method:'POST', data:{user_id:id}}).then(function(d){
+        if (d.ok) { ok('حذف شد ✅'); render(); } else bad(d.msg || 'خطا');
+      });
+    });
+  },
   gw: function(k, v, el){ el.classList.toggle('on'); call('settings_set', {method:'POST', data:{k:'gateway', key:k, v:v}}).then(function(d){ toast(d.ok?'ذخیره شد ✅':(d.msg||'خطا')); haptic(); }); },
   setS: function(k, v, el){ el.classList.toggle('on'); call('settings_set', {method:'POST', data:{k:k, v:String(v)}}).then(function(d){ toast(d.ok?'ذخیره شد ✅':(d.msg||'خطا')); haptic(); }); },
   userBots: function(uid, name){
     markDetail('userBots');
     loading();
-    call('bots_list').then(function(d){
+    // فیلتر سمت سرور: قبلاً کل صفحهٔ اول bots_list گرفته و در مرورگر فیلتر
+    // می‌شد؛ ربات کاربرانی که خارج از صفحهٔ اول بودند «رباتی ندارد» نشان
+    // داده می‌شد. حالا owner_id را به API می‌دهیم تا شمارش و فهرست درست باشد.
+    call('bots_list', {data:{user_id:uid}}).then(function(d){
       if (!d.ok) return err(d.msg);
-      var rows = d.bots.filter(function(b){ return Number(b.owner_id) === Number(uid); });
+      var rows = d.bots || [];
       $('#view').innerHTML =
         '<button class="btn btn-ghost btn-sm" onclick="MX.backToUsers()" style="margin-bottom:12px">⬅️ بازگشت</button>' +
         '<div class="card"><h3>🤖 ربات‌های '+esc(name)+' ('+fmt(rows.length)+')</h3>' +
@@ -1034,7 +1057,6 @@ window.MX = {
     });
   },
   copyText: function(t){ copyText(t); },
-  copyUserOwner: function(){ var el = $('#in_own_u'); if (el && el.value) copyText(el.value, 'نام کاربری کپی شد ✅'); },
   copyUser: function(uid){ copyText(String(uid), 'شناسهٔ کاربر کپی شد ✅'); },
   moreBots: function(){ botPage++; loadBotsPage(); },
   moreUsers: function(){ userPage++; loadUsersPage(); },
@@ -1054,29 +1076,6 @@ window.MX = {
       .then(function(){ return call('settings_set', {method:'POST', data:{k:'nowpay_key', v:n}}); })
       .then(function(){ return call('settings_set', {method:'POST', data:{k:'nowpay_ipn', v:ni}}); })
       .then(function(d){ toast(d.ok?'کدها ذخیره شد ✅':(d.msg||'خطا')); haptic(); });
-  },
-  saveOwner: function(){
-    var u = $('#in_own_u').value, p = $('#in_own_p').value;
-    call('settings_set', {method:'POST', data:{k:'child_owner_username', v:u}})
-      .then(function(){ return call('settings_set', {method:'POST', data:{k:'child_owner_password', v:p}}); })
-      .then(function(d){ if (d.ok) { ok('ذخیره شد ✅'); render(); } else bad(d.msg || 'خطا'); });
-  },
-  genOwner: function(){
-    var n = 'owner' + Math.floor(Math.random()*90000 + 10000);
-    var pw = '';
-    var chars = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-    for (var i = 0; i < 14; i++) pw += chars.charAt(Math.floor(Math.random()*chars.length));
-    $('#in_own_u').value = n;
-    $('#in_own_p').value = pw;
-    haptic();
-    ok('ساخته شد — «ذخیره» را بزنید');
-  },
-  resetOwner: function(){
-    askConfirm('بازگشت به حالت خودکار؟', 'اکانت فعلی پاک می‌شود و ربات‌های بعدی اکانت تصادفی می‌گیرند.', function(){
-      call('settings_set', {method:'POST', data:{k:'child_owner_reset', v:'1'}}).then(function(d){
-        if (d.ok) { ok('به حالت خودکار برگشت ✅'); render(); } else bad(d.msg || 'خطا');
-      });
-    });
   },
   saveEta: function(){ var v = $('#in_eta').value; call('settings_set', {method:'POST', data:{k:'maintenance_eta', v:v}}).then(function(d){ toast(d.ok?'ذخیره شد ✅':(d.msg||'خطا')); }); },
   savePayment: function(){
