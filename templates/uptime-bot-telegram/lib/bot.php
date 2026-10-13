@@ -16,6 +16,15 @@ class Bot
     /** @var mixed */
     private $chatId = 0;
 
+    /**
+     * وقتی روشن است، هر پاسخِ این چرخه با کیبوردِ تازهٔ پنل همراه می‌شود.
+     *
+     * دلیل: پنل «کیبورد معمولی» است و برچسب دکمه‌های وضعیت‌محور مقدارِ
+     * جاری را نشان می‌دهد. اگر کیبورد دوباره فرستاده نشود، برچسبِ روی
+     * گوشی کهنه می‌ماند و ادمین فکر می‌کند دکمه کار نکرده است.
+     */
+    private bool $withPanelKeyboard = false;
+
     public function __construct(array $cfg)
     {
         $this->cfg = $cfg;
@@ -24,7 +33,81 @@ class Bot
 
     // ================================================================ ورودی
 
+    /**
+     * نقطهٔ ورودِ هر آپدیت.
+     *
+     * کل این متد در یک لایهٔ ایمنی پیچیده شده: اگر هر بخشی استثنا بدهد،
+     * کاربر یک پیامِ دقیق و خوانا می‌گیرد (بخش + ورودی + علت + فایل:خط)
+     * به‌جای سکوتِ آزاردهنده، و استثنا **بیرون نمی‌رود** تا وب‌هوک ۵۰۰ ندهد
+     * و تلگرام همان آپدیت را بی‌نهایت تکرار نکند.
+     */
     public function handle(array $update): void
+    {
+        try {
+            $this->dispatch($update);
+        } catch (Throwable $e) {
+            $this->reportCrash($e, $update);
+        }
+    }
+
+    /**
+     * گزارش خطا با آگاهی از اینکه دقیقاً کدام بخش و کدام ورودی خراب بود.
+     * اگر chat id و منوی اصلی در دسترس نبودند (مثلاً خطا قبل از شناسایی
+     * کاربر)، فقط لاگ می‌شود و پیامی فرستاده نمی‌شود — چون بی‌مقصد فرستادن
+     * پیام خودش خطای دوم می‌سازد.
+     */
+    private function reportCrash(Throwable $e, array $update): void
+    {
+        $cb = (array)($update['callback_query'] ?? []);
+        $msg = (array)($update['message'] ?? $update['channel_post'] ?? []);
+        $from = (array)($cb['from'] ?? $msg['from'] ?? []);
+        $uid = (int)($from['id'] ?? 0);
+
+        if (!empty($update['callback_query'])) {
+            $stage = 'callback: ' . (string)($cb['data'] ?? '?');
+            $input = (string)($cb['data'] ?? '');
+        } elseif (!empty($update['channel_post'])) {
+            $stage = 'channel_post';
+            $input = (string)($msg['text'] ?? '[غیرمتنی]');
+        } elseif (!empty($update['message'])) {
+            $stage = 'message';
+            $input = (string)($msg['text'] ?? '[غیرمتنی]');
+        } else {
+            $stage = 'update: ' . implode('+', array_keys($update));
+            $input = '';
+        }
+
+        try {
+            // کیبوردِ «راه فرار» در پیامِ خطا تا کاربر بعد از خطا گم نشود.
+            // mainMenu() خودش JSON کیبورد برمی‌گرداند (شامل «❌ انصراف» و
+            // دکمه‌های اصلی)؛ کافی است سطرِ «🏠 منو» را هم به آن اضافه کنیم.
+            $kb = null;
+            if ($uid > 0) {
+                $this->uid = $uid;
+                $this->chatId = (int)($msg['chat']['id'] ?? $cb['message']['chat']['id'] ?? $uid);
+                if ($this->loadUserForMenu($uid) !== null) {
+                    $decoded = json_decode($this->mainMenu(), true);
+                    if (is_array($decoded) && isset($decoded['keyboard']) && is_array($decoded['keyboard'])) {
+                        $decoded['keyboard'][] = [['text' => '🏠 منو']];
+                        $kb = json_encode($decoded, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+                    }
+                }
+            }
+            ErrorReport::handlerError($stage, $input, $e, $uid > 0 ? $uid : null, $kb);
+        } catch (Throwable $ignored) {
+            // حتی مسیرِ گزارش هم شکست خورد ⇒ فقط لاگ خام
+            try { uptimeLog('error', '[handler] report path failed: ' . $e->getMessage()); } catch (Throwable $x) {}
+        }
+    }
+
+    /**
+     * بدنهٔ واقعیِ dispatch (بدون لایهٔ ایمنی).
+     *
+     * `protected` است نه `private` تا تست بتواند یک زیرکلاسِ خراب بسازد و
+     * ثابت کند که handle() استثنا را مهار می‌کند — بدون اینکه لازم باشد
+     * جدول یا تنظیم واقعی را خراب کند.
+     */
+    protected function dispatch(array $update): void
     {
         if (!empty($update['callback_query'])) {
             $this->onCallback($update['callback_query']);
@@ -60,6 +143,26 @@ class Bot
     }
 
     // ================================================================ کاربر
+
+    /**
+     * خواندنِ ساده و «بدون‌خطر» کاربر فقط برای ساخت منویِ دکمهٔ «🏠 منو»
+     * در پیامِ خطا.
+     *
+     * چرا متد جدا و نه ensureUser؟ ensureUser می‌تواند کاربر تازه ثبت کند یا
+     * به‌خاطر سقف ظرفیت null برگرداند؛ هیچ‌کدام در مسیرِ گزارش خطا لازم نیست
+     * و هر دو ممکن است خودشان خطای تازه بسازند. اینجا فقط خوانده می‌شود.
+     */
+    private function loadUserForMenu(int $uid): ?array
+    {
+        try {
+            $row = Db::one('SELECT * FROM `user` WHERE `id` = ?', [$uid]);
+            if (!is_array($row)) return null;
+            $this->u = $row;
+            return $row;
+        } catch (Throwable $ignored) {
+            return null;   // دیتابیس هم خراب است ⇒ فقط پیام خطا، بدون منو
+        }
+    }
 
     private function ensureUser(array $from): ?array
     {
@@ -272,16 +375,9 @@ class Bot
                 $this->send($this->reportText(), $this->mainMenu());
                 return;
             case '/app':
+            case '📱 اپلیکیشن':
                 $this->clearStep();
-                $appUrl = miniAppUrl();
-                if ($appUrl === '') {
-                    $this->send('⚠️ آدرس اپلیکیشن در تنظیمات (base_url یا domain) ست نشده است.', $this->mainMenu());
-                    return;
-                }
-                $this->send(
-                    "📱 <b>اپلیکیشن</b>\n\nوضعیت لحظه‌ای سایت‌ها، نمودارها، رخدادها، دامنه‌ها و رنکینگ — همه در یک اپلیکیشن سریع.\nبا زدن دکمهٔ زیر بازش کنید:",
-                    BotApi::ikb([[['text' => '🚀 باز کردن اپلیکیشن', 'web_app' => ['url' => $appUrl]]]])
-                );
+                $this->showApp();
                 return;
             case '📈 گزارش من':
                 $this->clearStep();
@@ -313,6 +409,31 @@ class Bot
         }
 
         if ($this->addonCommand($cmd, $p)) return;
+
+        // ---- دکمه‌های پنل مدیریت (کیبورد معمولی) ----
+        // همان اکشن‌هایی که قبلاً callback_data داشتند، بدون تکرار منطق:
+        // یک آپدیتِ مصنوعی می‌سازیم و به onCallback می‌دهیم. چون message_id
+        // صفر است، edit() خودش send() می‌کند و کاربر یک پیام تازه می‌بیند.
+        $panelAct = $this->adminPanelAction($cmd);
+        if ($panelAct !== null) {
+            if (!$this->isAdmin()) { $this->unknown(); return; }
+            // کیبوردِ پنل با هر پاسخ دوباره فرستاده می‌شود تا برچسب‌های
+            // وضعیت‌محور («🔔 کندی: روشن ‹تغییر›») و دکمهٔ توقف/ادامه،
+            // مقدار تازهٔ دیتابیس را نشان دهند. بدون این، برچسب روی گوشی
+            // کهنه می‌ماند و ادمین فکر می‌کند دکمه کار نکرده.
+            $this->withPanelKeyboard = true;
+            try {
+                $this->onCallback([
+                    'id'     => '',
+                    'from'   => ['id' => $this->uid],
+                    'message' => ['message_id' => 0, 'chat' => ['id' => $this->chatId, 'type' => 'private'], 'text' => $cmd],
+                    'data'   => $panelAct,
+                ]);
+            } finally {
+                $this->withPanelKeyboard = false;
+            }
+            return;
+        }
 
         switch ($text) {
             case '➕ افزودن سایت':
@@ -824,6 +945,21 @@ class Bot
         }
         if ($base === '') return '';
         return $base . '/status.php?s=' . rawurlencode($token);
+    }
+
+    /**
+     * لینک صفحهٔ وضعیتِ کاربر (همهٔ مانیتورهایش) روی آدرسِ فعال.
+     *
+     * چرا این متد لازم شد؟ پنل قبلاً الگویی مثل «…/status.php?u=؟» نشان می‌داد که
+     * هم توکن نداشت و هم علامت سؤالش عربی بود، پس مستقیماً باز نمی‌شد. حالا
+     * لینک واقعیِ خودِ ادمین ساخته می‌شود و با یک کلیک کار می‌کند.
+     */
+    private function userStatusUrl(): string
+    {
+        $token = (string)($this->u['share_token'] ?? '');
+        $base = effectiveBaseUrl();
+        if ($base === '' || $token === '') return '—';
+        return $base . '/status.php?u=' . rawurlencode($token);
     }
 
     private function revokeShare(int $siteId, int $targetUser): void
@@ -1691,18 +1827,27 @@ class Bot
             // ---------- ادمین: توقف سراسری ----------
             case 'pause': {
                 if (!$this->requireAdmin($msgId)) return;
-                if (Db::getBool('pause_all', false)) { $this->edit($msgId, $this->adminPanelText(), $this->adminPanelMenu()); return; }
+                if (Db::getBool('pause_all', false)) {
+                    $this->edit($msgId, "⏸ چک سراسری همین حالا هم متوقف است.");
+                    return;
+                }
+                $sites = (int)Db::val('SELECT COUNT(*) FROM `site` WHERE `paused` = 0');
                 Db::set('pause_all', '1');
                 Db::set('pause_global_since', date('Y-m-d H:i:s'));
                 Db::logEvent($this->uid, 'pause_global', '');
                 $this->edit($msgId, "⏸ <b>چک سراسری متوقف شد</b>\n\n"
-                    . "هیچ سایتی تا ادامهٔ مجدد بررسی نمی‌شود.\n"
-                    . "مدت توقف در «آمار» لحاظ می‌شود.\n\n" . $this->adminPanelText(), $this->adminPanelMenu());
+                    . "هیچ سایتی تا زدن «▶️ ادامهٔ چک سراسری» بررسی نمی‌شود.\n"
+                    . "مدت توقف در «📊 آمار» لحاظ می‌شود.\n"
+                    . "سایت‌های تحت مانیتور: " . faNum($sites) . "\n\n"
+                    . "برای برگشتن به کل پنل: «🏠 منو» سپس «⚙️ پنل مدیریت».");
                 return;
             }
             case 'resume': {
                 if (!$this->requireAdmin($msgId)) return;
-                if (!Db::getBool('pause_all', false)) { $this->edit($msgId, $this->adminPanelText(), $this->adminPanelMenu()); return; }
+                if (!Db::getBool('pause_all', false)) {
+                    $this->edit($msgId, "▶️ چک سراسری همین حالا هم فعال است.");
+                    return;
+                }
                 $since = Db::get('pause_global_since');
                 $dur = $since ? max(0, time() - strtotime($since)) : 0;
                 $total = Db::getInt('pause_global_total', 0) + $dur;
@@ -1710,24 +1855,38 @@ class Bot
                 Db::set('pause_global_total', (string)$total);
                 Db::set('pause_global_since', '');
                 Db::logEvent($this->uid, 'resume_global', (string)$dur);
-                $this->edit($msgId, "▶️ <b>چک سراسری ادامه یافت</b>\n⌛️ مدت توقف: " . faDuration($dur)
-                    . "\n📈 مجموع مدت توقف: " . faDuration($total) . "\n\n" . $this->adminPanelText(), $this->adminPanelMenu());
+                $this->edit($msgId, "▶️ <b>چک سراسری ادامه یافت</b>\n\n"
+                    . "⌛️ مدت این توقف: " . faDuration($dur) . "\n"
+                    . "📈 مجموع توقف‌های امروز/کل: " . faDuration($total) . "\n\n"
+                    . "⚠️ توجه: بررسی سایت‌ها فقط وقتی ادامه دارد که <b>کرون</b> روی سرور اجرا شود."
+                    . "\n(راهنما: «⏰ کرون چک» در پنل مدیریت)\n\n"
+                    . "برای برگشتن به کل پنل: «🏠 منو» سپس «⚙️ پنل مدیریت».");
                 return;
             }
 
             // ---------- ادمین: تنظیمات ----------
             case 'set': {
                 if (!$this->requireAdmin($msgId)) return;
+                // دکمه‌های «چرخشی» فقط متنِ مربوط به خودشان را برمی‌گردانند.
+                // چون کیبوردِ پنل متنی (reply) است، دکمه‌ها خودشان روی صفحه
+                // می‌مانند؛ پس فرستادن دوبارهٔ کل پنل فقط شلوغی و سردرگمی است.
                 if ($arg === 'notify') {
                     $cur = Db::getBool('notify', true);
                     Db::set('notify', $cur ? '0' : '1');
-                    $this->edit($msgId, $this->adminPanelText(), $this->adminPanelMenu());
+                    $this->edit($msgId, "🔔 <b>اعلان‌های سراسری</b>\n\n"
+                        . "قبل: " . ($cur ? 'روشن' : 'خاموش') . "\n"
+                        . "بعد: <b>" . ($cur ? 'خاموش' : 'روشن') . "</b>\n\n"
+                        . "برای برگشتن به کل پنل: «🏠 منو» سپس «⚙️ پنل مدیریت».");
                     return;
                 }
                 if ($arg === 'notify_slow') {
                     $cur = Db::getBool('notify_slow', true);
                     Db::set('notify_slow', $cur ? '0' : '1');
-                    $this->edit($msgId, $this->adminPanelText(), $this->adminPanelMenu());
+                    $this->edit($msgId, "🐢 <b>اعلان کندی</b>\n\n"
+                        . "قبل: " . ($cur ? 'روشن' : 'خاموش') . "\n"
+                        . "بعد: <b>" . ($cur ? 'خاموش' : 'روشن') . "</b>\n\n"
+                        . "کندی یعنی پاسخ سایت از حد مجاز بیشتر شده ولی قطع نیست.\n\n"
+                        . "برای برگشتن به کل پنل: «🏠 منو» سپس «⚙️ پنل مدیریت».");
                     return;
                 }
                 if ($arg === 'access_mode') {
@@ -1737,7 +1896,23 @@ class Bot
                     Db::set('access_mode', $next);
                     if ($next === 'open') Db::q('UPDATE `user` SET `access` = 1 WHERE `is_admin` = 0');
                     Db::logEvent($this->uid, 'setting', 'access_mode=' . $next);
-                    $this->edit($msgId, $this->adminPanelText(), $this->adminPanelMenu());
+                    $names = ['open' => '🔓 باز', 'code' => '🎟 کد فعال‌سازی', 'paid' => '💳 پرداخت'];
+                    $hint = ['open' => 'همه می‌توانند بدون محدودیت استفاده کنند.',
+                        'code' => 'کاربر باید کد فعال‌سازی وارد کند.',
+                        'paid' => 'کاربر باید اشتراک بخرد.'][$next] ?? '';
+                    $extra = '';
+                    if ($next === 'paid' && Db::getInt('price', 0) <= 0) {
+                        $extra = "\n\n⚠️ <b>قیمت اشتراک تنظیم نشده!</b> از «🛒 قیمت اشتراک» آن را وارد کنید،"
+                            . " وگرنه خرید برای کاربران ممکن نیست.";
+                    }
+                    if ($next === 'paid' && (string)Db::get('card', '') === '') {
+                        $extra .= "\n⚠️ <b>شماره کارت تنظیم نشده!</b> از «💳 شماره کارت» آن را وارد کنید.";
+                    }
+                    $this->edit($msgId, "🔓 <b>حالت دسترسی</b>\n\n"
+                        . "قبل: " . ($names[$cur] ?? $cur) . "\n"
+                        . "بعد: <b>" . ($names[$next] ?? $next) . "</b>\n\n"
+                        . $hint . $extra . "\n\n"
+                        . "برای برگشتن به کل پنل: «🏠 منو» سپس «⚙️ پنل مدیریت».");
                     return;
                 }
                 if ($arg === 'group_mention') {
@@ -1747,7 +1922,15 @@ class Bot
                     Db::set('group_mention', $next);
                     Db::exec('UPDATE `chat_hub` SET `mention` = ?', [$next]);
                     Db::logEvent($this->uid, 'setting', 'group_mention=' . $next);
-                    $this->edit($msgId, $this->adminPanelText(), $this->adminPanelMenu());
+                    $names = ['none' => '🚫 بدون منشن', 'admins' => '👥 فقط ادمین‌ها', 'all' => '👥 همهٔ اعضا'];
+                    $hint = ['none' => 'هیچ‌کس در گروه منشن نمی‌شود.',
+                        'admins' => 'فقط ادمین‌های گروه منشن می‌شوند.',
+                        'all' => 'همهٔ اعضای گروه منشن می‌شوند (پیام شلوغ می‌شود).'][$next] ?? '';
+                    $this->edit($msgId, "🗣 <b>منشن در گروه</b>\n\n"
+                        . "قبل: " . ($names[$cur] ?? $cur) . "\n"
+                        . "بعد: <b>" . ($names[$next] ?? $next) . "</b>\n\n"
+                        . $hint . "\n\n"
+                        . "برای برگشتن به کل پنل: «🏠 منو» سپس «⚙️ پنل مدیریت».");
                     return;
                 }
                 $labels = [
@@ -2382,16 +2565,19 @@ class Bot
             . "\n\n<b>🔗 آدرس‌های فعال</b>\n"
             . "▫️ آدرس پایه: <code>" . tgH(effectiveBaseUrl() ?: '— تنظیم نشده —') . "</code>\n"
             . "▫️ اپلیکیشن: <code>" . tgH(miniAppUrl() ?: '—') . "</code>\n"
-            . "▫️ صفحهٔ وضعیت: <code>" . tgH((function () {
-                $b = effectiveBaseUrl();
-                return $b !== '' ? $b . '/status.php?u=&lt;توکن&gt;' : '—';
-            })()) . "</code>";
+            // لینک واقعیِ همین ادمین (نه یک الگوی خالی): تا با یک کلیک باز شود
+            . "▫️ صفحهٔ وضعیت: <code>" . tgH($this->userStatusUrl()) . "</code>";
     }
 
     private function cronText(): string
     {
         $dir = UPTIME_ROOT;
-        $base = rtrim((string)($this->cfg['base_url'] ?? ''), '/');
+        // آدرس واقعی سایت (اولویت با تنظیم پنل) تا دستور کرون قابل کپی باشد
+        $base = effectiveBaseUrl();
+        if ($base === '') {
+            $base = rtrim((string)($this->cfg['base_url'] ?? ''), '/');
+            if ($base === '') $base = 'https://' . trim((string)($this->cfg['domain'] ?? ''));
+        }
         $secret = hash('sha256', $this->token . '_uptime_cron_secret');
         return "⏰ <b>راه‌اندازی کرون چک (هر ۲۰ ثانیه)</b>\n\n"
             . "بدون کرون، چک‌ها فقط هنگام بازدید صفحهٔ وضعیت انجام می‌شوند.\n\n"
@@ -2437,13 +2623,55 @@ class Bot
 
     // ================================================================ منوها
 
+    /**
+     * پاسخ به «📱 اپلیکیشن» و به دستور /app — هر دو دقیقاً یک مسیر.
+     *
+     * ── دکمهٔ بازکننده باید «اینلاین» بماند؛ روی خودِ کیبورد نگذارش ──
+     *
+     * چرا؟ هر دو حالت قبلاً امتحان شده و روی سرور واقعی شکست خورده:
+     *
+     *   ۱) دکمه روی کیبورد معمولی (ReplyKeyboard) با فیلد web_app:
+     *      تلگرام در پاسخ به باز کردن اپ خطای ارتباطی می‌داد و صفحه با
+     *      initDataِ بی‌اعتبار بالا می‌آمد؛ appapi.php جواب 401 می‌گرفت و
+     *      کاربر فقط «احراز هویت انجام نشد» می‌دید. یعنی دکمه عملاً مرده بود.
+     *
+     *   ۲) دکمهٔ اینلاین (همین کد): محیط WebApp را با initData معتبر بالا
+     *      می‌آورد و احراز هویت درست کار می‌کند.
+     *
+     * پس این دکمه را به `BotApi::kb()` منتقل نکن و فیلد web_app را به سطر
+     * «📱 اپلیکیشن» در mainMenu() برنگردان؛ همان خطای بالا برمی‌گردد و
+     * مسیر دکمه و /app دوباره از هم جدا می‌شوند.
+     *
+     * هزینه‌اش دو ضربه است، ولی دو ضربهٔ سالم بهتر از یک ضربهٔ که اپ را
+     * باز می‌کند و نمی‌تواند وارد شود.
+     */
+    private function showApp(): void
+    {
+        $appUrl = miniAppUrl();
+        if ($appUrl === '') {
+            $this->send('⚠️ آدرس اپلیکیشن در تنظیمات (base_url یا domain) ست نشده است.', $this->mainMenu());
+            return;
+        }
+        $this->send(
+            "📱 <b>اپلیکیشن</b>\n\nوضعیت لحظه‌ای سایت‌ها، نمودارها، رخدادها، دامنه‌ها و رنکینگ — همه در یک اپلیکیشن سریع.\n"
+            . "با زدن دکمهٔ زیر بازش کنید:",
+            // ↓ این دکمه «اینلاین» است و باید بماند — دلیلش بالای همین تابع.
+            BotApi::ikb([[['text' => '🚀 باز کردن اپلیکیشن', 'web_app' => ['url' => $appUrl]]]])
+        );
+    }
+
     private function mainMenu(): string
     {
         $paused = $this->u && (int)$this->u['paused'] === 1;
         $appUrl = miniAppUrl();
         $rows = [];
         if ($appUrl !== '') {
-            $rows[] = [['text' => '📱 اپلیکیشن', 'web_app' => ['url' => $appUrl]]];
+            // این دکمه عمداً «متنی» است، نه web_app.
+            // اگر web_app را همین‌جا برگردانی، تلگرام در باز کردن اپ خطای
+            // ارتباطی می‌دهد و initData نامعتبر می‌شود ⇒ «احراز هویت انجام
+            // نشد» (حالا اپلیکیشن در سرور واقعی همین مشکل را داشت).
+            // درست: متن می‌ماند و showApp() دکمهٔ اینلاینِ واقعی را می‌فرستد.
+            $rows[] = [['text' => '📱 اپلیکیشن']];
         }
         $rows[] = [['text' => '➕ افزودن سایت'], ['text' => '📋 سایت‌های من']];
         $rows[] = [['text' => '📊 رنکینگ'], ['text' => '📈 گزارش من']];
@@ -2481,25 +2709,108 @@ class Bot
 
     private function adminPanelMenu(): string
     {
-        return BotApi::ikb([
-            [['text' => '🔢 سقف کاربران', 'callback_data' => 'set:max_users'], ['text' => '🌐 سقف سایت', 'callback_data' => 'set:max_sites']],
-            [['text' => '💎 سقف سایت ویژه', 'callback_data' => 'set:vip_max_sites'], ['text' => '⏱ فاصلهٔ چک', 'callback_data' => 'set:check_interval']],
-            [['text' => '🚨 آستانهٔ هشدار', 'callback_data' => 'set:fail_threshold'], ['text' => '🔓 حالت دسترسی', 'callback_data' => 'set:access_mode']],
-            [['text' => '🛒 قیمت اشتراک', 'callback_data' => 'set:price'], ['text' => '💳 شماره کارت', 'callback_data' => 'set:card']],
-            [['text' => '📆 مدت اشتراک (روز)', 'callback_data' => 'set:vip_days'], ['text' => '👥 سقف مانیتور گروه', 'callback_data' => 'set:group_max_sites']],
-            [['text' => '🔐 هشدار گواهی (روز)', 'callback_data' => 'set:ssl_warn_days'], ['text' => '🌐 هشدار دامنه (روز)', 'callback_data' => 'set:domain_warn_days']],
-            [['text' => '📇 سقف دامنه', 'callback_data' => 'set:max_domains'], ['text' => '🔕 اعلان کندی', 'callback_data' => 'set:notify_slow']],
-            [['text' => '🌐 آدرس اپلیکیشن (base_url)', 'callback_data' => 'set:base_url'], ['text' => '🌐 دامنه ربات', 'callback_data' => 'set:domain']],
-            [['text' => Db::getBool('notify', true) ? '🔕 خاموش کردن اعلان‌ها' : '🔔 روشن کردن اعلان‌ها', 'callback_data' => 'set:notify'],
-             ['text' => '🗣 منشن در گروه', 'callback_data' => 'set:group_mention']],
-            [['text' => Db::getBool('pause_all', false) ? '▶️ ادامهٔ چک سراسری' : '⏸ توقف سراسری چک', 'callback_data' => Db::getBool('pause_all', false) ? 'resume' : 'pause']],
-            [['text' => '🎟 کدهای فعال‌سازی', 'callback_data' => 'codes'], ['text' => '📊 آمار', 'callback_data' => 'astats']],
-            [['text' => '🏦 درگاه‌های پرداخت', 'callback_data' => 'pgws_list'], ['text' => '⏰ کرون چک', 'callback_data' => 'cron']],
-            [['text' => '📣 همگانی', 'callback_data' => 'abroadcast'], ['text' => '💳 پرداخت‌های در انتظار', 'callback_data' => 'apays']],
-            [['text' => '🧩 وضعیت افزونه‌ها', 'callback_data' => 'sysstat'], ['text' => '💰 پرداخت همکاران', 'callback_data' => 'apayouts']],
-            [['text' => '🔙 بازگشت', 'callback_data' => 'menu']],
-        ]);
+        return BotApi::kb(self::adminPanelRows());
     }
+
+    /**
+     * سطرهای پنل مدیریت به‌صورت «کیبورد معمولی» (reply keyboard).
+     *
+     * چرا reply و نه inline؟ دکمه‌های شیشه‌ای (inline) روی بعضی کلاینت‌ها یا
+     * وقتی پیام قدیمی شده بد رفتار می‌کنند و کاربر چیزی نمی‌بیند. با کیبورد
+     * معمولی، دکمه یک متنِ واقعی است که handleCommand آن را می‌فهمد.
+     *
+     * @return array<int,array<int,array{text:string}>>
+     */
+    private static function adminPanelRows(): array
+    {
+        // دکمه‌های «چرخشی» وضعیت فعلی را در برچسبشان نشان می‌دهند.
+        // بدون این، برچسب ثابت می‌ماند و ادمین فکر می‌کند دکمه کار نکرده —
+        // چون نمی‌فهمد زدنش چه چیزی را عوض کرده یا الان وضعیت چیست.
+        $accessLabel = ['open' => '🔓 باز', 'code' => '🎟 کد', 'paid' => '💳 پرداخت'][Db::get('access_mode', 'open')] ?? '🔓 دسترسی';
+        $mentionLabel = ['none' => '🚫 بدون', 'admins' => '👥 ادمین', 'all' => '👥 همه'][Db::get('group_mention', 'admins')] ?? '🗣 منشن';
+        $slowOn = Db::getBool('notify_slow', true);
+        $notifyOn = Db::getBool('notify', true);
+        return [
+            [['text' => '🔢 سقف کاربران'], ['text' => '🌐 سقف سایت']],
+            [['text' => '💎 سقف سایت ویژه'], ['text' => '⏱ فاصلهٔ چک']],
+            [['text' => '🚨 آستانهٔ هشدار'], ['text' => $accessLabel . ' ‹حالت دسترسی›']],
+            [['text' => '🛒 قیمت اشتراک'], ['text' => '💳 شماره کارت']],
+            [['text' => '📆 مدت اشتراک (روز)'], ['text' => '👥 سقف مانیتور گروه']],
+            [['text' => '🔐 هشدار گواهی (روز)'], ['text' => '🌐 هشدار دامنه (روز)']],
+            [['text' => '📇 سقف دامنه'],
+             ['text' => ($slowOn ? '🔔 کندی: روشن' : '🔕 کندی: خاموش') . ' ‹تغییر›']],
+            [['text' => '🌐 آدرس اپلیکیشن'], ['text' => '🌐 دامنه ربات']],
+            [['text' => ($notifyOn ? '🔔 اعلان‌ها: روشن' : '🔕 اعلان‌ها: خاموش') . ' ‹تغییر›'],
+             ['text' => $mentionLabel . ' ‹منشن گروه›']],
+            [['text' => Db::getBool('pause_all', false) ? '▶️ ادامهٔ چک سراسری' : '⏸ توقف سراسری چک']],
+            [['text' => '🎟 کدهای فعال‌سازی'], ['text' => '📊 آمار']],
+            [['text' => '🏦 درگاه‌های پرداخت'], ['text' => '⏰ کرون چک']],
+            [['text' => '📣 همگانی'], ['text' => '💳 پرداخت‌های در انتظار']],
+            [['text' => '🧩 وضعیت افزونه‌ها'], ['text' => '💰 پرداخت همکاران']],
+            [['text' => '🏠 منو']],
+        ];
+    }
+
+    /**
+     * نگاشت متنِ دکمه‌های پنل مدیریت به همان اکشن‌هایی که قبلاً callback_data
+     * بودند — تا منطق موجود بدون تکرار استفاده شود.
+     *
+     * @return string|null اکشن، یا null اگر متن، دکمهٔ پنل نبود
+     */
+    private function adminPanelAction(string $text): ?string
+    {
+        // برچسب‌های وضعیت‌محور («🔔 کندی: روشن ‹تغییر›») پویا هستند، پس اول
+        // با الگو تشخیص داده می‌شوند. علاوه بر این، برچسب‌های ثابت و نسخهٔ
+        // قدیمی‌ترشان هم پذیرفته می‌شود تا پیام‌های قدیمی روی کیبوردِ کاربر
+        // همچنان کار کنند.
+        $patterns = [
+            '/^🔔?\s*کندی:/u'  => 'set:notify_slow',
+            '/^🔕?\s*کندی:/u'  => 'set:notify_slow',
+            '/^🔔 اعلان‌ها:/u' => 'set:notify',
+            '/^🔕 اعلان‌ها:/u' => 'set:notify',
+            '/^(🔓|🎟|💳)\s*(باز|کد|پرداخت)?\s*‹حالت دسترسی›/u' => 'set:access_mode',
+            '/^(🚫 بدون|👥 ادمین|👥 همه)\s*‹منشن گروه›/u'        => 'set:group_mention',
+        ];
+        foreach ($patterns as $re => $act) {
+            if (preg_match($re, $text)) return $act;
+        }
+
+        static $map = [
+            '🔢 سقف کاربران'          => 'set:max_users',
+            '🌐 سقف سایت'             => 'set:max_sites',
+            '💎 سقف سایت ویژه'        => 'set:vip_max_sites',
+            '⏱ فاصلهٔ چک'             => 'set:check_interval',
+            '🚨 آستانهٔ هشدار'         => 'set:fail_threshold',
+            '🔓 حالت دسترسی'          => 'set:access_mode',
+            '🛒 قیمت اشتراک'          => 'set:price',
+            '💳 شماره کارت'           => 'set:card',
+            '📆 مدت اشتراک (روز)'     => 'set:vip_days',
+            '👥 سقف مانیتور گروه'     => 'set:group_max_sites',
+            '🔐 هشدار گواهی (روز)'     => 'set:ssl_warn_days',
+            '🌐 هشدار دامنه (روز)'     => 'set:domain_warn_days',
+            '📇 سقف دامنه'            => 'set:max_domains',
+            '🔕 اعلان کندی'            => 'set:notify_slow',
+            '🔔 اعلان کندی'            => 'set:notify_slow',
+            '🌐 آدرس اپلیکیشن'        => 'set:base_url',
+            '🌐 آدرس اپلیکیشن (base_url)' => 'set:base_url',
+            '🌐 دامنه ربات'           => 'set:domain',
+            '🔕 خاموش کردن اعلان‌ها'   => 'set:notify',
+            '🔔 روشن کردن اعلان‌ها'    => 'set:notify',
+            '🗣 منشن در گروه'         => 'set:group_mention',
+            '⏸ توقف سراسری چک'        => 'pause',
+            '▶️ ادامهٔ چک سراسری'      => 'resume',
+            '🎟 کدهای فعال‌سازی'      => 'codes',
+            '📊 آمار'                 => 'astats',
+            '🏦 درگاه‌های پرداخت'      => 'pgws_list',
+            '⏰ کرون چک'              => 'cron',
+            '📣 همگانی'               => 'abroadcast',
+            '💳 پرداخت‌های در انتظار'  => 'apays',
+            '🧩 وضعیت افزونه‌ها'       => 'sysstat',
+            '💰 پرداخت همکاران'       => 'apayouts',
+        ];
+        return $map[$text] ?? null;
+    }
+
 
     private function sitesListMenu(): string
     {
@@ -2656,11 +2967,44 @@ class Bot
         tgSend($this->chatId, $text, $extra);
     }
 
+    /**
+     * ویرایش پیام — ولی فقط وقتی کیبوردِ مقصد واقعاً «اینلاین» باشد.
+     *
+     * چرا این شرط لازم است؟ تقریباً هر فراخوانیِ edit() از مسیر onCallback
+     * می‌آید، یعنی message_id متعلق به پیامی است که دکمهٔ اینلاین دارد.
+     * تلگرام اجازه نمی‌دهد editMessageText کیبوردِ اینلاین را با یک
+     * ReplyKeyboardMarkup عوض کند و ۴۰۰ با پیام «inline keyboard expected»
+     * برمی‌گرداند. چون نتیجهٔ edit بررسی نمی‌شد، کاربر هیچ پاسخی نمی‌گرفت:
+     * نه متن عوض می‌شد، نه کیبورد تازه‌ای می‌رفت — دکمه کاملاً مرده بود.
+     *
+     * sendMessage هر دو نوع کیبورد را قبول می‌کند، پس برای کیبوردِ معمولی
+     * مسیرِ درست «پیام تازه» است نه ویرایش پیامِ قبلی. همین مسیر از قبل هم
+     * برای کاربرِ بدون دسترسی (restrictedMenu) استفاده می‌شد.
+     *
+     * وقتی $kb = null است کیبورد دست‌نخورده می‌ماند، پس ویرایشِ متنِ خالص
+     * همچنان درست کار می‌کند.
+     */
     private function edit(int $msgId, string $text, ?string $kb = null): void
     {
+        // کیبوردِ پنل باید تازه باشد تا برچسب‌های وضعیت‌محور مقدارِ جدید را
+        // نشان دهند؛ ولی فقط وقتی خودِ این فراخوانی کیبوردی تعیین نکرده
+        // (پیام‌هایی مثل «در حال ورود مقدار» کیبورد اختصاصیِ خودشان دارند).
+        if ($kb === null && $this->withPanelKeyboard && $this->isAdmin()) {
+            $kb = $this->adminPanelMenu();
+        }
         if ($msgId <= 0) { $this->send($text, $kb); return; }
+        // قاعده: ویرایش فقط با کیبوردِ اینلاینِ اثبات‌شده؛ بقیه ⇒ ارسال پیام تازه.
+        // (JSON خراب هم «اثبات‌نشده» حساب می‌شود، چون sendMessage خطا نمی‌دهد.)
+        if ($kb !== null && !self::isInlineMarkup($kb)) { $this->send($text, $kb); return; }
         $extra = [];
         if ($kb !== null) $extra['reply_markup'] = $kb;
         BotApi::edit($this->token, $this->chatId, $msgId, $text, $extra);
+    }
+
+    /** آیا این رشتهٔ JSON یک InlineKeyboardMarkup است؟ (تنها نوعی که editMessageText می‌پذیرد) */
+    private static function isInlineMarkup(string $kb): bool
+    {
+        $d = json_decode($kb, true);
+        return is_array($d) && isset($d['inline_keyboard']) && is_array($d['inline_keyboard']);
     }
 }

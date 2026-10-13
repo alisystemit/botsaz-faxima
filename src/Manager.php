@@ -420,7 +420,7 @@ class Manager
                 // logs/ هم لاگ و قفل دورهٔ توسعه را دارد (۱+ مگابایت) که هرگز نباید
                 // به ربات جدید کپی شود؛ .htaccess خودش هم با FilesMatch بسته می‌شود
                 // و bots/.htaccess کل پوشهٔ logs/ را می‌بندد.
-                'exclude' => ['install.sh', 'SOLUTION_SUMMARY.md', 'tests/', 'logs/', 'SOURCE.md'],
+                'exclude' => ['install.sh', 'SOLUTION_SUMMARY.md', 'tests/', 'logs/', 'SOURCE.md', '.git', '.gitignore', '.gitattributes'],
                 'cleanup' => ['install.sh', 'install.log'],
             ],
             'pasargad' => [
@@ -451,6 +451,9 @@ class Manager
                 'exclude' => [
                     'tests/', 'vendor/', 'composer.json', 'composer.lock', 'phpstan.neon', 'SOURCE.md',
                     'data/bot.sqlite', 'data/.migrate.lock', 'data/worker.lock', 'data/logs/', 'data/receipts/', 'data/cache/',
+                    // نصّاب‌ها و ریپوی تودرتو: هر رباتِ ساخته‌شده نباید نصب‌کننده یا
+                    // تاریخچهٔ گیتِ قالب را حمل کند (حجم + ابهام).
+                    'install.sh', 'setup.sh', 'list_files.sh', '.git', '.gitignore', '.gitattributes',
                 ],
                 'cleanup' => ['config.example.php'],
                 // فایل‌هایی که خودِ نصب (مایگریشن) می‌سازد. وجودشان بعد از نصب

@@ -25,11 +25,11 @@ $tmp = sys_get_temp_dir() . '/botsaz_test_' . time();
 @mkdir($tmp . '/faxima', 0777, true);
 copy(Manager::templateDir('faxima') . '/config.php', $tmp . '/faxima/config.php');
 $cfgPortTest = array_merge($cfg, ['db_host' => '127.0.0.1', 'db_port' => 3307]);
-Manager::patchFaximaConfig($tmp . '/faxima', $cfgPortTest, 'botsaz_shop1_abc123', '123456:AAFakeToken', 999001, 'shoptestbot', 'example.com/botsaz-faxima/bots/shop1');
+Manager::patchFaximaConfig($tmp . '/faxima', $cfgPortTest, 'botsaz_shop1_abc123', '1234567890:AAFakeToken0123456789012345678901234', 999001, 'shoptestbot', 'example.com/botsaz-faxima/bots/shop1');
 $patched = file_get_contents($tmp . '/faxima/config.php');
 $checks = [
     "dbname' => botsaz_shop1_abc123" => str_contains($patched, "\$dbname     = 'botsaz_shop1_abc123'") || str_contains($patched, "\$dbname = 'botsaz_shop1_abc123'"),
-    'APIKEY token' => str_contains($patched, '123456:AAFakeToken'),
+    'APIKEY token' => str_contains($patched, '1234567890:AAFakeToken'),
     'adminnumber' => str_contains($patched, '999001'),
     'domainhosts' => str_contains($patched, 'example.com/botsaz-faxima/bots/shop1'),
     'usernamebot' => str_contains($patched, 'shoptestbot'),
@@ -56,7 +56,7 @@ echo "mirza table secret: " . (strlen(Manager::mirzaTableSecret($t)) === 64 ? 'O
 $tmp2 = sys_get_temp_dir() . '/botsaz_test2_' . time();
 @mkdir($tmp2 . '/mirza', 0777, true);
 copy(Manager::templateDir('mirza') . '/config.php', $tmp2 . '/mirza/config.php');
-Manager::patchMirzaConfig($tmp2 . '/mirza', $cfg, 'botsaz_vpn1_abc123', '123456:AAFakeToken', 999001, 'vpntestbot', 'example.com/botsaz-faxima/bots/vpn1');
+Manager::patchMirzaConfig($tmp2 . '/mirza', $cfg, 'botsaz_vpn1_abc123', '1234567890:AAFakeToken0123456789012345678901234', 999001, 'vpntestbot', 'example.com/botsaz-faxima/bots/vpn1');
 $patched2 = file_get_contents($tmp2 . '/mirza/config.php');
 $leftover = [];
 foreach (['{DATABASE_NAME}', '{DATABASE_USERNAME}', '{DATABASE_PASSOWRD}', '{BOT_TOKEN}', '{ADMIN_#ID}', '{DOMAIN.COM/PATH/BOT}', '{BOT_USERNAME}'] as $ph) {

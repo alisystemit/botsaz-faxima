@@ -29,7 +29,7 @@ function section(string $t): void
     echo "\n--- {$t} ---\n";
 }
 
-$TOKEN = '123456:AAFakeTokenFakeTokenFakeTokenXX';
+$TOKEN = '1234567890:AAFakeToken0123456789012345678901234';
 
 /**
  * در محیط واقعی این تابع در bot.php تعریف شده و توکن رمزنگاری‌شده را باز می‌کند.

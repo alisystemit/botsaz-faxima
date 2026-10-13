@@ -340,8 +340,8 @@ Next steps:
 
   2) Send /start to the bot.
 
-  3) To sell agency panels to buyers without their own panel, set the panel API key
-     (config.php → panel.api_key).
+  3) To sell agency panels, configure the panel-creating account
+     (config.php → panel.owner_username / panel.owner_password).
 
   4) For manual payments, enter your card details
      (config.php → store.card_number / card_owner).

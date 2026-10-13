@@ -172,16 +172,16 @@ function dryRunOne(array $cfg, Store $store, string $type, ?string $slugArg): in
     try {
         switch ($type) {
             case 'faxima':
-                Manager::patchFaximaConfig($botDir, $cfg, $fakeDb, '123:FakeTokenFakeTokenFakeToken', 999001, 'testbot', $domainPath);
+                Manager::patchFaximaConfig($botDir, $cfg, $fakeDb, '1234567890:FakeTokenFakeTokenFakeTokenFakeTokenFake1', 999001, 'testbot', $domainPath);
                 break;
             case 'mirza':
-                Manager::patchMirzaConfig($botDir, $cfg, $fakeDb, '123:FakeTokenFakeTokenFakeToken', 999001, 'testbot', $domainPath);
+                Manager::patchMirzaConfig($botDir, $cfg, $fakeDb, '1234567890:FakeTokenFakeTokenFakeTokenFakeTokenFake1', 999001, 'testbot', $domainPath);
                 break;
             case 'uptime':
-                Manager::patchUptimeConfig($botDir, $cfg, $fakeDb, '123:FakeTokenFakeTokenFakeToken', 999001, 'testbot', $domainPath, $baseUrl);
+                Manager::patchUptimeConfig($botDir, $cfg, $fakeDb, '1234567890:FakeTokenFakeTokenFakeTokenFakeTokenFake1', 999001, 'testbot', $domainPath, $baseUrl);
                 break;
             case 'pasargad':
-                $res = Manager::writePasargadConfig($botDir, '123:FakeTokenFakeTokenFakeToken', 999001, 'testbot', $baseUrl);
+                $res = Manager::writePasargadConfig($botDir, '1234567890:FakeTokenFakeTokenFakeTokenFakeTokenFake1', 999001, 'testbot', $baseUrl);
                 $staticSecret = (string)($res['secret'] ?? '');
                 echo "\n";
                 echo "        (secret ساخته‌شده: " . strlen($staticSecret) . " کاراکتر، crypto_key: " . strlen((string)($res['crypto'] ?? '')) . " کاراکتر)\n";
@@ -313,7 +313,7 @@ function dryRunOne(array $cfg, Store $store, string $type, ?string $slugArg): in
 
     // ===== [5h] رمزهای وبهوک/جدول قابل بازتولید باشند =====
     echo "   [5h] بررسی رمزها... ";
-    $tok = '123:FakeTokenFakeTokenFakeToken';
+    $tok = '1234567890:FakeTokenFakeTokenFakeTokenFakeTokenFake1';
     $whSecret = Manager::webhookSecret($type, $tok, $staticSecret);
     $tableFile = (string)($spec['table'] ?? '');
     $tableSecret = $tableFile !== '' ? Manager::tableSecret($type, $tok) : '';
