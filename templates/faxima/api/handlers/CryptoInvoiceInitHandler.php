@@ -36,11 +36,28 @@ final class CryptoInvoiceInitHandler extends BaseHandler
             'extra_time'    => 'getextratimeuser',
             'extra_volume'  => 'getextravolumeuser',
         ];
-        if ($purchaseUser !== null && $purchaseUser !== '') {
-            $amount = $this->serverPurchaseDueAmount($purchaseUser);
-        } elseif ($pendingKind !== '' && isset($serverPendingActionMap[$pendingKind])) {
-            $amount = $this->serverPendingActionAmount($serverPendingActionMap[$pendingKind]);
-            $pendingOne = (string) ($this->user['Processing_value_one'] ?? '');
+        $checkoutId = FaoximaInput::string($this->data, 'checkout_id');
+        $ck = null;
+        $ckMethodKey = '';
+        if ($checkoutId !== '' || ($purchaseUser !== null && $purchaseUser !== '') || ($pendingKind !== '' && isset($serverPendingActionMap[$pendingKind]))) {
+            if ($checkoutId === '') {
+                if ($purchaseUser !== null && $purchaseUser !== '') {
+                    $ckMethodKey = 'getconfigafterpay|' . $purchaseUser;
+                } else {
+                    $ckMethodKey = $serverPendingActionMap[$pendingKind] . '|' . (string) ($this->user['Processing_value_one'] ?? '');
+                }
+            }
+            $ck = $this->serverCheckoutForPayment($checkoutId, $ckMethodKey);
+            $amount = (int) $ck['external_amount'];
+            [$ckTow, $ckOne] = rx_ck_key_parts((string) $ck['op_key']);
+            if ($ckTow === 'getconfigafterpay') {
+                $purchaseUser = (string) $ck['target'];
+                $pendingKind = '';
+            } else {
+                $purchaseUser = null;
+                $pendingKind = array_search($ckTow, $serverPendingActionMap, true) ?: '';
+                $pendingOne = $ckOne;
+            }
         }
 
         if ($amount <= 0) {
@@ -57,6 +74,10 @@ final class CryptoInvoiceInitHandler extends BaseHandler
             FaoximaResponse::fail(422, '❌ ارز انتخابی پشتیبانی نمی‌شود');
         }
 
+
+        if ($ck !== null) {
+            $ck = $this->validateCheckoutForPayment($ck, 'crypto_' . strtolower($currency));
+        }
 
         update('user', 'Processing_value', $amount, 'id', $this->user['id']);
         $this->user['Processing_value'] = $amount;
@@ -117,10 +138,17 @@ final class CryptoInvoiceInitHandler extends BaseHandler
             $msg = self::REASON_FA[$err] ?? ('خطا در ساخت فاکتور: ' . $err);
             if ($err === 'below-min' && isset($result['min'])) {
                 $msg = '❌ حداقل مبلغ برای این روش ' . number_format((int)$result['min']) . ' تومان است';
+                if ($ck !== null && (int) $ck['wallet_amount'] > 0) {
+                    $msg = '❌ مبلغ باقی‌مانده برای پرداخت خارجی (' . number_format($amount) . ' تومان) کمتر از حداقل این روش (' . number_format((int)$result['min']) . ' تومان) است. لطفاً روش دیگری انتخاب کنید یا بدون استفاده از کیف پول پرداخت کنید.';
+                }
             } elseif ($err === 'above-max' && isset($result['max'])) {
                 $msg = '❌ حداکثر مبلغ برای این روش ' . number_format((int)$result['max']) . ' تومان است';
             }
             FaoximaResponse::fail(422, $msg);
+        }
+
+        if ($ck !== null) {
+            rx_ck_attach_payment((string) $ck['checkout_id'], (string) $result['order_id'], 'crypto_' . strtolower($currency));
         }
 
         $coinDecimals = (int)($supported[$currency]['decimals'] ?? 6);

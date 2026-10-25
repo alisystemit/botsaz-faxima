@@ -3458,3 +3458,23 @@ div.card-body.info-card > div.info-card-body:nth-of-type(2) > div.info-stats:nth
 #app a {
     -webkit-user-drag: none;
 }
+
+.btn.btn-wrap,
+.btn.btn-wrap > span:not(.arrow):not(.spinner) {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
+    word-break: normal;
+}
+.btn.btn-wrap {
+    box-sizing: border-box;
+    width: 100%;
+    max-width: 100%;
+    height: auto;
+    min-height: 54px;
+    padding: 12px 16px;
+    justify-content: center;
+    text-align: center;
+    line-height: 1.8;
+}

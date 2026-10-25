@@ -990,7 +990,7 @@ class SourceUpdate
             }
         }
         @chmod($dst, 0644);
-        return true;
+        return '';
     }
 
     /**

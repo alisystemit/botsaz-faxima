@@ -887,7 +887,7 @@ if [ "$TPL_ONLY" -eq 1 ]; then
     info "DRY-RUN: would run php tools/sync_templates.php in $LIVE_DIR"
   else
     _sync_php="${PHP_BIN:-php}"
-    if ( cd "$LIVE_DIR" && set -o pipefail && "$_sync_php" tools/sync_templates.php 2>&1 | tail -20 ); then
+    if ( cd "$LIVE_DIR" && set -o pipefail && "$_sync_php" tools/sync_templates.php --force 2>&1 | tail -20 ); then
       ok "templates/ synced from their repos"
     else
       fail "templates sync failed"
@@ -991,7 +991,7 @@ fi
 if [ "$TPL_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
   step "Step 5b: Sync templates from their repos"
   _sync_php="${PHP_BIN:-php}"
-  if ( cd "$LIVE_DIR" && set -o pipefail && "$_sync_php" tools/sync_templates.php 2>&1 | tail -20 ); then
+  if ( cd "$LIVE_DIR" && set -o pipefail && "$_sync_php" tools/sync_templates.php --force 2>&1 | tail -20 ); then
     ok "templates/ synced from their repos"
   else
     warn "templates sync failed – live keeps the previous templates"

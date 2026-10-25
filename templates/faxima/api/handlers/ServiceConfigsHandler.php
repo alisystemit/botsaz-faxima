@@ -24,9 +24,29 @@ final class ServiceConfigsHandler extends BaseHandler
             FaoximaResponse::notFound('Service not found');
         }
 
-        $payload = $svcHandler->buildPayloadFromInvoice($invoice);
+        $requestedType = ServiceHandler::normalizeClientType(FaoximaInput::nullableString($this->data, 'client_type') ?? 'links');
+        $payload = $svcHandler->buildPayloadFromInvoice($invoice, $requestedType);
         if ($payload === null) {
             FaoximaResponse::fail(502, 'Service data unavailable');
+        }
+
+        if ($requestedType !== 'links') {
+            $documents = ServiceHandler::clientDocumentsFromPayload($payload, $requestedType);
+            if (!empty($documents)) {
+                $filenames = [];
+                foreach ($documents as $i => $document) {
+                    $filenames[] = ServiceHandler::clientDocumentFilename($requestedType, (int)$i, count($documents));
+                }
+                FaoximaResponse::ok([
+                    'username'              => (string)($payload['username'] ?? $username),
+                    'configs'               => $documents,
+                    'filenames'             => $filenames,
+                    'subscription_url'      => (string)($payload['subscription_url'] ?? ''),
+                    'count'                 => count($documents),
+                    'client_type'           => $requestedType,
+                    'requested_client_type' => $requestedType,
+                ]);
+            }
         }
 
 
@@ -63,6 +83,8 @@ final class ServiceConfigsHandler extends BaseHandler
             'configs'          => array_values(array_unique($configs)),
             'subscription_url' => (string)($payload['subscription_url'] ?? ''),
             'count'            => count(array_values(array_unique($configs))),
+            'client_type'           => 'links',
+            'requested_client_type' => $requestedType,
         ]);
     }
 
@@ -73,15 +95,16 @@ final class ServiceConfigsHandler extends BaseHandler
             return [];
         }
 
+        $timeoutInfo = function_exists('faoxima_panel_timeout_info') ? faoxima_panel_timeout_info() : ['timeout' => 20, 'connect_timeout' => 8];
         $ch = curl_init($url);
         curl_setopt_array($ch, [
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_FOLLOWLOCATION => true,
-            CURLOPT_TIMEOUT        => 10,
-            CURLOPT_CONNECTTIMEOUT => 5,
+            CURLOPT_TIMEOUT        => (int) $timeoutInfo['timeout'],
+            CURLOPT_CONNECTTIMEOUT => (int) $timeoutInfo['connect_timeout'],
             CURLOPT_USERAGENT      => 'Faoxima-Mini/1.0',
-            CURLOPT_SSL_VERIFYPEER => function_exists('faoxima_ssl_verify') ? faoxima_ssl_verify() : true,
-            CURLOPT_SSL_VERIFYHOST => (function_exists('faoxima_ssl_verify') ? faoxima_ssl_verify() : true) ? 2 : 0,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_SSL_VERIFYHOST => 0,
             CURLOPT_HTTPHEADER     => ['Accept: */*'],
         ]);
         $body = curl_exec($ch);

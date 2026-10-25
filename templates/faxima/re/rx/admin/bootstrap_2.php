@@ -130,11 +130,12 @@ if (!function_exists('rx_featCategoryRows')) {
                  ['text' => $cronremovevolumestatustext, 'callback_data' => "editstsuts-notifremove_volume-{$status_cron['remove_volume']}"],
                  ['text' => "❌ کرون حذف‌حجم", 'callback_data' => "none"]],
                 [['text' => "⚙️ تنظیم", 'callback_data' => "set_panel_timeout"],
-                 ['text' => (int)($setting['panel_curl_timeout'] ?? 20) . " ثانیه", 'callback_data' => "none"],
+                 ['text' => (function_exists('faoxima_panel_timeout') ? faoxima_panel_timeout() : (int)($setting['panel_curl_timeout'] ?? 20)) . " ثانیه", 'callback_data' => "none"],
                  ['text' => "⏱ تایم پنل", 'callback_data' => "none"]],
                 [['text' => "⚙️ مدیریت", 'callback_data' => "cronjobs_settings"],
                  ['text' => "⏱ نمایش لیست", 'callback_data' => "cronjobs_settings"],
                  ['text' => "زمان‌بندی", 'callback_data' => "none"]],
+                [['text' => "🧪 تست کرون", 'callback_data' => "cronhealth_start"]],
             ];
         }
         return [];
@@ -169,6 +170,28 @@ unset($rx_pem_entry_step);
 if (function_exists('rxStartMediaHandleAdminUpdate')
     && rxStartMediaHandleAdminUpdate($from_id, $datain ?? '', $update ?? [], $user, ($adminrulecheck['rule'] ?? '') === "administrator")) {
     return;
+}
+
+if (function_exists('rx_sbv_admin_handle')
+    && rx_sbv_admin_handle([
+        'from_id' => $from_id,
+        'datain' => $datain ?? '',
+        'text' => $text ?? '',
+        'update' => $update ?? [],
+        'user' => $user ?? [],
+        'rule' => $adminrulecheck['rule'] ?? '',
+        'callback_query_id' => $callback_query_id ?? '',
+        'message_id' => $message_id ?? 0,
+    ])) {
+    return;
+}
+
+if ((isset($datain) && is_string($datain) && ($datain === 'admin_readiness' || strpos($datain, 'srd_') === 0))
+    || (is_string($text) && trim($text) === "🚦 آمادگی فروش")) {
+    require_once REFACTORED_LEGACY_ROOT . '/sales_readiness.php';
+    if (rx_sr_handle_admin_update()) {
+        return;
+    }
 }
 
 if (in_array($text, $textadmin) || $datain == "admin") {
@@ -374,6 +397,7 @@ if (in_array($text, $textadmin) || $datain == "admin") {
             'ipnsigningkeytronado' => $trnado,
             'wageFromBusinessPercentageTronado' => $trnado,
             'apitonpay' => $tonpay,
+            'apitonpaycustom' => $tonpay,
             'getcashtonpay' => $tonpay,
             'getmaintonpay' => $tonpay,
             'getmaxtonpay' => $tonpay,
@@ -2221,7 +2245,7 @@ $paycount
     $statusextend = "on_extend";
     $subvip = "offsubvip";
     $stauts_on_holed = "1";
-    $shopFeaturesDefault = panel_features_all_off_json();
+    $shopFeaturesDefault = panel_features_new_panel_defaults_json();
     $stmt = $pdo->prepare("INSERT INTO marzban_panel (code_panel,name_panel,sublink,config,MethodUsername,TestAccount,status,limit_panel,namecustom,Methodextend,type,conecton,inboundid,agent,inbound_deactive,inboundstatus,url_panel,username_panel,password_panel,api_key,time_usertest,val_usertest,linksubx,priceextravolume,priceextratime,pricecustomvolume,pricecustomtime,mainvolume,maxvolume,maintime,maxtime,status_extend,subvip,changeloc,customvolume,on_hold_test,version_panel,guard_service_ids,guard_note,guard_auto_delete_days,guard_auto_renewals,guard_version,shop_features,rebecca_service_id) VALUES (:code_panel,:name_panel,:sublink,:config,:MethodUsername,:TestAccount,:status,:limit_panel,:namecustom,:Methodextend,:type,:conecton,:inboundid,:agent,:inbound_deactive,:inboundstatus,:url_panel,:username_panel,:password_panel,:api_key,:time_usertest,:val_usertest,:linksubx,:priceextravolume,:priceextratime,:pricecustomvolume,:pricecustomtime,:mainvolume,:maxvolume,:maintime,:maxtime,:status_extend,:subvip,:changeloc,:customvolume,:on_hold_test,:version_panel,:guard_service_ids,:guard_note,:guard_auto_delete_days,:guard_auto_renewals,:guard_version,:shop_features,:rebecca_service_id)");
     $stmt->bindParam(':code_panel', $randomString);
     $stmt->bindParam(':name_panel', $userdata['namepanel'], PDO::PARAM_STR);
@@ -2801,7 +2825,7 @@ elseif ($datain == "systemsms") {
     }
     savedata("save", "agent", $type);
     if ($userdata['typeusermessage'] == "customer") {
-        $stmt = $pdo->prepare("SELECT * FROM marzban_panel WHERE agent = :agent OR agent = 'all'");
+        $stmt = $pdo->prepare("SELECT * FROM marzban_panel WHERE agent = :agent OR agent = 'all' ORDER BY (position = 0) ASC, position ASC, id ASC");
         $stmt->bindParam(':agent', $type);
         $stmt->execute();
         $list_panel = ['inline_keyboard' => []];
@@ -3924,9 +3948,22 @@ $caption";
     ]]);
     nm_adminInstantReply($from_id, $rxOptResultText, $rxOptKb, 'HTML');
     return;
+} elseif (is_string($datain ?? null)
+    && ($datain === 'cronhealth_start' || strpos($datain, 'cronhealth_chk_') === 0)
+    && $adminrulecheck['rule'] === 'administrator') {
+    if (!function_exists('rx_cron_health_admin_action') && is_file(REFACTORED_LEGACY_ROOT . '/lib/CronHealth.php')) {
+        require_once REFACTORED_LEGACY_ROOT . '/lib/CronHealth.php';
+    }
+    if (function_exists('rx_cron_health_admin_action')) {
+        rx_cron_health_admin_action($pdo ?? null, (string) $datain, $from_id, $callback_query_id ?? null, $message_id ?? 0);
+    }
+    return;
 } elseif ($datain === 'glass_mode_settings' && $adminrulecheck['rule'] === 'administrator') {
 
     rxRenderFeatureStatus('glass_mode', $from_id);
+    return;
+} elseif (strpos((string)$datain, 'richsec_') === 0 && function_exists('rx_ui_sections_admin_action')
+    && rx_ui_sections_admin_action((string)$datain, $from_id, ($adminrulecheck['rule'] ?? '') === 'administrator', $callback_query_id ?? null)) {
     return;
 } elseif ($datain === 'run_redis_status' && $adminrulecheck['rule'] === 'administrator') {
 
@@ -4205,14 +4242,13 @@ $caption";
         $valuenew = ($current === "onAuthenticationiran") ? "offAuthenticationiran" : "onAuthenticationiran";
         update("setting", "iran_number", $valuenew);
         $setting['iran_number'] = $valuenew;
-    } elseif ($type == "inlinebtnmain") {
-        if ($value == "oninline") {
-            $valuenew = "offinline";
-        } else {
-            $valuenew = "oninline";
-        }
-        update("setting", "inlinebtnmain", $valuenew);
-        $setting['inlinebtnmain'] = $valuenew;
+    } elseif ($type == "inlinebtnmain" || $type == "user_rich_buttons") {
+        rx_richUi_adminToggle(
+            $type == "inlinebtnmain" ? 'glass' : 'rich',
+            (string)$value,
+            ($adminrulecheck['rule'] ?? '') === 'administrator',
+            $callback_query_id ?? null
+        );
         rxRenderFeatureStatus('glass_mode', $from_id);
         return;
     } elseif ($type == "auto_remove_kb") {
@@ -6848,7 +6884,7 @@ $text_expie_agent
     update("user", "Processing_value", $panelCanonicalName, "id", $from_id);
     step('PanelMenu', $from_id);
     if ($marzban_list_get['type'] == "marzban") {
-        $Check_token = token_panel($marzban_list_get['code_panel'], false);
+        $Check_token = token_panel($marzban_list_get['code_panel']);
         if (isset($Check_token['access_token'])) {
             $System_Stats = Get_System_Stats($panelCanonicalName);
             if ((string)($marzban_list_get['version_panel'] ?? '0') === '1') {
@@ -6890,6 +6926,8 @@ $rx_sales_metrics
 
 ⭕️ برای مدیریت پنل یکی از گزینه های زیر را انتخاب کنید";
             nm_adminInstantReply($from_id, $text_marzban, $optionMarzban, 'HTML');
+        } elseif (($Check_token['error_code'] ?? null) === 'auth_busy') {
+            nm_adminInstantReply($from_id, "⏳ " . $Check_token['error'], $optionMarzban, 'HTML');
         } elseif (isset($Check_token['detail']) && $Check_token['detail'] == "Incorrect username or password") {
             $text_marzban = "❌ نام کاربری یا رمز عبور پنل اشتباه است";
             nm_adminInstantReply($from_id, $text_marzban, $optionMarzban, 'HTML');
@@ -7215,7 +7253,7 @@ $rx_sales_metrics
             $pasarguardCredsMissing = $pasarguardUsernameStatus === '' || $pasarguardPasswordStatus === '';
             $pasarguardTestRes = $pasarguardCredsMissing
                 ? ['status' => false, 'msg' => 'نام کاربری یا رمز عبور تنظیم نشده است']
-                : pasarguardTestConnectionUserPass($marzban_list_get['url_panel'] ?? null, $pasarguardUsernameStatus, $pasarguardPasswordStatus);
+                : pasarguardTestConnectionPanel($marzban_list_get);
         } else {
             $pasarguardApiKey = trim((string) ($marzban_list_get['api_key'] ?? ''));
             $pasarguardCredsMissing = $pasarguardApiKey === '';

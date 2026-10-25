@@ -116,6 +116,37 @@ if (preg_match('/Confirmpay_user_(\w+)_(\w+)/', $datain, $dataget)) {
         ));
     }
 }
+if (preg_match('/^sbv(resume|cancel)_(\w+)$/', (string) $datain, $_sbvm) && function_exists('rx_sbv_active_payment')) {
+    if ($_sbvm[1] === 'cancel') {
+        $_sbv_res = rx_sbv_cancel_active($from_id, $_sbvm[2]);
+        telegram('answerCallbackQuery', [
+            'callback_query_id' => $callback_query_id,
+            'text' => $_sbv_res['message'],
+            'show_alert' => empty($_sbv_res['ok']),
+            'cache_time' => 0,
+        ]);
+        if (!empty($_sbv_res['ok']) || ($_sbv_res['code'] ?? '') === 'not_active') {
+            if (in_array((string) ($user['step'] ?? ''), ['card_select_step', 'card_photo_step', 'card_last4_step', 'cart_to_cart_user'], true)
+                && (string) ($user['Processing_value'] ?? '') === $_sbvm[2]) {
+                step('home', $from_id);
+            }
+            rx_sbv_bot_mark_cancelled($from_id, $message_id, !empty($_sbv_res['ok'])
+                ? "❌ این پرداخت لغو شد و دیگر قابل واریز نیست.\n🛒 کد پیگیری: <code>" . htmlspecialchars($_sbvm[2], ENT_QUOTES, 'UTF-8') . "</code>\n\nاکنون می‌توانید پرداخت جدیدی ایجاد کنید."
+                : $_sbv_res['message']);
+        }
+    } elseif (rx_sbv_bot_resume($from_id, $_sbvm[2], $user)) {
+        telegram('answerCallbackQuery', ['callback_query_id' => $callback_query_id, 'cache_time' => 0]);
+        deletemessage($from_id, $message_id);
+    } else {
+        telegram('answerCallbackQuery', [
+            'callback_query_id' => $callback_query_id,
+            'text' => 'این پرداخت دیگر قابل ادامه نیست.',
+            'show_alert' => true,
+            'cache_time' => 0,
+        ]);
+    }
+    return;
+}
 if (preg_match('/^sendresidcart-(.*)/', $datain, $dataget)) {
     $timefivemin = time() - 120;
     $timefivemin = date('Y/m/d H:i:s', intval($timefivemin));
@@ -140,6 +171,21 @@ if (preg_match('/^sendresidcart-(.*)/', $datain, $dataget)) {
         sendmessage($from_id, "❗زمان این تراکنش به پایان رسیده و امکان پرداخت این تراکنش وجود ندارد.", null, 'HTML');
         return;
     }
+    if (function_exists('rx_sbv_receipt_gate')) {
+        $_sbv_gate = rx_sbv_receipt_gate((string) $payemntcheck['id_order']);
+        if (empty($_sbv_gate['ok'])) {
+            $_sbv_alert = telegram('answerCallbackQuery', [
+                'callback_query_id' => $callback_query_id,
+                'text' => $_sbv_gate['message'],
+                'show_alert' => true,
+                'cache_time' => 0,
+            ]);
+            if (!is_array($_sbv_alert) || empty($_sbv_alert['ok'])) {
+                sendmessage($from_id, $_sbv_gate['message'], null, 'HTML');
+            }
+            return;
+        }
+    }
     deletemessage($from_id, $message_id);
     sendmessage($from_id, "🖼 تصویر رسید خود را ارسال نمایید", $backuser, 'HTML');
     step('cart_to_cart_user', $from_id);
@@ -159,7 +205,7 @@ if (preg_match('/^sendresidcart-(.*)/', $datain, $dataget)) {
 
 📸 لطفا تصویر کارت فیزیکی خود را که قصد واریز با آن را دارید، ارسال کنید.
 
-🔘 نکته مهم: برای تایید تراکنش، الزامی است که ۴ رقم آخر شماره کارت و نام شما در تصویر کاملاً واضح و خوانا باشد. (سایر اطلاعات را می‌توانید بپوشانید).", $backuser, 'HTML');
+🔘 نکته مهم: برای تایید تراکنش، الزامی است که ۴ رقم آخر شماره کارت و نام شما در تصویر کاملاً واضح و خوانا باشد. (سایر اطلاعات را می‌توانید بپوشانید).", (function_exists('rx_sbv_cancel_keyboard') && rx_sbv_cancel_keyboard((string) $orderId) !== null) ? rx_sbv_cancel_keyboard((string) $orderId) : $backuser, 'HTML');
         return;
     }
     if (preg_match('/^cv_use_(\d{4})$/', $datain, $_cv_m)) {
@@ -245,27 +291,39 @@ if (preg_match('/^sendresidcart-(.*)/', $datain, $dataget)) {
         $PaySettingname = $card_info['namecard'];
         $valueprice = number_format($payRecord['price'] ?? 0);
         $price_copy = intval(($payRecord['price'] ?? 0) . "0");
+        $_sbv_bot = function_exists('rx_sbv_bot_payment_view') ? rx_sbv_bot_payment_view((string) $orderId) : null;
+        if ($_sbv_bot !== null) {
+            $valueprice = $_sbv_bot['valueprice'];
+            $price_copy = $_sbv_bot['price_copy'];
+        }
         if ($_cmode == 'direct' && $_card2) {
             $textcart = "💳 <b>کارت اول</b>\n🔢 <code>{$card_number}</code>\n👤 {$PaySettingname}\n\n💳 <b>کارت دوم</b>\n🔢 <code>{$_card2['cardnumber']}</code>\n👤 {$_card2['namecard']}\n\n💰 مبلغ: {$valueprice} تومان";
         } else {
             $replacements = ['{price}' => $valueprice, '{card_number}' => $card_number, '{name_card}' => $PaySettingname];
             $textcart = strtr($datatextbot['text_cart'] ?? "💳 مبلغ {price} تومان ({price}0 ریال) به کارت {card_number} به نام {name_card} واریز کنید.", $replacements);
         }
+        if ($_sbv_bot !== null) {
+            $textcart .= $_sbv_bot['block'];
+        }
         $_prcpt_s = (isset($_rx_payrcpt_styles) && is_array($_rx_payrcpt_styles)) ? $_rx_payrcpt_styles : [];
-        if ($setting['statuscopycart'] == "1") {
+        if ($setting['statuscopycart'] == "1" || $_sbv_bot !== null) {
             $_kb_rows = [[
-                ['text' => "کپی کارت اول", 'copy_text' => ["text" => $card_number], '_rxck' => 'card_num'],
-                ['text' => "کپی مبلغ", 'copy_text' => ["text" => $price_copy], '_rxck' => 'card_amount'],
+                ...($setting['statuscopycart'] == "1" ? [['text' => "کپی کارت اول", 'copy_text' => ["text" => $card_number], '_rxck' => 'card_num']] : []),
+                ['text' => $_sbv_bot !== null ? $_sbv_bot['copy_label'] : "کپی مبلغ", 'copy_text' => ["text" => (string) $price_copy], '_rxck' => 'card_amount'],
             ]];
-            if ($_cmode == 'direct' && !empty($_card2['cardnumber'])) {
+            if ($setting['statuscopycart'] == "1" && $_cmode == 'direct' && !empty($_card2['cardnumber'])) {
                 $_kb_rows[] = [['text' => "کپی کارت دوم", 'copy_text' => ["text" => $_card2['cardnumber']], '_rxck' => 'card_num_2']];
             }
-            $_kb_rows[] = [rx_kb_style(['text' => "✅ پرداخت کردم | ارسال رسید.", 'callback_data' => "sendresidcart-{$orderId}"], 'pay_sendreceipt', $_prcpt_s)];
+            $_kb_rows[] = [rx_kb_style(['text' => $_sbv_bot !== null ? $_sbv_bot['receipt_label'] : "✅ پرداخت کردم | ارسال رسید.", 'callback_data' => "sendresidcart-{$orderId}"], 'pay_sendreceipt', $_prcpt_s)];
+            $_sbv_cancel_row = ($_sbv_bot !== null && function_exists('rx_sbv_cancel_row')) ? rx_sbv_cancel_row((string) $orderId) : null;
+            if ($_sbv_cancel_row !== null) {
+                $_kb_rows[] = $_sbv_cancel_row;
+            }
             $sendresidcart = json_encode(['inline_keyboard' => $_kb_rows]);
         } else {
             $sendresidcart = json_encode([
                 'inline_keyboard' => [
-                    [rx_kb_style(['text' => "✅ پرداخت کردم | ارسال رسید.", 'callback_data' => "sendresidcart-{$orderId}"], 'pay_sendreceipt', $_prcpt_s)],
+                    [rx_kb_style(['text' => $_sbv_bot !== null ? $_sbv_bot['receipt_label'] : "✅ پرداخت کردم | ارسال رسید.", 'callback_data' => "sendresidcart-{$orderId}"], 'pay_sendreceipt', $_prcpt_s)],
                 ]
             ]);
         }
@@ -375,27 +433,39 @@ if (preg_match('/^sendresidcart-(.*)/', $datain, $dataget)) {
     $PaySettingname = $card_info['namecard'];
     $valueprice = number_format($payRecord['price'] ?? 0);
     $price_copy = intval(($payRecord['price'] ?? 0) . "0");
+    $_sbv_bot = function_exists('rx_sbv_bot_payment_view') ? rx_sbv_bot_payment_view((string) $orderId) : null;
+    if ($_sbv_bot !== null) {
+        $valueprice = $_sbv_bot['valueprice'];
+        $price_copy = $_sbv_bot['price_copy'];
+    }
     if ($_cmode == 'direct' && $_card2) {
         $textcart = "💳 <b>کارت اول</b>\n🔢 <code>{$card_number}</code>\n👤 {$PaySettingname}\n\n💳 <b>کارت دوم</b>\n🔢 <code>{$_card2['cardnumber']}</code>\n👤 {$_card2['namecard']}\n\n💰 مبلغ: {$valueprice} تومان";
     } else {
         $replacements = ['{price}' => $valueprice, '{card_number}' => $card_number, '{name_card}' => $PaySettingname];
         $textcart = strtr($datatextbot['text_cart'] ?? "💳 مبلغ {price} تومان ({price}0 ریال) به کارت {card_number} به نام {name_card} واریز کنید.", $replacements);
     }
+    if ($_sbv_bot !== null) {
+        $textcart .= $_sbv_bot['block'];
+    }
     $_prcpt_s = (isset($_rx_payrcpt_styles) && is_array($_rx_payrcpt_styles)) ? $_rx_payrcpt_styles : [];
-    if ($setting['statuscopycart'] == "1") {
+    if ($setting['statuscopycart'] == "1" || $_sbv_bot !== null) {
         $_kb_rows = [[
-            ['text' => "کپی شماره کارت", 'copy_text' => ["text" => $card_number], '_rxck' => 'card_num'],
-            ['text' => "کپی مبلغ", 'copy_text' => ["text" => $price_copy], '_rxck' => 'card_amount'],
+            ...($setting['statuscopycart'] == "1" ? [['text' => "کپی شماره کارت", 'copy_text' => ["text" => $card_number], '_rxck' => 'card_num']] : []),
+            ['text' => $_sbv_bot !== null ? $_sbv_bot['copy_label'] : "کپی مبلغ", 'copy_text' => ["text" => (string) $price_copy], '_rxck' => 'card_amount'],
         ]];
-        if ($_cmode == 'direct' && !empty($_card2['cardnumber'])) {
+        if ($setting['statuscopycart'] == "1" && $_cmode == 'direct' && !empty($_card2['cardnumber'])) {
             $_kb_rows[] = [['text' => "کپی شماره کارت دوم", 'copy_text' => ["text" => $_card2['cardnumber']], '_rxck' => 'card_num_2']];
         }
-        $_kb_rows[] = [rx_kb_style(['text' => "✅ پرداخت کردم | ارسال رسید.", 'callback_data' => "sendresidcart-{$orderId}"], 'pay_sendreceipt', $_prcpt_s)];
+        $_kb_rows[] = [rx_kb_style(['text' => $_sbv_bot !== null ? $_sbv_bot['receipt_label'] : "✅ پرداخت کردم | ارسال رسید.", 'callback_data' => "sendresidcart-{$orderId}"], 'pay_sendreceipt', $_prcpt_s)];
+        $_sbv_cancel_row = ($_sbv_bot !== null && function_exists('rx_sbv_cancel_row')) ? rx_sbv_cancel_row((string) $orderId) : null;
+        if ($_sbv_cancel_row !== null) {
+            $_kb_rows[] = $_sbv_cancel_row;
+        }
         $sendresidcart = json_encode(['inline_keyboard' => $_kb_rows]);
     } else {
         $sendresidcart = json_encode([
             'inline_keyboard' => [
-                [rx_kb_style(['text' => "✅ پرداخت کردم | ارسال رسید.", 'callback_data' => "sendresidcart-{$orderId}"], 'pay_sendreceipt', $_prcpt_s)],
+                [rx_kb_style(['text' => $_sbv_bot !== null ? $_sbv_bot['receipt_label'] : "✅ پرداخت کردم | ارسال رسید.", 'callback_data' => "sendresidcart-{$orderId}"], 'pay_sendreceipt', $_prcpt_s)],
             ]
         ]);
     }
@@ -827,6 +897,13 @@ if (preg_match('/^sendresidcart-(.*)/', $datain, $dataget)) {
         sendmessage($from_id, faoxima_textbot_get('dyn_errors_data_fetch_restart', '❌ خطایی در هنگام دریافت اطلاعات رخ داده است لطفا مراحل را از اول انجام دهید'), $keyboard, 'HTML');
         return;
     }
+    if (function_exists('rx_sbv_receipt_gate')) {
+        $_sbv_gate = rx_sbv_receipt_gate((string) $PaymentReport['id_order']);
+        if (empty($_sbv_gate['ok'])) {
+            sendmessage($from_id, $_sbv_gate['message'], $keyboard, 'HTML');
+            return;
+        }
+    }
     $receiptReserveStmt = $pdo->prepare("UPDATE Payment_report SET payment_Status = 'pending', dec_not_confirmed = 'receipt-uploading', at_updated = :at_updated WHERE id_order = :id_order AND id_user = :id_user AND payment_Status = 'Unpaid'");
     $receiptReserveStmt->execute([
         ':at_updated' => date('Y/m/d H:i:s'),
@@ -978,6 +1055,10 @@ if (preg_match('/^sendresidcart-(.*)/', $datain, $dataget)) {
             'format_price_cart' => $format_price_cart,
         ]);
         $rxReceiptUserText = $textbotlang['users']['Balance']['Send-receipt'];
+    }
+    if (function_exists('rx_sbv_receipt_admin_note')) {
+        $textsendrasid .= rx_sbv_receipt_admin_note((string) $PaymentReport['id_order']);
+        $Confirm_pay = rx_sbv_receipt_keyboard($Confirm_pay, (string) $PaymentReport['id_order']);
     }
     $_card_fid = (string)($PaymentReport['card_photo_file_id'] ?? '');
     $_receipt_delivered = false;
@@ -1154,6 +1235,7 @@ if (preg_match('/^sendresidcart-(.*)/', $datain, $dataget)) {
         ]);
     }
 } elseif (($text !== '' && $text == $datatextbot['text_Tariff_list']) || $datain == "Tariff_list") {
+    rx_section_media_enter('tariff', $from_id, $datain, $message_id, ['Tariff_list']);
     sendmessage($from_id, $datatextbot['text_dec_Tariff_list'], null, 'HTML');
 } elseif ($datain == "colselist") {
     deletemessage($from_id, $message_id);
@@ -1263,133 +1345,26 @@ $text_porsant
 
     sendmessage($from_id, $textaffiliates, $keyboard_share, 'HTML');
 } elseif ($datain == "get_gift_start") {
-    $gift_status = select("affiliates", "*", null, null, "select");
-    if ($gift_status['Discount'] == "offDiscountaffiliates") {
+    $rxGiftResult = rxReferralGiftPayout($from_id);
+    $rxGiftStatus = (string) ($rxGiftResult['status'] ?? 'failed');
+    if ($rxGiftStatus === 'paid') {
+        rxReferralGiftNotify($rxGiftResult);
+    } elseif ($rxGiftStatus === 'disabled' || $rxGiftStatus === 'no_amount') {
         sendmessage($from_id, $datatextbot['dyn_affiliates_extra_section_disabled'] ?? "📛 این بخش درحال حاضر غیرفعال می باشد", $keyboard, 'HTML');
-        return;
-    }
-    if (!userExists($user['affiliates'])) {
+    } elseif ($rxGiftStatus === 'not_referred') {
         sendmessage($from_id, $datatextbot['dyn_affiliates_extra_not_affiliate_of_anyone'] ?? "📛 شما زیرمجموعه هیچ کاربری نیستید.", $keyboard, 'HTML');
-        return;
-    }
-    $reagent = select("reagent_report", "*", "user_id", $from_id, "select", ['cache' => false]);
-    if (!$reagent) {
-        $affiliateId = intval($user['affiliates']);
-        if ($affiliateId && userExists($affiliateId)) {
-            $stmt = $pdo->prepare("INSERT INTO reagent_report (user_id, get_gift, time, reagent)
-                                   VALUES (:user_id, :get_gift, :time, :reagent)
-                                   ON DUPLICATE KEY UPDATE reagent = VALUES(reagent), get_gift = VALUES(get_gift), time = VALUES(time)");
-            $stmt->execute([
-                ':user_id' => $from_id,
-                ':get_gift' => 0,
-                ':time' => date('Y/m/d H:i:s'),
-                ':reagent' => $affiliateId,
-            ]);
-            if (function_exists('clearSelectCache')) {
-                clearSelectCache('reagent_report');
-            }
-            $reagent = select("reagent_report", "*", "user_id", $from_id, "select", ['cache' => false]);
-        }
-        if (!$reagent) {
-            sendmessage($from_id, $datatextbot['dyn_affiliates_extra_not_affiliate_of_anyone'] ?? "📛 شما زیرمجموعه هیچ کاربری نیستید.", $keyboard, 'HTML');
-            return;
-        }
-    }
-    if (!empty($reagent['get_gift'])) {
+    } elseif ($rxGiftStatus === 'already') {
         sendmessage($from_id, $datatextbot['dyn_affiliates_extra_gift_already_received'] ?? "<b>⛔ شما قبلاً هدیه عضویت را دریافت کرده‌اید.</b>\nاین هدیه فقط <b>یک‌بار</b> قابل فعال‌سازی است.", $keyboard, 'HTML');
-        return;
-    }
-    $affiliatesGate = select("affiliates", "*", null, null, "select");
-    if (($affiliatesGate['require_phone_verified'] ?? '') === 'on_require_phone' && ($user['number'] ?? 'none') !== 'confrim number by admin') {
+    } elseif ($rxGiftStatus === 'phone_required') {
         sendmessage($from_id, $datatextbot['dyn_affiliates_extra_phone_required'] ?? "📞 برای دریافت هدیه عضویت، ابتدا باید شماره موبایل خود را تایید کنید.", $keyboard, 'HTML');
-        return;
-    }
-    $minAgeHours = (int) ($affiliatesGate['min_account_age_hours'] ?? 0);
-    if ($minAgeHours > 0 && !empty($user['register']) && $user['register'] !== 'none') {
-        $accountAgeHours = (time() - (int) $user['register']) / 3600;
-        if ($accountAgeHours < $minAgeHours) {
-            sendmessage($from_id, $datatextbot['dyn_affiliates_extra_account_too_new'] ?? "⏳ حساب شما هنوز به اندازه کافی قدیمی نیست، کمی بعد دوباره تلاش کنید.", $keyboard, 'HTML');
-            return;
-        }
-    }
-    $referrerIdForCap = $reagent['reagent'];
-    $dailyCap = (int) ($affiliatesGate['daily_referral_cap'] ?? 0);
-    $monthlyCap = (int) ($affiliatesGate['monthly_referral_cap'] ?? 0);
-    if ($dailyCap > 0 || $monthlyCap > 0) {
-        if ($dailyCap > 0) {
-            $stmt = $pdo->prepare("SELECT COUNT(*) FROM affiliate_referral_claims WHERE reagent = :reagent AND claim_date = :today");
-            $stmt->execute([':reagent' => $referrerIdForCap, ':today' => date('Y-m-d')]);
-            if ((int) $stmt->fetchColumn() >= $dailyCap) {
-                sendmessage($from_id, $datatextbot['dyn_affiliates_extra_cap_reached'] ?? "📛 سقف روزانه هدیه معرفی برای این معرف پر شده است.", $keyboard, 'HTML');
-                return;
-            }
-        }
-        if ($monthlyCap > 0) {
-            $stmt = $pdo->prepare("SELECT COUNT(*) FROM affiliate_referral_claims WHERE reagent = :reagent AND claim_date >= :monthstart");
-            $stmt->execute([':reagent' => $referrerIdForCap, ':monthstart' => date('Y-m-01')]);
-            if ((int) $stmt->fetchColumn() >= $monthlyCap) {
-                sendmessage($from_id, $datatextbot['dyn_affiliates_extra_cap_reached'] ?? "📛 سقف ماهانه هدیه معرفی برای این معرف پر شده است.", $keyboard, 'HTML');
-                return;
-            }
-        }
-    }
-    $stmt = $pdo->prepare("UPDATE reagent_report SET get_gift = 1 WHERE user_id = :user_id AND get_gift = 0");
-    $stmt->execute([':user_id' => $from_id]);
-    if ($stmt->rowCount() === 0) {
-        sendmessage($from_id, $datatextbot['dyn_affiliates_extra_gift_already_received'] ?? "<b>⛔ شما قبلاً هدیه عضویت را دریافت کرده‌اید.</b>\nاین هدیه فقط <b>یک‌بار</b> قابل فعال‌سازی است.", $keyboard, 'HTML');
-        return;
-    }
-    $claimStmt = $pdo->prepare("INSERT IGNORE INTO affiliate_referral_claims (reagent, invitee_id, claim_type, claim_date, time) VALUES (:reagent, :invitee_id, 'start_gift', :claim_date, :time)");
-    $claimStmt->execute([
-        ':reagent' => $referrerIdForCap,
-        ':invitee_id' => $from_id,
-        ':claim_date' => date('Y-m-d'),
-        ':time' => date('Y/m/d H:i:s'),
-    ]);
-    $reagent['get_gift'] = true;
-    $price_gift_Start = select("affiliates", "*", null, null, "select");
-    $price_gift_Start = intval($price_gift_Start['price_Discount']) / 2;
-    $useraffiliates = select("user", "*", 'id', $reagent['reagent'], "select");
-    if (function_exists('balance_atomic_credit') && $price_gift_Start > 0) {
-        $__giftOkRef = balance_atomic_credit($reagent['reagent'], $price_gift_Start);
-        if ($__giftOkRef && function_exists('wallet_ledger_record')) {
-            wallet_ledger_record($reagent['reagent'], 'credit', $price_gift_Start, 'referral_gift', 'هدیه عضویت زیرمجموعه', null, 'user', (string)$from_id);
-        }
-        $__giftOkUser = balance_atomic_credit($from_id, $price_gift_Start);
-        if ($__giftOkUser && function_exists('wallet_ledger_record')) {
-            wallet_ledger_record($from_id, 'credit', $price_gift_Start, 'referral_gift', 'هدیه عضویت', null, 'user', (string)$reagent['reagent']);
-        }
+    } elseif ($rxGiftStatus === 'too_new') {
+        sendmessage($from_id, $datatextbot['dyn_affiliates_extra_account_too_new'] ?? "⏳ حساب شما هنوز به اندازه کافی قدیمی نیست، کمی بعد دوباره تلاش کنید.", $keyboard, 'HTML');
+    } elseif ($rxGiftStatus === 'cap_daily') {
+        sendmessage($from_id, $datatextbot['dyn_affiliates_extra_cap_reached'] ?? "📛 سقف روزانه هدیه معرفی برای این معرف پر شده است.", $keyboard, 'HTML');
+    } elseif ($rxGiftStatus === 'cap_monthly') {
+        sendmessage($from_id, $datatextbot['dyn_affiliates_extra_cap_reached'] ?? "📛 سقف ماهانه هدیه معرفی برای این معرف پر شده است.", $keyboard, 'HTML');
     } else {
-        $Balance_add_regent = $useraffiliates['Balance'] + $price_gift_Start;
-        update("user", "Balance", $Balance_add_regent, "id", $reagent['reagent']);
-        $Balance_add_user = $user['Balance'] + $price_gift_Start;
-        update("user", "Balance", $Balance_add_user, "id", $from_id);
-    }
-    $Balance_add_regent = select("user", "Balance", "id", $reagent['reagent'], "select", ['cache' => false])['Balance'] ?? ($useraffiliates['Balance'] + $price_gift_Start);
-    $Balance_add_user = select("user", "Balance", "id", $from_id, "select", ['cache' => false])['Balance'] ?? ($user['Balance'] + $price_gift_Start);
-    $addbalancediscount = number_format($price_gift_Start, 0);
-    sendmessage($reagent['reagent'], $datatextbot['dyn_affiliates_extra_gift_credited_inviter'] ?? "🎉 یک نفر با معرفی شما وارد شد! هدیه به حساب شما واریز شد.", null, 'html');
-    sendmessage($from_id, $datatextbot['dyn_affiliates_extra_gift_activated'] ?? "🎉 هدیه عضویت برای شما فعال شد!", null, 'html');
-    $rxFmtUserBalanceBefore = rxFormatToman($user['Balance']);
-    $rxFmtUserBalanceAfter = rxFormatToman($Balance_add_user);
-    $rxFmtReagentBalanceBefore = rxFormatToman($useraffiliates['Balance']);
-    $rxFmtReagentBalanceAfter = rxFormatToman($Balance_add_regent);
-    $report_join_gift = "🎁 پرداخت هدیه عضویت
-<blockquote> -آیدی عددی : $from_id</blockquote>
-<blockquote> - نام کاربری : @$username</blockquote>
-<blockquote> - آیدی عددی معرف : {$reagent['reagent']}</blockquote>
-<blockquote> - موجودی زیرمجموعه قبل از هدیه : {$rxFmtUserBalanceBefore}</blockquote>
-<blockquote> - موجودی زیرمجموعه بعد از هدیه : {$rxFmtUserBalanceAfter}</blockquote>
-<blockquote>  - موجودی معرف قبل از هدیه : {$rxFmtReagentBalanceBefore}</blockquote>
-<blockquote> - موجودی معرف بعد از هدیه : {$rxFmtReagentBalanceAfter}</blockquote>
- ";
-    if (strlen($setting['Channel_Report'] ?? '') > 0) {
-        telegram('sendmessage', [
-            'chat_id' => $setting['Channel_Report'],
-            'message_thread_id' => $porsantreport,
-            'text' => $report_join_gift,
-            'parse_mode' => "HTML"
-        ]);
+        sendmessage($from_id, $datatextbot['dyn_affiliates_extra_gift_failed'] ?? "⚠️ پرداخت هدیه عضویت در حال حاضر انجام نشد؛ لطفاً چند لحظه دیگر دوباره تلاش کنید.", $keyboard, 'HTML');
     }
 } elseif (preg_match('/Extra_volumes_(\w+)_(.*)/', $datain, $dataget)) {
     $usernamepanel = $dataget[1];
@@ -1449,7 +1424,7 @@ $text_porsant
         return;
     }
     $fxExternalQty = $fxExternalVerify['qty'];
-    if ($user['Balance'] < $volume && $user['agent'] != "n2") {
+    if (rx_ck_available_for_user($user) < $volume && $user['agent'] != "n2") {
         $marzbandirectpay = panel_feature_enabled($user['Processing_value_one'], 'directbuy') ? "ondirectbuy" : "offdirectbuy";
         if ($marzbandirectpay == "offdirectbuy") {
             $minbalance = number_format(json_decode(select("PaySetting", "*", "NamePay", "minbalance", "select")['ValuePay'], true)[$user['agent']]);
@@ -1471,8 +1446,9 @@ $text_porsant
                 sendmessage($from_id, sprintf($textbotlang['users']['Discount']['discountapplied'], $user['pricediscount']), null, 'HTML');
             }
             $volume = fx_finalize_amount($volume, $fxExternalPanel, 'extra_volume');
-            $Balance_prim = $volume - $user['Balance'];
+            $Balance_prim = $volume - rx_ck_available_for_user($user);
             update("user", "Processing_value", $Balance_prim, "id", $from_id);
+            update("user", "Processing_value_tow", "", "id", $from_id);
             sendmessage($from_id, $textbotlang['users']['sell']['None-credit'], $step_payment, 'HTML');
             step('get_step_payment', $from_id);
             return;
@@ -1610,7 +1586,7 @@ $text_porsant
     }
     step('home', $from_id);
 } elseif ((($text !== '' && $text == $datatextbot['textpanelagent']) || $datain == "agentpanel") && $user['agent'] != "f") {
-    if ($setting['inlinebtnmain'] == "oninline") {
+    if ($setting['inlinebtnmain'] == "oninline" || (function_exists('rx_richSectionActive') && rx_richSectionActive('agent'))) {
         Editmessagetext($from_id, $message_id, $textbotlang['Admin']['agent']['agenttext'], $keyboardagent, 'HTML');
     } else {
         sendmessage($from_id, $textbotlang['Admin']['agent']['agenttext'], $keyboardagent, 'HTML');
@@ -1871,6 +1847,7 @@ $text_porsant
         sendmessage($from_id, $textbotlang['users']['extend']['emptyServiceforExtend'], null, 'html');
         return;
     }
+    rx_section_media_enter('extend', $from_id, $datain, $message_id, ['extendbtn']);
     $pages = 1;
     update("user", "pagenumber", $pages, "id", $from_id);
     $page = 1;
@@ -1885,6 +1862,7 @@ $text_porsant
     $keyboardlists = [
         'inline_keyboard' => [],
     ];
+    $rxLabelDup = rxServiceListUserDuplicateKeys($from_id, ['active', 'end_of_time', 'end_of_volume', 'sendedwarn', 'send_on_hold'], (bool) $statusnote);
     if ($statusnote) {
         while ($row = mysqli_fetch_assoc($result)) {
             $data = "";
@@ -1892,7 +1870,7 @@ $text_porsant
                 $data = " | {$row['note']}";
             $keyboardlists['inline_keyboard'][] = [
                 [
-                    'text' => "✨" . $row['username'] . $data . "✨",
+                    'text' => "✨" . rxServiceListLabel($row, $rxLabelDup, true) . $data . "✨",
                     'callback_data' => "extend_" . $row['id_invoice']
                 ],
             ];
@@ -1901,7 +1879,7 @@ $text_porsant
         while ($row = mysqli_fetch_assoc($result)) {
             $keyboardlists['inline_keyboard'][] = [
                 [
-                    'text' => "✨" . $row['username'] . "✨",
+                    'text' => "✨" . rxServiceListLabel($row, $rxLabelDup, false) . "✨",
                     'callback_data' => "extend_" . $row['id_invoice']
                 ],
             ];
@@ -1945,6 +1923,7 @@ $text_porsant
     $keyboardlists = [
         'inline_keyboard' => [],
     ];
+    $rxLabelDup = rxServiceListUserDuplicateKeys($from_id, ['active', 'end_of_time', 'end_of_volume', 'sendedwarn', 'send_on_hold'], (bool) $statusnote);
     if ($statusnote) {
         while ($row = mysqli_fetch_assoc($result)) {
             $data = "";
@@ -1952,7 +1931,7 @@ $text_porsant
                 $data = " | {$row['note']}";
             $keyboardlists['inline_keyboard'][] = [
                 [
-                    'text' => "✨" . $row['username'] . $data . "✨",
+                    'text' => "✨" . rxServiceListLabel($row, $rxLabelDup, true) . $data . "✨",
                     'callback_data' => "extend_" . $row['id_invoice']
                 ],
             ];
@@ -1961,7 +1940,7 @@ $text_porsant
         while ($row = mysqli_fetch_assoc($result)) {
             $keyboardlists['inline_keyboard'][] = [
                 [
-                    'text' => "✨" . $row['username'] . "✨",
+                    'text' => "✨" . rxServiceListLabel($row, $rxLabelDup, false) . "✨",
                     'callback_data' => "extend_" . $row['id_invoice']
                 ],
             ];
@@ -2006,6 +1985,7 @@ $text_porsant
     $keyboardlists = [
         'inline_keyboard' => [],
     ];
+    $rxLabelDup = rxServiceListUserDuplicateKeys($from_id, ['active', 'end_of_time', 'end_of_volume', 'sendedwarn', 'send_on_hold'], (bool) $statusnote);
     if ($statusnote) {
         while ($row = mysqli_fetch_assoc($result)) {
             $data = "";
@@ -2013,7 +1993,7 @@ $text_porsant
                 $data = " | {$row['note']}";
             $keyboardlists['inline_keyboard'][] = [
                 [
-                    'text' => "✨" . $row['username'] . $data . "✨",
+                    'text' => "✨" . rxServiceListLabel($row, $rxLabelDup, true) . $data . "✨",
                     'callback_data' => "extend_" . $row['id_invoice']
                 ],
             ];
@@ -2022,7 +2002,7 @@ $text_porsant
         while ($row = mysqli_fetch_assoc($result)) {
             $keyboardlists['inline_keyboard'][] = [
                 [
-                    'text' => "✨" . $row['username'] . "✨",
+                    'text' => "✨" . rxServiceListLabel($row, $rxLabelDup, false) . "✨",
                     'callback_data' => "extend_" . $row['id_invoice']
                 ],
             ];

@@ -8,7 +8,7 @@ elif locale -a 2>/dev/null | grep -qi '^C\.UTF-8$'; then
     export LC_ALL=C.UTF-8
 fi
 
-readonly FAOXIMA_VERSION="1.1.5"
+readonly FAOXIMA_VERSION="1.2.0"
 readonly FAOXIMA_REPO="Mmd-Amir/Faoxima"
 readonly FAOXIMA_GITHUB="https://github.com/${FAOXIMA_REPO}"
 readonly FAOXIMA_TELEGRAM="https://t.me/faoxima"
@@ -489,6 +489,7 @@ dc() {
     for f in "${BOT_COMPOSE_PREFIX}"*.yml; do
         [ -f "$f" ] && files+=(-f "$f")
     done
+    [ "$(env_get PMA_ENABLED 2>/dev/null)" = "1" ] && files+=(--profile phpmyadmin)
     docker compose "${files[@]}" --env-file "$ENV_FILE" "$@"
 }
 
@@ -624,6 +625,23 @@ render_vhost() {
 $(printf '%s' "$pma_allowed_ips" | tr ',' '\n')
 EOF
     fi
+    if ! pma_enabled; then
+        local pma_tmp
+        pma_tmp=$(mktemp "${TMPDIR:-/tmp}/faoxima_vhost.XXXXXX") || { ui_err "Failed to create a temporary file for ${outfile}."; return 1; }
+        awk '
+            !skip && index($0, "location /phpmyadmin/ {") {
+                print "    location /phpmyadmin/ {"
+                print "        return 404;"
+                print "    }"
+                skip = 1
+                next
+            }
+            skip && $0 ~ /^[[:space:]]*}[[:space:]]*$/ { skip = 0; next }
+            !skip { print }
+        ' "$outfile" > "$pma_tmp" && cat "$pma_tmp" > "$outfile" \
+            || { rm -f "$pma_tmp"; ui_err "Failed to disable the phpMyAdmin location in ${outfile}."; return 1; }
+        rm -f "$pma_tmp"
+    fi
 }
 
 render_bot_location() {
@@ -715,6 +733,186 @@ env_set() {
     fi
 }
 
+
+mysql_binlog_query() {
+    local root_pass output status
+    root_pass=$(env_get MYSQL_ROOT_PASSWORD 2>/dev/null || true)
+    if [ -z "$root_pass" ]; then
+        ui_err "MYSQL_ROOT_PASSWORD is missing from the installation configuration."
+        return 1
+    fi
+    if output=$(dc exec -T -e MYSQL_PWD="$root_pass" db sh -c '
+        if ! command -v timeout >/dev/null 2>&1; then
+            echo "The database container is missing the timeout utility." >&2
+            exit 1
+        fi
+        exec timeout -k 5s 30s mysql --connect-timeout=5 --batch --skip-column-names -uroot -e "$1"
+    ' sh "$1" 2>&1); then
+        printf '%s\n' "$output"
+        return 0
+    else
+        status=$?
+        [ -z "$output" ] || printf '%s\n' "$output" >&2
+        case "$status" in
+            124|137) printf '%s\n' "MySQL did not respond within 30 seconds. A full disk can block MySQL even when the container reports healthy. Free some disk space outside the database, then retry." >&2 ;;
+            *) [ -n "$output" ] || printf 'MySQL command failed without diagnostic output (exit code %s). Check the database container logs and disk space.\n' "$status" >&2 ;;
+        esac
+        return "$status"
+    fi
+}
+
+cleanup_mysql_logs_now() {
+    local cid volume image override output confirm new_cid new_volume
+    if [ ! -f "$ENV_FILE" ] || [ ! -f "$COMPOSE_FILE" ]; then
+        ui_err "No installed database configuration was found."
+        return 1
+    fi
+    cid=$(dc ps -a -q db 2>/dev/null)
+    if [ -z "$cid" ]; then
+        ui_err "The database container was not found; cleanup stopped."
+        return 1
+    fi
+    volume=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/mysql"}}{{if eq .Type "volume"}}{{.Name}}{{end}}{{end}}{{end}}' "$cid" 2>/dev/null)
+    image=$(docker inspect --format '{{.Image}}' "$cid" 2>/dev/null)
+    if [[ ! "$volume" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]+$ ]] || [[ ! "$image" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+        ui_err "The existing database volume or image could not be verified; cleanup stopped."
+        return 1
+    fi
+    ui_warn "This clears MySQL Docker logs and all inactive binary logs, including recent ones."
+    ui_warn "The shared database container will be recreated; all bots will briefly lose database access."
+    ui_info "The existing image and database volume (${volume}) will be reused. Database tables are preserved."
+    ui_warn "Binary log recovery history will be lost. Do not continue if an offline replica or backup needs these logs."
+    printf '  %s❯%s Clean MySQL binary and Docker logs now? [y/N]: ' "$C_YELLOW" "$C_RESET"
+    read -r confirm
+    if [[ "${confirm,,}" != "y" ]]; then
+        ui_info "Cancelled."
+        return 0
+    fi
+    override=$(mktemp "${TMPDIR:-/tmp}/faoxima_log_cleanup.XXXXXX.yml") || { ui_err "Cannot prepare the database log cleanup configuration."; return 1; }
+    if ! cat > "$override" <<EOF
+services:
+  db:
+    image: ${image}
+    stop_grace_period: 120s
+    volumes:
+      - db_data:/var/lib/mysql
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+volumes:
+  db_data:
+    external: true
+    name: ${volume}
+EOF
+    then
+        rm -f "$override"
+        ui_err "Cannot write the database log cleanup configuration."
+        return 1
+    fi
+    if ! output=$(dc -f "$override" config --quiet 2>&1); then
+        rm -f "$override"
+        ui_err "Database cleanup configuration is invalid: ${output}"
+        return 1
+    fi
+    ui_action "Clearing old MySQL Docker logs and enabling log rotation (3 files of 20 MiB)..."
+    if ! dc -f "$override" up -d --no-deps --no-build --pull never --force-recreate --timeout 120 db; then
+        rm -f "$override"
+        ui_err "Database container recreation failed. Check its status and logs before retrying."
+        return 1
+    fi
+    rm -f "$override"
+    new_cid=$(dc ps -a -q db 2>/dev/null)
+    new_volume=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/mysql"}}{{if eq .Type "volume"}}{{.Name}}{{end}}{{end}}{{end}}' "$new_cid" 2>/dev/null)
+    if [ "$new_volume" != "$volume" ]; then
+        ui_err "The database volume could not be verified after recreation. Cleanup stopped."
+        return 1
+    fi
+    ui_action "Waiting for MySQL to become healthy..."
+    if ! wait_for_healthy db 180; then
+        ui_err "MySQL Docker logs were cleared, but the database did not become healthy."
+        dc logs --tail=50 db
+        return 1
+    fi
+    ui_ok "Old MySQL Docker logs cleared; log rotation is enabled."
+    if ! cleanup_mysql_binlogs_now confirmed; then
+        ui_warn "Docker log cleanup succeeded, but binary log cleanup did not complete."
+        return 1
+    fi
+}
+
+cleanup_mysql_binlogs_now() {
+    local logs active_log before_bytes after_bytes output confirm pass
+    if [ ! -f "$ENV_FILE" ] || [ ! -f "$COMPOSE_FILE" ]; then
+        ui_err "No installed database configuration was found."
+        return 1
+    fi
+    ui_action "Checking MySQL binary logs..."
+    if ! logs=$(mysql_binlog_query "SHOW BINARY LOGS;" 2>&1); then
+        ui_err "Cannot read binary logs: ${logs}"
+        ui_info "If the disk is completely full, free some build cache first and retry."
+        return 1
+    fi
+    before_bytes=$(printf '%s\n' "$logs" | awk '{total += $2} END {printf "%.0f", total}')
+    ui_info "Current binary logs: $(printf '%s\n' "$logs" | awk 'NF {n++} END {print n+0}'), total $(awk -v bytes="$before_bytes" 'BEGIN {printf "%.2f MiB", bytes/1048576}')."
+    ui_info "This affects the shared MySQL server used by all installed bots. Database tables are preserved."
+    ui_warn "All inactive binary logs will be removed, including recent ones. Their recovery history will be lost."
+    ui_warn "Do not continue if an offline replica or a backup still needs these logs."
+    if [ "${1:-}" != "confirmed" ]; then
+        printf '  %s❯%s Clean binary logs now? [y/N]: ' "$C_YELLOW" "$C_RESET"
+        read -r confirm
+        if [[ "${confirm,,}" != "y" ]]; then
+            ui_info "Cancelled."
+            return 0
+        fi
+    fi
+    for pass in 1 2; do
+        active_log=$(printf '%s\n' "$logs" | awk 'NF {name=$1} END {print name}')
+        if [[ ! "$active_log" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+            ui_err "MySQL returned an unexpected binary log name; cleanup stopped."
+            return 1
+        fi
+        ui_action "Removing binary logs older than ${active_log}..."
+        if ! output=$(mysql_binlog_query "PURGE BINARY LOGS TO '${active_log}'; SHOW WARNINGS;" 2>&1); then
+            ui_err "Binary log cleanup failed: ${output}"
+            return 1
+        fi
+        [ -n "$output" ] && ui_warn "$output"
+        if [ "$pass" -eq 1 ]; then
+            ui_action "Rotating the current binary log..."
+            if ! output=$(mysql_binlog_query "FLUSH BINARY LOGS;" 2>&1); then
+                ui_warn "Old logs were processed, but the current log could not be rotated: ${output}"
+                ui_info "Free additional disk space and retry."
+                return 1
+            fi
+            if ! logs=$(mysql_binlog_query "SHOW BINARY LOGS;" 2>&1); then
+                ui_err "Cannot read binary logs after rotation: ${logs}"
+                return 1
+            fi
+        fi
+    done
+    if ! logs=$(mysql_binlog_query "SHOW BINARY LOGS;" 2>&1); then
+        ui_err "Cleanup commands completed, but the final log size could not be verified: ${logs}"
+        return 1
+    fi
+    after_bytes=$(printf '%s\n' "$logs" | awk '{total += $2} END {printf "%.0f", total}')
+    ui_ok "Binary log cleanup completed."
+    ui_info "$(awk -v before="$before_bytes" -v after="$after_bytes" 'BEGIN {saved=before-after; if (saved<0) saved=0; printf "Binary log size reduced by %.2f MiB; remaining %.2f MiB.", saved/1048576, after/1048576}')"
+    ui_info "The active log and any logs MySQL needs for connected replicas are retained."
+}
+
+cleanup_mysql_binlogs() {
+    local root_pass
+    root_pass=$(env_get MYSQL_ROOT_PASSWORD 2>/dev/null || true)
+
+    [ -z "$root_pass" ] && return 0
+
+    dc exec -T db mysql -uroot -p"${root_pass}" \
+        -e "PURGE BINARY LOGS BEFORE DATE_SUB(NOW(), INTERVAL 7 DAY);" \
+        >/dev/null 2>&1 || true
+}
+
 cache_get() {
     local key="$1" max_age="$2"
     local file="${CACHE_DIR}/${key}"
@@ -767,6 +965,7 @@ ensure_host_prerequisites() {
         curl:curl
         wget:wget
         unzip:unzip
+        zip:zip
         openssl:openssl
         envsubst:gettext-base
         ss:iproute2
@@ -1308,12 +1507,12 @@ grant_file_permissions() {
     fi
 
     local php_owner
-    php_owner=$(resolve_php_fpm_owner "$service")
+    php_owner=$(resolve_php_fpm_owner "$service") || return 1
 
     ui_action "Re-applying file permissions inside the ${service} container..."
     log_action "Normalizing runtime permissions inside ${service} (owner ${php_owner})"
     local output
-    if output=$(dc exec -T "$service" sh -c "$(permission_normalize_script)" _ "$CONTAINER_APP_DIR" "$php_owner" 2>&1); then
+    if output=$(dc exec -T -u 0 "$service" sh -c "$(permission_normalize_script)" _ "$CONTAINER_APP_DIR" "$php_owner" 2>&1); then
         ui_ok "File permissions re-applied."
     else
         ui_err "Failed to re-apply file permissions inside the ${service} container."
@@ -1330,10 +1529,10 @@ permission_normalize_script() {
 set -e
 app_dir="$1"
 owner="$2"
-mkdir -p "$app_dir/cron" "$app_dir/cronbot/.runtime" "$app_dir/logs" 2>/dev/null || true
-chown -R "$owner" "$app_dir" 2>/dev/null || true
-find "$app_dir" -path "$app_dir/installer" -prune -o -type d -exec chmod 775 {} + 2>/dev/null || true
-find "$app_dir" -path "$app_dir/installer" -prune -o -type f -exec chmod 664 {} + 2>/dev/null || true
+mkdir -p "$app_dir/cron" "$app_dir/cronbot/.runtime" "$app_dir/logs"
+chown -R "$owner" "$app_dir"
+find "$app_dir" -path "$app_dir/installer" -prune -o -type d -exec chmod 775 {} +
+find "$app_dir" -path "$app_dir/installer" -prune -o -type f -exec chmod 664 {} +
 if [ -d "$app_dir/installer" ]; then
     chmod 555 "$app_dir/installer"
     find "$app_dir/installer" -type f -exec chmod 444 {} +
@@ -1390,15 +1589,19 @@ normalize_source_permissions() {
 
 resolve_php_fpm_owner() {
     local service="${1:-app}" resolved
-    resolved=$(dc exec -T "$service" sh -c '
+    resolved=$(dc exec -T -u 0 "$service" sh -c '
         u=$(grep -hE "^[[:space:]]*user[[:space:]]*=" /usr/local/etc/php-fpm.d/*.conf 2>/dev/null | tail -n1 | sed -E "s/^[^=]*=[[:space:]]*//; s/[[:space:]]*(;.*)?$//")
         g=$(grep -hE "^[[:space:]]*group[[:space:]]*=" /usr/local/etc/php-fpm.d/*.conf 2>/dev/null | tail -n1 | sed -E "s/^[^=]*=[[:space:]]*//; s/[[:space:]]*(;.*)?$//")
         [ -n "$u" ] || u=www-data
         [ -n "$g" ] || g=$u
-        id -u "$u" >/dev/null 2>&1 || u=www-data
+        id -u "$u" >/dev/null 2>&1 || exit 1
+        getent group "$g" >/dev/null 2>&1 || exit 1
         printf "%s:%s" "$u" "$g"
-    ' 2>/dev/null | tr -d '\r')
-    [[ "$resolved" =~ ^[A-Za-z0-9._-]+:[A-Za-z0-9._-]+$ ]] || resolved="www-data:www-data"
+    ' 2>/dev/null | tr -d '\r') || {
+        ui_err "Unable to resolve the PHP-FPM runtime owner in ${service}." >&2
+        return 1
+    }
+    [[ "$resolved" =~ ^[A-Za-z0-9._-]+:[A-Za-z0-9._-]+$ ]] || return 1
     printf '%s' "$resolved"
 }
 
@@ -1411,18 +1614,18 @@ verify_runtime_permissions() {
     fi
 
     local php_owner php_user
-    php_owner=$(resolve_php_fpm_owner "$service")
+    php_owner=$(resolve_php_fpm_owner "$service") || return 1
     php_user="${php_owner%%:*}"
     log_info "Runtime permission check: PHP-FPM user in ${service} resolved to ${php_owner}"
 
     local output
-    output=$(dc exec -T -u "$php_user" "$service" sh -c '
+    output=$(dc exec -T -u "$php_owner" "$service" sh -c '
         cd "$1" || { echo "FAIL . cannot-enter"; exit 0; }
         check() {
-            f="$1/.permission-test.$$"
+            f=""
             if [ ! -d "$1" ]; then
                 echo "FAIL $1 missing"
-            elif ( : > "$f" ) 2>/dev/null && rm -f "$f" 2>/dev/null && [ ! -e "$f" ]; then
+            elif f=$(mktemp "$1/.permission-test.XXXXXX") && printf "%s" permission-ok > "$f" && [ "$(cat "$f")" = permission-ok ] && rm -f "$f" && [ ! -e "$f" ]; then
                 echo "OK $1"
             else
                 rm -f "$f" 2>/dev/null
@@ -1433,7 +1636,14 @@ verify_runtime_permissions() {
         for m in re/rx/*/manifest.php; do [ -f "$m" ] && check "${m%/manifest.php}"; done
         [ -d storage/private ] && check storage/private
         check .
-    ' _ "$CONTAINER_APP_DIR" 2>&1 | tr -d '\r')
+        for f in config.php function.php cron/cron.php; do
+            if [ -r "$f" ]; then echo "OK $f"; else echo "FAIL $f not-readable"; fi
+        done
+    ' _ "$CONTAINER_APP_DIR" 2>&1 | tr -d '\r') || {
+        ui_err "Runtime permission check could not execute in ${service}."
+        printf '%s\n' "$output"
+        return 1
+    }
 
     local line state rel failed=0 others_ok=0
     while IFS= read -r line; do
@@ -1449,17 +1659,18 @@ verify_runtime_permissions() {
                 ;;
             FAIL)
                 failed=1
-                ui_err "Runtime permission check failed: ${php_user} cannot write to ${CONTAINER_APP_DIR}/${rel} (${line##* })"
+                ui_err "Runtime permission check failed: ${CONTAINER_APP_DIR}/${rel} (${line##* }; user ${php_owner})"
                 log_error "Runtime permission check failed for ${rel} as ${php_user} (${line##* })"
                 ;;
         esac
     done <<< "$output"
 
-    if [ "$failed" -eq 0 ] && ! grep -q '^OK cronbot$' <<< "$output"; then
-        failed=1
-        ui_err "Runtime permission check could not run as ${php_user} inside ${service}."
-        log_error "Runtime permission check did not run as ${php_user} in ${service}: $(printf '%s' "$output" | head -n3 | tr '\n' ' ')"
-    fi
+    for rel in cron cronbot cronbot/.runtime logs . config.php function.php cron/cron.php; do
+        if ! grep -Fxq "OK $rel" <<< "$output"; then
+            failed=1
+            log_error "Runtime permission check missing success for ${rel} as ${php_owner} in ${service}"
+        fi
+    done
     [ "$failed" -eq 0 ] || return 1
 
     log_info "Runtime permission check: ${others_ok} additional runtime directories OK"
@@ -1752,6 +1963,8 @@ install_bot() {
     env_set "FAOXIMA_INSTALLED_VERSION" "$(resolve_source_version "$install_source" "$version_arg1" "$version_arg2" "$PROJECT_DIR")"
     env_set "FAOXIMA_SOURCE_VERSION" "$(resolve_source_version "$install_source" "$version_arg1" "$version_arg2" "$PROJECT_DIR")"
     env_set "FAOXIMA_UPDATE_STATE" "complete"
+    [ -z "$(env_get PMA_ENABLED)" ] && env_set "PMA_ENABLED" "0"
+    env_set "PMA_DISABLE_MIGRATION_DONE" "1"
     ui_ok "Wrote ${ENV_FILE}"
 
     mkdir -p "$NGINX_CONF_DIR" "$NGINX_BOTS_CONF_DIR" "$BOTS_DIR" || { ui_err "Failed to create ${NGINX_CONF_DIR}, ${NGINX_BOTS_CONF_DIR}, or ${BOTS_DIR}."; exit 1; }
@@ -1765,7 +1978,7 @@ install_bot() {
     }
 
     ui_action "Building images (this can take a few minutes)..."
-    dc build app || { ui_err "docker compose build failed."; exit 1; }
+    dc build --pull app || { ui_err "docker compose build failed."; exit 1; }
 
     ui_action "Generating a temporary self-signed certificate so nginx can start..."
     ensure_dummy_cert "$domainname" || ui_warn "Could not generate a temporary certificate — nginx may fail to start until SSL is issued."
@@ -1781,7 +1994,12 @@ install_bot() {
     ui_ok "Database container is healthy."
 
     ui_action "Starting app, nginx, and supporting services..."
-    dc up -d --no-deps app nginx certbot phpmyadmin || { ui_err "docker compose up failed."; exit 1; }
+    local start_services=(app nginx certbot)
+    pma_enabled && start_services+=(phpmyadmin)
+    dc up -d --no-deps "${start_services[@]}" || { ui_err "docker compose up failed."; exit 1; }
+    if ! pma_enabled && ! pma_stop_containers; then
+        ui_warn "A phpMyAdmin container from a previous installation could not be stopped — it is not reachable through nginx."
+    fi
 
     ui_action "Waiting for the app database user to accept connections..."
     if ! wait_for_db_ready 60; then
@@ -1799,6 +2017,7 @@ install_bot() {
         fi
     fi
     ui_ok "Database is ready for connections."
+    cleanup_mysql_binlogs
 
     ui_action "Waiting for config.php to finish templating from environment..."
     if ! wait_for_config_templated 60 app; then
@@ -1834,7 +2053,7 @@ install_bot() {
         local fresh_cert_enddate
         fresh_cert_enddate=$(get_cert_enddate "$domainname")
         [ -n "$fresh_cert_enddate" ] && cache_set "cert_enddate" "$fresh_cert_enddate"
-        cache_set "pma_running" "1"
+        if pma_is_running; then cache_set "pma_running" "1"; else cache_set "pma_running" "0"; fi
     else
         ui_err "SSL issuance failed for ${domainname} — installation cannot complete without a valid certificate."
         diagnose_ssl_failure "$domainname"
@@ -1851,7 +2070,7 @@ install_bot() {
     show_logo
     ui_status_table "INSTALLATION SUCCESSFUL" "$C_GREEN" \
         "Bot URL|${C_GREEN}https://${domainname}/faoxima${C_RESET}" \
-        "phpMyAdmin|${C_GREEN}https://${domainname}/phpmyadmin/${C_RESET} ${C_DIM}(login with the DB credentials below)${C_RESET}" \
+        "phpMyAdmin|$(pma_access_label "$domainname" "(login with the DB credentials below)")" \
         "Database name|${C_CYAN}${DEFAULT_DB_NAME}${C_RESET}" \
         "Database user|${C_CYAN}${DEFAULT_DB_NAME}${C_RESET}" \
         "Database password|${C_CYAN}${mysql_pass}${C_RESET}" \
@@ -2008,6 +2227,11 @@ EOF
 services:
   app_${botname}:
     image: faoxima_app:latest
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
     env_file: ${bot_dir}/.env
     volumes:
       - ${bot_dir}:/var/www/faoxima
@@ -2034,6 +2258,7 @@ EOF
         return 1
     fi
     ui_ok "Database is ready for connections."
+    cleanup_mysql_binlogs
 
     ui_action "Waiting for '${botname}' config.php to finish templating from environment..."
     if ! wait_for_config_templated 60 "app_${botname}"; then
@@ -2079,7 +2304,7 @@ EOF
     ui_status_table "ADDITIONAL BOT INSTALLED" "$C_GREEN" \
         "Bot name|${C_CYAN}${botname}${C_RESET}" \
         "Bot URL|${C_GREEN}https://${domainname}/${botname}${C_RESET}" \
-        "phpMyAdmin|${C_GREEN}https://${domainname}/phpmyadmin/${C_RESET} ${C_DIM}(login with the DB credentials below)${C_RESET}" \
+        "phpMyAdmin|$(pma_access_label "$domainname" "(login with the DB credentials below)")" \
         "Database name|${C_CYAN}${db_name}${C_RESET}" \
         "Database user|${C_CYAN}${db_user}${C_RESET}" \
         "Database password|${C_CYAN}${db_pass}${C_RESET}" \
@@ -2727,23 +2952,23 @@ update_bot_source() {
         return 1
     fi
 
+    if [ -s "$temp_env" ]; then
+        cp "$temp_env" "$env_path" || { rm -rf "$work_dir" "$temp_config" "$temp_env"; ui_err ".env restore failed for '${label}'."; return 1; }
+    fi
+
     if ! normalize_source_permissions "$code_dir"; then
         rm -rf "$work_dir" "$temp_config" "$temp_env"
         ui_err "Runtime permission normalization failed for '${label}' after replacing the source."
         return 1
     fi
     if [ -n "$(dc ps -q "$app_service" 2>/dev/null)" ]; then
-        if ! verify_runtime_permissions "$app_service"; then
+        if ! grant_file_permissions "$app_service"; then
             rm -rf "$work_dir" "$temp_config" "$temp_env"
             ui_err "Update aborted for '${label}': PHP cannot write to its runtime directories."
             return 1
         fi
     else
         log_warn "Runtime permission check deferred for ${app_service}: container not running yet"
-    fi
-
-    if [ -s "$temp_env" ]; then
-        cp "$temp_env" "$env_path" || { rm -rf "$work_dir" "$temp_config" "$temp_env"; ui_err ".env restore failed for '${label}'."; return 1; }
     fi
 
     if [ ! -f "$config_path" ]; then
@@ -2782,7 +3007,7 @@ update_bot_source() {
 
     if [ "$should_build" = "1" ]; then
         ui_action "Rebuilding the app image for '${label}'..."
-        dc build "$app_service" || ui_warn "Rebuilding the app image for '${label}' failed — continuing with the existing image."
+        dc build --pull "$app_service" || { ui_err "Rebuilding the app image for '${label}' failed. Update remains pending; retry after fixing the build error."; return 1; }
     fi
     ui_action "Restarting services for '${label}' with the updated source..."
     dc up -d --no-deps "$app_service" || { normalize_source_permissions "$code_dir" || true; ui_err "Failed to bring '${label}' services back up."; return 1; }
@@ -2874,6 +3099,8 @@ update_bot() {
         exit 1
     fi
 
+    pma_run_update_migration || true
+
     if [ -f "$INSTALL_SCRIPT_PATH" ]; then
         if chmod +x "$INSTALL_SCRIPT_PATH" 2>/dev/null && ln -sf "$INSTALL_SCRIPT_PATH" "$INSTALL_SCRIPT_LINK" >/dev/null 2>&1; then
             ui_ok "Ensured ${INSTALL_SCRIPT_PATH} is executable and 'faoxima' command is linked."
@@ -2952,7 +3179,7 @@ remove_bot() {
     install_source=$(env_get INSTALL_SOURCE)
 
     log_action "Tearing down the Faoxima Docker stack..."
-    dc down -v || { ui_err "docker compose down -v failed."; exit 1; }
+    dc --profile phpmyadmin down -v || { ui_err "docker compose down -v failed."; exit 1; }
     ui_ok "Containers and volumes (db_data, certs, certbot_webroot) removed."
 
     if [ -f "$ENV_FILE" ]; then
@@ -3057,15 +3284,29 @@ export_database_single() {
     dump_bot_database "$botname" "$db_name" "$db_user" "$db_pass" "$backup_file"
 }
 
-export_database_all() {
+export_database_all() (
+    umask 077
     show_logo
     ui_panel "EXPORT DATABASE — ALL BOTS" "$C_BOLD$C_BLUE" "$C_BLUE" \
-        "${C_WHITE}Backs up the main bot and every additional bot's database in one pass.${C_RESET}"
+        "${C_WHITE}Saves the main and additional bots' SQL backups together in one ZIP under /root.${C_RESET}"
+
+    if ! command -v zip >/dev/null 2>&1; then
+        ensure_host_prerequisites || return 1
+    fi
+    local work_dir archive_file
+    work_dir=$(mktemp -d "/root/faoxima_backup_$(date +%Y-%m-%d_%H%M%S).XXXXXX") || {
+        ui_err "Failed to create a temporary backup directory."
+        return 1
+    }
+    trap 'rm -rf -- "$work_dir"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    archive_file="${work_dir}.zip"
 
     local failures=0
 
     if require_env_db_creds; then
-        local backup_file="/root/${DB_NAME}_backup_$(date +%Y-%m-%d).sql"
+        local backup_file="${work_dir}/main.sql"
         dump_bot_database "main" "$DB_NAME" "$DB_USER" "$DB_PASS" "$backup_file" || failures=$((failures + 1))
     else
         ui_err "Failed to read database credentials for the main bot."
@@ -3091,17 +3332,27 @@ export_database_all() {
                 failures=$((failures + 1))
                 continue
             fi
-            backup_file="/root/${db_name}_backup_$(date +%Y-%m-%d).sql"
+            backup_file="${work_dir}/bot_${botname}.sql"
             dump_bot_database "$botname" "$db_name" "$db_user" "$db_pass" "$backup_file" || failures=$((failures + 1))
         done
     fi
 
     if [ "$failures" -gt 0 ]; then
-        ui_warn "Bulk export finished with ${failures} failure(s) — see the messages above."
+        ui_err "Bulk export had ${failures} failure(s). No ZIP was saved; temporary SQL files will be removed."
         return 1
     fi
-    ui_ok "Bulk export finished successfully for the main bot and all additional bots."
-}
+    ui_action "Compressing SQL backups..."
+    if ! zip -j -q "${work_dir}/backup.zip" "${work_dir}"/*.sql \
+        || ! unzip -tq "${work_dir}/backup.zip" >/dev/null 2>&1; then
+        ui_err "Failed to create or verify the ZIP backup. No ZIP was saved."
+        return 1
+    fi
+    if ! mv -- "${work_dir}/backup.zip" "$archive_file"; then
+        ui_err "Failed to save the ZIP backup at ${archive_file}."
+        return 1
+    fi
+    ui_ok "All bots backed up successfully: ${archive_file}"
+)
 
 import_database() {
     show_logo
@@ -3223,6 +3474,133 @@ detect_ram_mb() {
         break
     done
     printf '%d' "$host"
+}
+
+read_host_available_mb() {
+    local avail limit cur free_cg pair lf cf
+    avail=$(awk '/^MemAvailable:/{print int($2 / 1024)}' /proc/meminfo 2>/dev/null)
+    [[ "$avail" =~ ^[0-9]+$ ]] || return 1
+    for pair in "/sys/fs/cgroup/memory.max:/sys/fs/cgroup/memory.current" \
+                "/sys/fs/cgroup/memory/memory.limit_in_bytes:/sys/fs/cgroup/memory/memory.usage_in_bytes"; do
+        lf="${pair%%:*}"
+        cf="${pair#*:}"
+        [ -r "$lf" ] && [ -r "$cf" ] || continue
+        limit=$(tr -d '[:space:]' < "$lf" 2>/dev/null)
+        cur=$(tr -d '[:space:]' < "$cf" 2>/dev/null)
+        { [[ "$limit" =~ ^[0-9]+$ ]] && [ "${#limit}" -le 15 ] && [[ "$cur" =~ ^[0-9]+$ ]]; } || continue
+        free_cg=$(((limit - cur) / 1048576))
+        [ "$free_cg" -lt 0 ] && free_cg=0
+        [ "$free_cg" -lt "$avail" ] && avail="$free_cg"
+        break
+    done
+    printf '%d' "$avail"
+}
+
+docker_mem_usage_to_mb() {
+    awk -v raw="$1" 'BEGIN {
+        split(raw, parts, "/")
+        v = parts[1]
+        gsub(/[[:space:]]/, "", v)
+        if (!match(v, /^[0-9.]+/)) exit 1
+        n = substr(v, 1, RLENGTH) + 0
+        u = tolower(substr(v, RLENGTH + 1))
+        if (u == "b") m = n / 1048576
+        else if (u == "kib") m = n / 1024
+        else if (u == "kb") m = n / 1048.576
+        else if (u == "mib") m = n
+        else if (u == "mb") m = n / 1.048576
+        else if (u == "gib") m = n * 1024
+        else if (u == "gb") m = n * 953.674
+        else if (u == "tib") m = n * 1048576
+        else exit 1
+        printf "%d", m + 0.999
+    }'
+}
+
+measure_optimizer_resources() {
+    local project samples="${1:-3}" i line name usage mb svc avail
+    local -A fx_service=() peak=()
+    meas_mode="none"
+    meas_avail_mb=0
+    meas_fx_php_mb=0
+    meas_fx_db_mb=0
+    meas_fx_redis_mb=0
+    meas_fx_other_mb=0
+    meas_ext_docker_mb=0
+    meas_samples=0
+    meas_note=""
+
+    project=$(env_get COMPOSE_PROJECT_NAME 2>/dev/null)
+    project="${project:-faoxima}"
+    while IFS='|' read -r name svc; do
+        [ -n "$name" ] && [ -n "$svc" ] && fx_service["$name"]="$svc"
+    done < <(docker ps --filter "label=com.docker.compose.project=${project}" --format '{{.Names}}|{{.Label "com.docker.compose.service"}}' 2>/dev/null)
+
+    local stats_ok=1 avail_min=""
+    for ((i = 1; i <= samples; i++)); do
+        avail=$(read_host_available_mb) && { [ -z "$avail_min" ] || [ "$avail" -lt "$avail_min" ]; } && avail_min="$avail"
+        if [ "$stats_ok" -eq 1 ]; then
+            local stats_out
+            if stats_out=$(timeout 20 docker stats --no-stream --format '{{.Name}}|{{.MemUsage}}' 2>/dev/null) && [ -n "$stats_out" ]; then
+                while IFS='|' read -r name usage; do
+                    [ -n "$name" ] || continue
+                    mb=$(docker_mem_usage_to_mb "$usage") || continue
+                    { [ -z "${peak[$name]:-}" ] || [ "$mb" -gt "${peak[$name]}" ]; } && peak["$name"]="$mb"
+                done <<< "$stats_out"
+            else
+                stats_ok=0
+            fi
+        fi
+        avail=$(read_host_available_mb) && { [ -z "$avail_min" ] || [ "$avail" -lt "$avail_min" ]; } && avail_min="$avail"
+        meas_samples=$i
+        [ "$i" -lt "$samples" ] && sleep 2
+    done
+
+    if [ -z "$avail_min" ]; then
+        meas_note="host available memory (/proc/meminfo MemAvailable) could not be read"
+        return 1
+    fi
+    meas_avail_mb="$avail_min"
+
+    if [ "$stats_ok" -eq 0 ] || [ "${#peak[@]}" -eq 0 ] || [ "${#fx_service[@]}" -eq 0 ]; then
+        meas_mode="host"
+        meas_note="Docker container memory could not be measured — using host memory only"
+        return 0
+    fi
+
+    for name in "${!peak[@]}"; do
+        mb="${peak[$name]}"
+        svc="${fx_service[$name]:-}"
+        case "$svc" in
+            "") meas_ext_docker_mb=$((meas_ext_docker_mb + mb)) ;;
+            app|app_*) meas_fx_php_mb=$((meas_fx_php_mb + mb)) ;;
+            db) meas_fx_db_mb=$((meas_fx_db_mb + mb)) ;;
+            redis) meas_fx_redis_mb=$((meas_fx_redis_mb + mb)) ;;
+            *) meas_fx_other_mb=$((meas_fx_other_mb + mb)) ;;
+        esac
+    done
+    meas_mode="full"
+    return 0
+}
+
+app_container_memory_limit_mb() {
+    local svc cid limit min_mb=0 mb
+    for svc in "$@"; do
+        cid=$(dc ps -q "$svc" 2>/dev/null | head -1)
+        [ -n "$cid" ] || continue
+        limit=$(docker inspect -f '{{.HostConfig.Memory}}' "$cid" 2>/dev/null)
+        [[ "$limit" =~ ^[0-9]+$ ]] && [ "$limit" -gt 0 ] || continue
+        mb=$((limit / 1048576))
+        { [ "$min_mb" -eq 0 ] || [ "$mb" -lt "$min_mb" ]; } && min_mb="$mb"
+    done
+    printf '%d' "$min_mb"
+}
+
+compute_headroom_mb() {
+    local h=$(($1 * 15 / 100))
+    [ "$h" -lt 128 ] && h=128
+    [ "$h" -gt 1024 ] && h=1024
+    printf '%d' "$h"
 }
 
 ini_size_to_mb() {
@@ -3447,7 +3825,11 @@ write_fpm_pool_conf() {
     [ "$max_spare" -gt "$max_children" ] && max_spare="$max_children"
 
     cat > "$file" <<EOF
+[global]
+log_level = warning
+
 [www]
+access.log = /dev/null
 pm.max_children = ${max_children}
 pm.start_servers = ${start_servers}
 pm.min_spare_servers = ${min_spare}
@@ -3666,18 +4048,57 @@ optimize_database() {
         redis_mem_mb=$(compute_redis_maxmemory "$ram_mb")
     fi
 
-    local system_mb mysql_mb redis_reserve_mb worker_cost_mb php_budget_mb
+    local system_mb mysql_mb redis_reserve_mb worker_cost_mb php_budget_mb static_budget_mb
     system_mb=$(compute_system_reserve_mb "$ram_mb")
     mysql_mb=$(compute_mysql_reserve_mb "$ram_mb")
     redis_reserve_mb=$(compute_redis_reserve_mb "$redis_mem_mb")
     worker_cost_mb=$(compute_worker_cost_mb)
-    php_budget_mb=$((ram_mb - system_mb - mysql_mb - redis_reserve_mb))
-    [ "$php_budget_mb" -lt 0 ] && php_budget_mb=0
+    static_budget_mb=$((ram_mb - system_mb - mysql_mb - redis_reserve_mb))
+    [ "$static_budget_mb" -lt 0 ] && static_budget_mb=0
+
+    ui_action "Sampling host and container memory (3 samples, ~10s, no load is generated)..."
+    local meas_mode meas_avail_mb meas_fx_php_mb meas_fx_db_mb meas_fx_redis_mb meas_fx_other_mb meas_ext_docker_mb meas_samples meas_note
+    measure_optimizer_resources 3 || true
+
+    local headroom_mb app_base_mb=32 measured_budget_mb="" fx_total_mb=0 ext_mb=0 mysql_plan_mb="$mysql_mb" redis_plan_mb="$redis_reserve_mb" other_plan_mb=0
+    headroom_mb=$(compute_headroom_mb "$ram_mb")
+    case "$meas_mode" in
+        full)
+            fx_total_mb=$((meas_fx_php_mb + meas_fx_db_mb + meas_fx_redis_mb + meas_fx_other_mb))
+            ext_mb=$((ram_mb - meas_avail_mb - fx_total_mb))
+            [ "$ext_mb" -lt 0 ] && ext_mb=0
+            [ "$meas_fx_db_mb" -gt "$mysql_plan_mb" ] && mysql_plan_mb="$meas_fx_db_mb"
+            [ "$meas_fx_redis_mb" -gt "$redis_plan_mb" ] && redis_plan_mb="$meas_fx_redis_mb"
+            other_plan_mb=$((meas_fx_other_mb + meas_fx_other_mb / 4))
+            measured_budget_mb=$((meas_avail_mb + fx_total_mb - headroom_mb - mysql_plan_mb - redis_plan_mb - other_plan_mb - app_count * app_base_mb))
+            ;;
+        host)
+            measured_budget_mb=$((meas_avail_mb - headroom_mb))
+            ;;
+    esac
+
+    if [ -n "$measured_budget_mb" ]; then
+        [ "$measured_budget_mb" -lt 0 ] && measured_budget_mb=0
+        php_budget_mb="$static_budget_mb"
+        [ "$measured_budget_mb" -lt "$php_budget_mb" ] && php_budget_mb="$measured_budget_mb"
+        [ "$meas_mode" = "host" ] && ui_warn "${meas_note}. The budget treats current Faoxima usage as unavailable (more conservative)."
+    else
+        php_budget_mb=$((static_budget_mb * 3 / 4))
+        ui_warn "Resource measurement unavailable: ${meas_note:-unknown error}."
+        ui_warn "Using a conservative fallback: the static RAM estimate reduced by 25% (${static_budget_mb}MB → ${php_budget_mb}MB)."
+    fi
 
     local total_workers per_container_workers min_per_container=2 overcommit=0
     total_workers=$(compute_pm_max_children "$php_budget_mb" "$cores")
     per_container_workers=$((total_workers / app_count))
     [ "$per_container_workers" -gt 50 ] && per_container_workers=50
+    local container_limit_mb container_cap
+    container_limit_mb=$(app_container_memory_limit_mb "${app_services[@]}")
+    if [ "$container_limit_mb" -gt 0 ]; then
+        container_cap=$(((container_limit_mb - app_base_mb) / worker_cost_mb))
+        [ "$container_cap" -lt 0 ] && container_cap=0
+        [ "$container_cap" -lt "$per_container_workers" ] && per_container_workers="$container_cap"
+    fi
     if [ "$per_container_workers" -lt "$min_per_container" ]; then
         per_container_workers="$min_per_container"
         overcommit=1
@@ -3717,24 +4138,54 @@ optimize_database() {
     local mem_label="unchanged (faoxima.ini not found)"
     [ -n "$mem_mb" ] && mem_label="${mem_mb}M (current ${current_mem_limit:-unset}, upload floor ${upload_floor_mb}MB)"
     local redis_label="not installed"
-    [ "$has_redis" -eq 1 ] && redis_label="${redis_reserve_mb}MB (maxmemory ${redis_mem_mb}MB + overhead)"
+    [ "$has_redis" -eq 1 ] && redis_label="${redis_plan_mb}MB (maxmemory ${redis_mem_mb}MB + overhead)"
 
-    ui_status_table "Resource Plan (conservative estimate)" "$C_CYAN" \
-        "Effective CPU|${cores} logical core(s)" \
+    local plan_title="Resource Plan (conservative estimate)" plan_rows=() meas_label budget_label
+    [ "$overcommit" -eq 1 ] && plan_title="Resource Plan (OVERCOMMITTED — not memory-safe)"
+    case "$meas_mode" in
+        full) meas_label="${meas_samples} sample(s) of host + Docker memory" ;;
+        host) meas_label="${meas_samples} sample(s) of host memory only (container usage unavailable)" ;;
+        *)    meas_label="unavailable — conservative static fallback" ;;
+    esac
+    plan_rows+=("Effective CPU|${cores} logical core(s)" \
         "Effective RAM|${ram_mb}MB" \
-        "Bots / databases|${bot_count} bot(s), ${db_count} database(s), ${user_count} user record(s)" \
+        "Measurement|${meas_label}")
+    if [ "$meas_mode" != "none" ]; then
+        plan_rows+=("Available memory now|${meas_avail_mb}MB (lowest sample)")
+    fi
+    if [ "$meas_mode" = "full" ]; then
+        plan_rows+=("Faoxima containers now|${fx_total_mb}MB (PHP ${meas_fx_php_mb}, MySQL ${meas_fx_db_mb}, Redis ${meas_fx_redis_mb}, other ${meas_fx_other_mb})" \
+            "External usage|~${ext_mb}MB OS + other apps (incl. ${meas_ext_docker_mb}MB in non-Faoxima containers)")
+    fi
+    if [ "$meas_mode" != "none" ]; then
+        plan_rows+=("Reserved headroom|${headroom_mb}MB for load growth")
+        budget_label="${php_budget_mb}MB (measured ${measured_budget_mb}MB, static ${static_budget_mb}MB — lower is used)"
+    else
+        budget_label="${php_budget_mb}MB (static ${static_budget_mb}MB − 25%)"
+    fi
+    plan_rows+=("Bots / databases|${bot_count} bot(s), ${db_count} database(s), ${user_count} user record(s)" \
         "App containers|${app_count} (${app_services[*]})" \
-        "Reserved OS/Docker/Nginx|${system_mb}MB" \
-        "Reserved MySQL|${mysql_mb}MB" \
+        "Reserved OS/Docker/Nginx|${system_mb}MB (static model)" \
+        "Reserved MySQL|${mysql_plan_mb}MB" \
         "Reserved Redis|${redis_label}" \
-        "PHP worker budget|${php_budget_mb}MB (~${worker_cost_mb}MB per worker incl. DB connections)" \
-        "Total PHP-FPM workers|${effective_workers} (budget allows ${total_workers})" \
-        "Workers per container|${per_container_workers} (pm.max_children)" \
-        "PHP memory_limit|${mem_label}" \
-        "MySQL max_connections|${max_conn} (current ${current_conn})"
+        "PHP worker budget|${budget_label}" \
+        "Total PHP-FPM workers|${effective_workers} (budget allows ${total_workers}, ~${worker_cost_mb}MB each)" \
+        "Workers per container|${per_container_workers} (pm.max_children)")
+    [ "$container_limit_mb" -gt 0 ] && plan_rows+=("App container mem limit|${container_limit_mb}MB")
+    plan_rows+=("PHP memory_limit|${mem_label}" \
+        "MySQL max_connections|${max_conn} (current ${current_conn})")
+    ui_status_table "$plan_title" "$C_CYAN" "${plan_rows[@]}"
 
     if [ "$overcommit" -eq 1 ]; then
-        ui_warn "This server cannot safely give ${app_count} app container(s) the minimum of ${min_per_container} PHP-FPM workers each (budget allows ${total_workers} in total). Using ${per_container_workers} per container anyway: ~$((effective_workers * worker_cost_mb))MB estimated vs ${php_budget_mb}MB available. Add RAM or remove bots to avoid out-of-memory kills."
+        local need_mb=$((effective_workers * worker_cost_mb)) confirm_overcommit
+        ui_err "Memory shortage: ${app_count} app container(s) × ${min_per_container} PHP-FPM workers needs ~${need_mb}MB, but only ${php_budget_mb}MB is available after reservations (short by ~$((need_mb - php_budget_mb))MB)."
+        ui_err "Applying the minimum would overcommit memory and is NOT safe — it risks out-of-memory kills of Faoxima or other applications. Add RAM, stop other services, or remove bots."
+        printf '  %s❯%s Apply the minimum anyway (not memory-safe)? (y/N): ' "$C_YELLOW" "$C_RESET"
+        read -r confirm_overcommit
+        if [[ "${confirm_overcommit,,}" != "y" ]]; then
+            ui_info "Nothing was changed."
+            return 1
+        fi
     fi
     if [ -n "$mem_mb" ] && [ $((effective_workers * mem_mb)) -gt "$php_budget_mb" ]; then
         ui_warn "Worst case: if every worker reached memory_limit at the same time PHP could use $((effective_workers * mem_mb))MB (> ${php_budget_mb}MB budget). Typical requests use far less; this is a ceiling, not an expected value."
@@ -3743,6 +4194,7 @@ optimize_database() {
         ui_warn "max_connections (${max_conn}) is below the estimated peak need of ${conn_needed} for ${effective_workers} PHP workers — the RAM cap won; consider more RAM or fewer bots."
     fi
     ui_info "These values are a conservative estimate from detected resources, not guaranteed capacity for every traffic pattern. Re-run this option after adding or removing bots."
+    ui_info "Memory samples reflect current load only; they improve the estimate but cannot predict future peaks."
 
     local backup_dir f
     backup_dir=$(mktemp -d "${TMPDIR:-/tmp}/faoxima_optimize.XXXXXX") || { ui_err "Failed to create a backup directory — nothing was changed."; return 1; }
@@ -4173,155 +4625,83 @@ change_domain() {
     fi
 }
 
-container_has_error_logs() {
-    local service="$1"
-    dc logs --tail=200 "$service" 2>&1 \
-        | grep -viE '"ok":(true|false)' \
-        | grep -vE '"[A-Z]+ [^"]*" [0-9]{3}$' \
-        | grep -qiE 'error|exception|fatal|failed|warn|emerg|crit|panic'
+filter_runtime_log_noise() {
+    awk '
+        /"[A-Z]+ [^"]*" [23][0-9][0-9]([[:space:]]|$)/ { next }
+        /"request_time"[[:space:]]*:/ && /"status"[[:space:]]*:[[:space:]]*[23][0-9][0-9]([,}[:space:]]|$)/ { next }
+        /NOTICE: (fpm is running, pid [0-9]+|ready to handle connections)[[:space:]]*$/ { next }
+        { print }
+    '
 }
 
 view_error_logs() {
-    local page=0
-    local page_size=20
     local -A hidden_from_view=()
 
     while true; do
         show_logo
         ui_panel "VIEW ERROR LOGS" "$C_BOLD$C_GREEN" "$C_GREEN" \
-            "${C_WHITE}Pick a log to view — nothing is shown automatically.${C_RESET}" \
-            "${C_DIM}Scans ${PROJECT_DIR} and ${BOTS_DIR} for app-level log files, plus bot containers that have logged an error.${C_RESET}"
+            "${C_WHITE}Pick a log file to view — nothing is shown automatically.${C_RESET}" \
+            "${C_DIM}Scans ${PROJECT_DIR} and ${BOTS_DIR} for non-empty application log files (error_log and *.log).${C_RESET}"
 
-        local bot_names=() d
-        if [ -d "$BOTS_DIR" ]; then
-            for d in "${BOTS_DIR}"/*/; do
-                [ -d "$d" ] || continue
-                bot_names+=("$(basename "$d")")
-            done
-        fi
-        local bot_total="${#bot_names[@]}"
-        local bot_page_size=18
-        local bot_last_page=$(( (bot_total - 1) / bot_page_size ))
-        [ "$bot_last_page" -lt 0 ] && bot_last_page=0
-        [ "$page" -gt "$bot_last_page" ] && page="$bot_last_page"
-
-        local KINDS=() PATHS=()
-        if [ -f "$COMPOSE_FILE" ]; then
-            [ -z "${hidden_from_view[container|nginx]:-}" ] && container_has_error_logs nginx && { KINDS+=("container"); PATHS+=("nginx"); }
-            [ -z "${hidden_from_view[container|app]:-}" ] && container_has_error_logs app && { KINDS+=("container"); PATHS+=("app"); }
-        fi
-        if [ "$bot_total" -gt 0 ]; then
-            local bstart=$((page * bot_page_size))
-            local bend=$((bstart + bot_page_size))
-            [ "$bend" -gt "$bot_total" ] && bend="$bot_total"
-            local bi name
-            for ((bi = bstart; bi < bend; bi++)); do
-                name="${bot_names[$bi]}"
-                [ -z "${hidden_from_view[container|app_${name}]:-}" ] && container_has_error_logs "app_${name}" && { KINDS+=("container"); PATHS+=("app_${name}"); }
-            done
-        fi
-
-        local LOGS=()
-        mapfile -t LOGS < <(find "$PROJECT_DIR" "$BOTS_DIR" -type f \( -name 'error_log' -o -name '*.log' \) 2>/dev/null | sort)
-        local f
+        local PATHS=() LOGS=() f
+        mapfile -t LOGS < <(find "$PROJECT_DIR" "$BOTS_DIR" -type f -size +0 \( -name 'error_log' -o -name '*.log' \) 2>/dev/null | sort -u)
         for f in "${LOGS[@]}"; do
-            [ -n "${hidden_from_view[file|${f}]:-}" ] && continue
-            KINDS+=("file")
+            [ -n "${hidden_from_view[$f]:-}" ] && continue
             PATHS+=("$f")
         done
 
         if [ "${#PATHS[@]}" -eq 0 ]; then
             if [ "${#hidden_from_view[@]}" -gt 0 ]; then
-                ui_ok "No logs to show (some entries are hidden from this session's view)."
-            elif [ "$bot_total" -eq 0 ]; then
-                ui_ok "No logs found (no on-disk log files, and no compose stack installed)."
+                ui_ok "No log files to show (some entries are hidden from this session's view)."
             else
-                ui_ok "No logs found (no on-disk log files, and no bot containers currently have errors)."
+                ui_ok "No application log files found."
             fi
             return 0
         fi
 
-        if [ "$bot_last_page" -gt 0 ]; then
-            ui_info "Checking additional bots' containers page $((page + 1)) of $((bot_last_page + 1)) (nginx/app + on-disk logs are always shown in full)."
-        fi
-
-        ui_ok "Found ${#PATHS[@]} log source(s) on this view:"
+        ui_ok "Found ${#PATHS[@]} log file(s):"
         printf '\n'
         local idx size
         for ((idx = 0; idx < ${#PATHS[@]}; idx++)); do
-            if [ "${KINDS[$idx]}" = "container" ]; then
-                printf '  %s%2d)%s [container] %s\n' "$C_YELLOW" "$((idx + 1))" "$C_RESET" "${PATHS[$idx]}"
-            else
-                size=$(du -h "${PATHS[$idx]}" 2>/dev/null | awk '{print $1}')
-                printf '  %s%2d)%s %s  %s(%s)%s\n' "$C_YELLOW" "$((idx + 1))" "$C_RESET" "${PATHS[$idx]}" "$C_DIM" "${size:-?}" "$C_RESET"
-            fi
-        done
-        local has_deletable_file=0 ci
-        for ((ci = 0; ci < ${#KINDS[@]}; ci++)); do
-            [ "${KINDS[$ci]}" = "file" ] && { has_deletable_file=1; break; }
+            size=$(du -h "${PATHS[$idx]}" 2>/dev/null | awk '{print $1}')
+            printf '  %s%2d)%s %s  %s(%s)%s\n' "$C_YELLOW" "$((idx + 1))" "$C_RESET" "${PATHS[$idx]}" "$C_DIM" "${size:-?}" "$C_RESET"
         done
 
-        local delete_option=0
-        local max_option="${#PATHS[@]}"
-        if [ "$has_deletable_file" -eq 1 ]; then
-            delete_option=$(( ${#PATHS[@]} + 1 ))
-            max_option="$delete_option"
-            printf '  %s%2d)%s %sDelete a log%s\n' "$C_RED" "$delete_option" "$C_RESET" "$C_RED" "$C_RESET"
-        fi
+        local delete_option=$(( ${#PATHS[@]} + 1 ))
+        printf '  %s%2d)%s %sDelete a log%s\n' "$C_RED" "$delete_option" "$C_RESET" "$C_RED" "$C_RESET"
 
-        if [ "$bot_last_page" -gt 0 ]; then
-            printf '\n  %s(bot container page %d of %d)%s\n' "$C_DIM" "$((page + 1))" "$((bot_last_page + 1))" "$C_RESET"
-        fi
-        local nav_hint=""
-        [ "$bot_last_page" -gt 0 ] && [ "$page" -lt "$bot_last_page" ] && nav_hint="${nav_hint}n) next bot page  "
-        [ "$bot_last_page" -gt 0 ] && [ "$page" -gt 0 ] && nav_hint="${nav_hint}p) previous bot page  "
-
-        printf '\n  %s❯%s Select an option [1-%d], %sor Enter to return to main menu: ' \
-            "$C_YELLOW" "$C_RESET" "$max_option" "$nav_hint"
+        printf '\n  %s❯%s Select an option [1-%d], or Enter to return to main menu: ' \
+            "$C_YELLOW" "$C_RESET" "$delete_option"
         local choice; read -r choice
         [ -z "$choice" ] && return 0
 
-        case "$choice" in
-            n|N)
-                [ "$page" -lt "$bot_last_page" ] && page=$((page + 1))
-                continue
-                ;;
-            p|P)
-                [ "$page" -gt 0 ] && page=$((page - 1))
-                continue
-                ;;
-        esac
-
-        if [[ ! "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -gt "$max_option" ]; then
+        if [[ ! "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -gt "$delete_option" ]; then
             ui_err "Invalid selection."
             printf '\n  %s❯%s Press Enter to continue... ' "$C_YELLOW" "$C_RESET"; read -r
             continue
         fi
 
-        if [ "$delete_option" -gt 0 ] && [ "$choice" -eq "$delete_option" ]; then
-            delete_error_logs KINDS PATHS
+        if [ "$choice" -eq "$delete_option" ]; then
+            delete_error_logs PATHS
             printf '\n  %s❯%s Press Enter to return to the log list... ' "$C_YELLOW" "$C_RESET"; read -r
             continue
         fi
 
-        local sel=$((choice - 1))
-        local sel_kind="${KINDS[$sel]}" sel_path="${PATHS[$sel]}"
+        local sel_path="${PATHS[$((choice - 1))]}" log_output
         ui_rule
-        if [ "$sel_kind" = "container" ]; then
-            printf '  %s● %s (last 200 lines)%s\n' "$C_CYAN" "$sel_path" "$C_RESET"
-            ui_rule
-            dc logs --tail=200 "$sel_path" 2>/dev/null || ui_err "Could not read ${sel_path} logs."
+        printf '  %s● %s%s  %s(last 200 lines)%s\n' "$C_CYAN" "$sel_path" "$C_RESET" "$C_DIM" "$C_RESET"
+        ui_rule
+        if log_output=$(tail -n 200 "$sel_path" 2>/dev/null); then
+            printf '%s\n' "$log_output" | filter_runtime_log_noise
         else
-            printf '  %s● %s%s  %s(last 200 lines)%s\n' "$C_CYAN" "$sel_path" "$C_RESET" "$C_DIM" "$C_RESET"
-            ui_rule
-            tail -n 200 "$sel_path" 2>/dev/null || ui_err "Could not read ${sel_path}."
+            ui_err "Could not read ${sel_path}."
         fi
 
         printf '\n  %s❯%s 🗑️  Hide this entry from the current view? (y/N): ' "$C_YELLOW" "$C_RESET"
         local hide_confirm; read -r hide_confirm
         if [[ "${hide_confirm,,}" == "y" ]]; then
-            hidden_from_view["${sel_kind}|${sel_path}"]=1
-            ui_ok "The log entry was removed from the current view. The original log source remains unchanged."
+            hidden_from_view["$sel_path"]=1
+            ui_ok "The log entry was removed from the current view. The original log file remains unchanged."
         fi
 
         printf '\n  %s❯%s Press Enter to return to the log list... ' "$C_YELLOW" "$C_RESET"; read -r
@@ -4329,18 +4709,18 @@ view_error_logs() {
 }
 
 delete_error_logs() {
-    local -n kinds_ref="$1" paths_ref="$2"
+    local -n paths_ref="$1"
     local file_idx=() i
     for ((i = 0; i < ${#paths_ref[@]}; i++)); do
-        [ "${kinds_ref[$i]}" = "file" ] && file_idx+=("$i")
+        file_idx+=("$i")
     done
 
     if [ "${#file_idx[@]}" -eq 0 ]; then
-        ui_warn "No on-disk log files to delete (container logs can't be deleted, only viewed)."
+        ui_warn "No log files to delete."
         return 0
     fi
 
-    printf '\n  %s❯%s Delete ALL %d on-disk log file(s)? (y/N): ' "$C_YELLOW" "$C_RESET" "${#file_idx[@]}"
+    printf '\n  %s❯%s Delete ALL %d log file(s)? (y/N): ' "$C_YELLOW" "$C_RESET" "${#file_idx[@]}"
     local confirm_all; read -r confirm_all
     if [[ "${confirm_all,,}" == "y" ]]; then
         local i deleted=0 failed=0
@@ -4400,7 +4780,7 @@ delete_error_logs() {
             return 1
         fi
         local sel=$((pick - 1))
-        if [ "$sel" -lt 0 ] || [ "$sel" -ge "${#paths_ref[@]}" ] || [ "${kinds_ref[$sel]}" != "file" ]; then
+        if [ "$sel" -lt 0 ] || [ "$sel" -ge "${#paths_ref[@]}" ]; then
             ui_err "Invalid selection."
             return 1
         fi
@@ -4479,10 +4859,14 @@ increase_upload_limit() {
         return 1
     fi
 
-    ui_action "Recreating phpMyAdmin with the new upload limit..."
-    if ! dc up -d --force-recreate --no-deps phpmyadmin; then
-        ui_err "Failed to recreate phpMyAdmin — the bot's upload limit was still updated."
-        return 1
+    if pma_enabled; then
+        ui_action "Recreating phpMyAdmin with the new upload limit..."
+        if ! dc up -d --force-recreate --no-deps phpmyadmin; then
+            ui_err "Failed to recreate phpMyAdmin — the bot's upload limit was still updated."
+            return 1
+        fi
+    else
+        ui_info "phpMyAdmin is disabled — the new limit was saved and will apply when it is enabled from Maintenance."
     fi
 
     ui_ok "Upload limit set to ${size_mb}M for both the bot (post_max_size ${post_mb}M, memory_limit ${mem_mb}M) and phpMyAdmin."
@@ -4518,7 +4902,12 @@ read_config_credential() {
 }
 
 select_bot_for_credentials() {
-    local names=("main") d
+    local names=("main") d root_available=0
+    SELECTED_IS_ROOT=0
+    if pma_enabled && [ "$(env_get PMA_ROOT_READY 2>/dev/null)" = "1" ]; then
+        names=("Root" "main")
+        root_available=1
+    fi
     if [ -d "$BOTS_DIR" ]; then
         for d in "${BOTS_DIR}"/*/; do
             [ -d "$d" ] || continue
@@ -4532,6 +4921,18 @@ select_bot_for_credentials() {
     fi
 
     SELECTED_BOT="${names[$UI_PICK_RESULT]}"
+    if [ "$root_available" -eq 1 ] && [ "$UI_PICK_RESULT" -eq 0 ]; then
+        SELECTED_IS_ROOT=1
+        SELECTED_DB_NAME="All databases"
+        SELECTED_DB_USER="root"
+        SELECTED_DB_PASS=$(env_get MYSQL_ROOT_PASSWORD)
+        SELECTED_DOMAIN=$(normalize_domain "$(env_get DOMAIN)")
+        if [ -z "$SELECTED_DB_PASS" ]; then
+            ui_err "MYSQL_ROOT_PASSWORD is missing from the installation configuration."
+            return 1
+        fi
+        return 0
+    fi
     if [ "$SELECTED_BOT" = "main" ]; then
         if ! require_env_db_creds; then return 1; fi
         SELECTED_DB_NAME="$DB_NAME"
@@ -4576,7 +4977,7 @@ select_bot_for_credentials() {
 
 show_db_credentials() {
     ui_status_table "Database Info — ${SELECTED_BOT}" "$C_CYAN" \
-        "phpMyAdmin|${C_GREEN}https://${SELECTED_DOMAIN}/phpmyadmin/${C_RESET} ${C_DIM}(shared instance — log in with the credentials below)${C_RESET}" \
+        "phpMyAdmin|$(pma_access_label "$SELECTED_DOMAIN" "(shared instance — log in with the credentials below)")" \
         "Database|${C_WHITE}${SELECTED_DB_NAME}${C_RESET}" \
         "Username|${C_WHITE}${SELECTED_DB_USER}${C_RESET}" \
         "Password|${C_WHITE}${SELECTED_DB_PASS}${C_RESET}"
@@ -4597,6 +4998,273 @@ valid_ipv4_or_cidr() {
         [ "$o" -ge 0 ] && [ "$o" -le 255 ] || return 1
     done
     return 0
+}
+
+pma_enabled() {
+    [ "$(env_get PMA_ENABLED 2>/dev/null)" = "1" ]
+}
+
+pma_compose_has_profile() {
+    grep -qE '^[[:space:]]+profiles:[[:space:]]*\[[[:space:]]*"?phpmyadmin"?[[:space:]]*\]' "$COMPOSE_FILE" 2>/dev/null
+}
+
+pma_container_ids() {
+    local project
+    project=$(env_get COMPOSE_PROJECT_NAME 2>/dev/null)
+    docker ps -q "$@" \
+        --filter "label=com.docker.compose.project=${project:-faoxima}" \
+        --filter "label=com.docker.compose.service=phpmyadmin" 2>/dev/null
+}
+
+pma_is_running() {
+    [ -n "$(pma_container_ids)" ]
+}
+
+pma_runtime_label() {
+    if pma_is_running; then
+        printf '%s● running%s' "$C_GREEN" "$C_RESET"
+    elif [ -n "$(pma_container_ids -a)" ]; then
+        printf '%s● stopped%s' "$C_YELLOW" "$C_RESET"
+    else
+        printf '%s● not running%s' "$C_DIM" "$C_RESET"
+    fi
+}
+
+pma_access_label() {
+    local domain="$1" note="$2"
+    if pma_enabled; then
+        printf '%shttps://%s/phpmyadmin/%s %s%s%s' "$C_GREEN" "$domain" "$C_RESET" "$C_DIM" "$note" "$C_RESET"
+    else
+        printf '%sdisabled (enable it from Maintenance → phpMyAdmin)%s' "$C_DIM" "$C_RESET"
+    fi
+}
+
+pma_stop_containers() {
+    local ids
+    ids=$(pma_container_ids -a)
+    [ -z "$ids" ] && return 0
+    docker stop $ids >/dev/null 2>&1 || return 1
+    docker rm $ids >/dev/null 2>&1 || return 1
+    [ -z "$(pma_container_ids -a)" ]
+}
+
+pma_apply_nginx() {
+    local domain conf="${NGINX_CONF_DIR}/00-main.conf" backup had_conf=0 nginx_running=0 out rc
+    domain=$(normalize_domain "$(env_get DOMAIN)")
+    if [ -z "$domain" ]; then
+        ui_err "DOMAIN could not be read from ${ENV_FILE}."
+        return 1
+    fi
+    backup=$(mktemp "${TMPDIR:-/tmp}/faoxima_nginx.XXXXXX") || { ui_err "Failed to create an nginx backup file."; return 1; }
+    if [ -f "$conf" ]; then
+        cp -p "$conf" "$backup" || { rm -f "$backup"; ui_err "Failed to back up ${conf}."; return 1; }
+        had_conf=1
+    fi
+    [ -n "$(dc ps -q nginx 2>/dev/null)" ] && nginx_running=1
+
+    if ! render_vhost "$domain" "$conf"; then
+        if [ "$had_conf" -eq 1 ]; then cp -p "$backup" "$conf"; else rm -f "$conf"; fi
+        rm -f "$backup"
+        return 1
+    fi
+
+    if [ "$nginx_running" -eq 1 ]; then
+        out=$(dc exec -T nginx nginx -t 2>&1); rc=$?
+    else
+        out=$(dc run --rm --no-deps -T nginx nginx -t 2>&1); rc=$?
+    fi
+    if [ "$rc" -ne 0 ]; then
+        if [ "$had_conf" -eq 1 ]; then cp -p "$backup" "$conf"; else rm -f "$conf"; fi
+        rm -f "$backup"
+        ui_err "nginx configuration test failed — the previous configuration was kept."
+        printf '%s\n' "$out"
+        return 1
+    fi
+
+    if [ "$nginx_running" -eq 1 ] && ! dc exec -T nginx nginx -s reload >/dev/null 2>&1; then
+        if [ "$had_conf" -eq 1 ]; then cp -p "$backup" "$conf"; else rm -f "$conf"; fi
+        dc exec -T nginx nginx -s reload >/dev/null 2>&1 || true
+        rm -f "$backup"
+        ui_err "Failed to reload nginx — the previous configuration was restored."
+        return 1
+    fi
+    rm -f "$backup"
+    return 0
+}
+
+pma_prepare_root_access() {
+    local root_pass escaped_pass
+    root_pass=$(env_get MYSQL_ROOT_PASSWORD)
+    if [ -z "$root_pass" ]; then
+        ui_err "MYSQL_ROOT_PASSWORD is missing — phpMyAdmin was not enabled."
+        return 1
+    fi
+    escaped_pass=${root_pass//\\/\\\\}
+    escaped_pass=${escaped_pass//\'/\'\'}
+    ui_action "Preparing MySQL root access for phpMyAdmin..."
+    if ! dc exec -T -e MYSQL_PWD="$root_pass" db mysql -uroot >/dev/null 2>&1 <<SQL
+CREATE USER IF NOT EXISTS 'root'@'%' IDENTIFIED WITH mysql_native_password BY '${escaped_pass}';
+ALTER USER 'root'@'%' IDENTIFIED WITH mysql_native_password BY '${escaped_pass}';
+GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION;
+SQL
+    then
+        ui_err "Could not prepare MySQL root access — check the saved root password and database service."
+        return 1
+    fi
+}
+
+pma_verify_root_access() {
+    local root_pass attempt
+    root_pass=$(env_get MYSQL_ROOT_PASSWORD)
+    for attempt in {1..10}; do
+        if dc exec -T -e MYSQL_PWD="$root_pass" phpmyadmin php -r '
+            require "/etc/phpmyadmin/config.user.inc.php";
+            if (empty($cfg["Servers"][1]["AllowRoot"])) { exit(1); }
+            mysqli_report(MYSQLI_REPORT_OFF);
+            $db = @new mysqli("db", "root", getenv("MYSQL_PWD"));
+            exit($db->connect_errno ? 1 : 0);
+        ' >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+    done
+    ui_err "Root login from phpMyAdmin could not be verified. Check the phpMyAdmin configuration and MySQL root host permissions."
+    return 1
+}
+
+pma_set_enabled() {
+    local target="$1" previous was_running=0
+    previous=$(env_get PMA_ENABLED 2>/dev/null)
+    pma_is_running && was_running=1
+
+    if [ "$target" = "1" ]; then
+        pma_prepare_root_access || return 1
+        env_set "PMA_ENABLED" "1" || return 1
+        ui_action "Starting phpMyAdmin..."
+        if ! dc up -d --force-recreate --no-deps phpmyadmin; then
+            env_set "PMA_ENABLED" "$previous"
+            [ "$was_running" -eq 0 ] && pma_stop_containers
+            ui_err "Failed to start phpMyAdmin — its previous enabled preference was restored."
+            return 1
+        fi
+        if ! pma_verify_root_access; then
+            env_set "PMA_ENABLED" "$previous"
+            [ "$was_running" -eq 0 ] && pma_stop_containers
+            return 1
+        fi
+        ui_action "Validating and applying the nginx configuration..."
+        if ! pma_apply_nginx; then
+            env_set "PMA_ENABLED" "$previous"
+            [ "$was_running" -eq 0 ] && pma_stop_containers
+            ui_err "phpMyAdmin was not enabled because nginx could not be updated."
+            return 1
+        fi
+        if ! file_env_set "$ENV_FILE" "PMA_ROOT_READY" "1"; then
+            env_set "PMA_ENABLED" "$previous"
+            pma_apply_nginx >/dev/null 2>&1 || true
+            [ "$was_running" -eq 0 ] && pma_stop_containers
+            ui_err "Could not save the root access state."
+            return 1
+        fi
+        cache_set "pma_running" "1"
+        return 0
+    fi
+
+    env_set "PMA_ENABLED" "0"
+    ui_action "Validating and applying the nginx configuration..."
+    if ! pma_apply_nginx; then
+        env_set "PMA_ENABLED" "$previous"
+        ui_err "phpMyAdmin was not disabled because nginx could not be updated."
+        return 1
+    fi
+    if [ "$was_running" -eq 1 ] || [ -n "$(pma_container_ids -a)" ]; then
+        ui_action "Stopping phpMyAdmin (database data, volumes, and credentials are kept)..."
+        if ! pma_stop_containers; then
+            ui_err "nginx now returns 404 for /phpmyadmin/, but the phpMyAdmin container could not be stopped — check 'docker ps'."
+            return 1
+        fi
+    fi
+    cache_set "pma_running" "0"
+    return 0
+}
+
+pma_run_update_migration() {
+    [ -f "$ENV_FILE" ] && [ -f "$COMPOSE_FILE" ] || return 0
+    [ "$(env_get PMA_DISABLE_MIGRATION_DONE 2>/dev/null)" = "1" ] && return 0
+    if ! pma_compose_has_profile; then
+        log_warn "phpMyAdmin migration skipped: docker-compose.yml has no phpmyadmin profile yet"
+        return 0
+    fi
+    ui_action "One-time migration: phpMyAdmin is now optional and disabled by default..."
+    if pma_is_running; then
+        ui_info "phpMyAdmin is running — it will be stopped."
+    else
+        ui_info "phpMyAdmin is not running."
+    fi
+    if ! pma_set_enabled 0; then
+        ui_warn "The one-time phpMyAdmin migration did not complete — it will be retried on the next update."
+        return 1
+    fi
+    env_set "PMA_DISABLE_MIGRATION_DONE" "1"
+    ui_ok "phpMyAdmin is disabled. Enable it any time from Maintenance → phpMyAdmin."
+    return 0
+}
+
+pma_finish_pending_migration() {
+    [ -f "$ENV_FILE" ] && [ -f "$COMPOSE_FILE" ] || return 0
+    [ "$(env_get PMA_DISABLE_MIGRATION_DONE 2>/dev/null)" = "1" ] && return 0
+    [ "$(env_get FAOXIMA_UPDATE_STATE 2>/dev/null)" = "complete" ] || return 0
+    pma_compose_has_profile || return 0
+    pma_run_update_migration || true
+    printf '\n  %s❯%s Press Enter to continue... ' "$C_YELLOW" "$C_RESET"; read -r
+}
+
+manage_phpmyadmin() {
+    show_logo
+    ui_panel "PHPMYADMIN" "$C_BOLD$C_CYAN" "$C_CYAN" \
+        "${C_WHITE}Enable or disable the shared phpMyAdmin instance.${C_RESET}" \
+        "${C_DIM}Disabling only stops its container — database data, volumes, and credentials are kept.${C_RESET}"
+
+    if [ ! -f "$COMPOSE_FILE" ] || [ ! -f "$ENV_FILE" ]; then
+        ui_err "Faoxima Bot is not installed."
+        return 1
+    fi
+    if ! pma_compose_has_profile; then
+        ui_err "docker-compose.yml does not define the phpmyadmin profile yet — update Faoxima first."
+        return 1
+    fi
+
+    local domain pref_label
+    domain=$(normalize_domain "$(env_get DOMAIN)")
+    if pma_enabled; then
+        pref_label="${C_GREEN}enabled${C_RESET}"
+    else
+        pref_label="${C_DIM}disabled${C_RESET}"
+    fi
+    ui_status_table "phpMyAdmin" "$C_CYAN" \
+        "Saved preference|${pref_label}" \
+        "Container|$(pma_runtime_label)" \
+        "Access|$(pma_access_label "$domain" "(public IP allowlist still applies)")"
+
+    local confirm
+    if pma_enabled; then
+        printf '\n  %s❯%s Disable phpMyAdmin? (y/N): ' "$C_YELLOW" "$C_RESET"
+        read -r confirm
+        [[ "${confirm,,}" == "y" ]] || { ui_info "Cancelled."; return 0; }
+        pma_set_enabled 0 || return 1
+        ui_ok "phpMyAdmin disabled — /phpmyadmin/ now returns 404."
+    else
+        if pma_is_running; then
+            ui_warn "The saved preference is disabled, but a phpMyAdmin container is running."
+        fi
+        printf '\n  %s❯%s Enable phpMyAdmin? (y/N): ' "$C_YELLOW" "$C_RESET"
+        read -r confirm
+        [[ "${confirm,,}" == "y" ]] || { ui_info "Cancelled."; return 0; }
+        pma_set_enabled 1 || return 1
+        ui_ok "phpMyAdmin enabled at https://${domain}/phpmyadmin/ (existing IP restrictions apply)."
+        ui_info "Root is now available before main in Maintenance → Database Credentials & Info."
+    fi
+    ui_status_table "phpMyAdmin" "$C_CYAN" "Container|$(pma_runtime_label)"
 }
 
 get_phpmyadmin_allowed_ips() {
@@ -4763,6 +5431,10 @@ manage_phpmyadmin_public_ips() {
 
 rotate_bot_db_credentials() {
     local field="$1" new_value="$2"
+    if [ "${SELECTED_IS_ROOT:-0}" = "1" ]; then
+        ui_err "Root credentials cannot be changed using bot credential actions."
+        return 1
+    fi
     local mysql_root_pass env_key old_value escaped_new escaped_old
     mysql_root_pass=$(env_get MYSQL_ROOT_PASSWORD)
 
@@ -4905,10 +5577,15 @@ menu_db_credentials() {
         return 1
     fi
 
-    local SELECTED_BOT SELECTED_DB_NAME SELECTED_DB_USER SELECTED_DB_PASS
+    local SELECTED_BOT SELECTED_DB_NAME SELECTED_DB_USER SELECTED_DB_PASS SELECTED_IS_ROOT=0
     local SELECTED_ENV_FILE SELECTED_CONFIG_PHP SELECTED_DOMAIN SELECTED_CONTAINER
     select_bot_for_credentials || return 0
     show_db_credentials
+
+    if [ "$SELECTED_IS_ROOT" = "1" ]; then
+        ui_info "Use these credentials to manage all databases in the shared phpMyAdmin instance."
+        return 0
+    fi
 
     ui_menu_list "Credentials" \
         "${C_WHITE}[1]${C_RESET} Change Username" \
@@ -4987,6 +5664,11 @@ service_status_all() {
     local rows=("nginx|$(service_state nginx)" "db|$(service_state db)" "app (main, incl. PHP-FPM)|$(service_state app)")
     if redis_service_exists; then
         rows+=("redis|$(service_state redis)")
+    fi
+    if pma_enabled; then
+        rows+=("phpmyadmin|$(pma_runtime_label)")
+    else
+        rows+=("phpmyadmin|$(pma_runtime_label) ${C_DIM}(disabled)${C_RESET}")
     fi
 
     local bot_names=() d
@@ -5169,7 +5851,7 @@ show_menu() {
             local pma_running
             pma_running=$(cache_get "pma_running" 30)
             if [ -z "$pma_running" ]; then
-                if dc ps -q phpmyadmin >/dev/null 2>&1 && [ -n "$(dc ps -q phpmyadmin 2>/dev/null)" ]; then
+                if pma_is_running; then
                     pma_running="1"
                 else
                     pma_running="0"
@@ -5381,15 +6063,16 @@ menu_additional_bots() {
 menu_database() {
     show_logo
     ui_menu_list "Database" \
-        "${C_WHITE}[1]${C_RESET} Export Database — All Bots (Main + Additional)" \
+        "${C_WHITE}[1]${C_RESET} Export Database — All Bots (ZIP: Main + Additional)" \
         "${C_WHITE}[2]${C_RESET} Export Database — Single Bot" \
         "${C_WHITE}[3]${C_RESET} Import Database" \
         "${C_WHITE}[4]${C_RESET} Optimize Database & Server" \
         "${C_WHITE}[5]${C_RESET} Install / Enable Redis" \
-        "${C_RED}[6]${C_RESET} Back to main menu"
+        "${C_WHITE}[6]${C_RESET} Clean MySQL Binary & Docker Logs Now" \
+        "${C_RED}[7]${C_RESET} Back to main menu"
 
     local option
-    printf '  %s❯%s Select an option [1-6]: ' "$C_YELLOW" "$C_RESET"
+    printf '  %s❯%s Select an option [1-7]: ' "$C_YELLOW" "$C_RESET"
     read -r option
 
     case "$option" in
@@ -5398,7 +6081,8 @@ menu_database() {
         3) import_database ;;
         4) optimize_database ;;
         5) install_redis ;;
-        6) return 0 ;;
+        6) cleanup_mysql_logs_now ;;
+        7) return 0 ;;
         *)
             ui_err "Invalid option. Please try again."
             sleep 2
@@ -5436,6 +6120,131 @@ menu_domain_ssl() {
     printf '\n  %s❯%s Press Enter to continue... ' "$C_YELLOW" "$C_RESET"; read -r
 }
 
+upgrade_phpmyadmin_runtime() {
+    if ! pma_is_running; then
+        ui_info "phpMyAdmin is not running; skipping its update. Enable it manually when needed."
+        return 0
+    fi
+    local php_check='switch (PHP_MAJOR_VERSION . "." . PHP_MINOR_VERSION) { case "8.2": $min = "8.2.35"; break; case "8.3": $min = "8.3.36"; break; case "8.4": $min = "8.4.27"; break; case "8.5": $min = "8.5.12"; break; default: fwrite(STDERR, "Unrecognized PHP branch: " . PHP_VERSION . "\n"); exit(1); } echo "PHP ", PHP_VERSION, PHP_EOL; exit(version_compare(PHP_VERSION, $min, ">=") ? 0 : 1);'
+    ui_action "Downloading the latest configured phpMyAdmin image..."
+    if ! dc --profile phpmyadmin pull phpmyadmin; then
+        ui_err "phpMyAdmin image download failed. Its existing container was not changed; retry this option."
+        return 1
+    fi
+    ui_action "Checking PHP security patch level in the new phpMyAdmin image..."
+    if ! dc --profile phpmyadmin run --rm --no-deps --entrypoint php phpmyadmin -r "$php_check"; then
+        ui_err "phpMyAdmin image does not pass the PHP version check. Its existing container was not changed."
+        return 1
+    fi
+    ui_action "Recreating phpMyAdmin with the updated image..."
+    local restart_ok=1
+    dc --profile phpmyadmin up -d --no-deps --no-build --pull never --force-recreate phpmyadmin || restart_ok=0
+    dc restart nginx || restart_ok=0
+    if [ "$restart_ok" != "1" ]; then
+        ui_err "phpMyAdmin restart failed. Check Service Status & Management and container logs."
+        return 1
+    fi
+    local attempt
+    for attempt in {1..30}; do
+        if dc --profile phpmyadmin exec -T phpmyadmin php -r "$php_check"; then
+            ui_ok "phpMyAdmin updated; its PHP version passed the security patch check."
+            return 0
+        fi
+        sleep 1
+    done
+    ui_err "Could not verify PHP in the running phpMyAdmin container. Check its logs."
+    return 1
+}
+
+upgrade_php_runtime() {
+    local target_version="8.2.35"
+    local dockerfile="${PROJECT_DIR}/docker/php/Dockerfile"
+    show_logo
+    ui_panel "UPDATE PHP TO ${target_version}" "$C_BOLD$C_GREEN" "$C_GREEN" \
+        "${C_WHITE}Rebuilds PHP and restarts the main app and running bot containers.${C_RESET}" \
+        "${C_WHITE}Also updates phpMyAdmin and checks its PHP version if it is running.${C_RESET}" \
+        "${C_DIM}Brief downtime during restart. Application source is not downloaded.${C_RESET}"
+
+    if [ ! -f "$COMPOSE_FILE" ] || [ ! -f "$ENV_FILE" ] || [ ! -f "$dockerfile" ]; then
+        ui_err "Installed Docker configuration was not found at ${PROJECT_DIR}."
+        return 1
+    fi
+    if ! grep -qE '^FROM php:8\.2([.][0-9]+)?-fpm[[:space:]]*$' "$dockerfile"; then
+        ui_err "Expected a PHP 8.2 FPM Dockerfile. Custom base images must be updated manually."
+        return 1
+    fi
+
+    local running_services svc current_version backup
+    local app_services=(app)
+    running_services=$(dc ps --services --status running) || return 1
+    while IFS= read -r svc; do
+        case "$svc" in app_*) app_services+=("$svc") ;; esac
+    done <<< "$running_services"
+    for svc in "${app_services[@]}"; do
+        current_version=$(dc exec -T "$svc" php -r 'echo PHP_VERSION;' 2>/dev/null) || current_version=""
+        if [ -n "$current_version" ] && dpkg --compare-versions "$current_version" gt "$target_version"; then
+            ui_err "${svc} already runs newer PHP ${current_version}; refusing to downgrade it."
+            return 1
+        fi
+    done
+
+    backup=$(mktemp "${dockerfile}.backup.XXXXXX") || return 1
+    if ! cp -p "$dockerfile" "$backup"; then
+        rm -f "$backup"
+        return 1
+    fi
+    if ! sed -i -E "s/^FROM php:8\\.2([.][0-9]+)?-fpm[[:space:]]*$/FROM php:${target_version}-fpm/" "$dockerfile"; then
+        cp -p "$backup" "$dockerfile" && rm -f "$backup"
+        ui_err "Failed to update the Dockerfile."
+        return 1
+    fi
+
+    ui_action "Building PHP ${target_version} with the existing extensions..."
+    if ! dc build --pull app; then
+        cp -p "$backup" "$dockerfile" && rm -f "$backup"
+        ui_err "Build failed; existing containers were not restarted."
+        return 1
+    fi
+    ui_action "Checking the new PHP image before restarting..."
+    if ! dc run --rm --no-deps --entrypoint php app -r \
+        'echo "PHP ", PHP_VERSION, PHP_EOL; if (PHP_VERSION !== $argv[1]) exit(1); foreach (["mysqli", "pdo_mysql", "mbstring", "zip", "gd", "curl", "soap"] as $ext) { if (!extension_loaded($ext)) { fwrite(STDERR, "Missing extension: $ext\n"); exit(1); } }' "$target_version" \
+        || ! dc run --rm --no-deps --entrypoint php-fpm app -t; then
+        cp -p "$backup" "$dockerfile" && rm -f "$backup"
+        ui_err "Image checks failed; existing containers were not restarted."
+        return 1
+    fi
+    rm -f "$backup"
+
+    ui_action "Recreating app containers with PHP ${target_version}..."
+    local restart_ok=1
+    dc up -d --no-deps --no-build --pull never --force-recreate "${app_services[@]}" || restart_ok=0
+    # nginx must resolve the recreated containers' addresses, including after a partial failure.
+    dc restart nginx || restart_ok=0
+    if [ "$restart_ok" != "1" ]; then
+        ui_err "Service restart failed. Check Service Status & Management and container logs."
+        return 1
+    fi
+
+    local verified=0 attempt
+    for attempt in {1..30}; do
+        verified=1
+        for svc in "${app_services[@]}"; do
+            current_version=$(dc exec -T "$svc" php -r 'echo PHP_VERSION;' 2>/dev/null) || current_version=""
+            [ "$current_version" = "$target_version" ] || verified=0
+        done
+        [ "$verified" = "1" ] && break
+        sleep 1
+    done
+    if [ "$verified" != "1" ]; then
+        ui_err "PHP ${target_version} could not be verified in every app container. Check container logs."
+        return 1
+    fi
+    for svc in "${app_services[@]}"; do
+        ui_ok "${svc}: PHP ${target_version}"
+    done
+    upgrade_phpmyadmin_runtime || return 1
+}
+
 menu_maintenance() {
     show_logo
     ui_menu_list "Maintenance" \
@@ -5444,10 +6253,12 @@ menu_maintenance() {
         "${C_WHITE}[3]${C_RESET} Database Credentials & Info" \
         "${C_WHITE}[4]${C_RESET} Service Status & Management" \
         "${C_WHITE}[5]${C_RESET} Set Max Database Connections" \
-        "${C_RED}[6]${C_RESET} Back to main menu"
+        "${C_WHITE}[6]${C_RESET} phpMyAdmin (Enable / Disable)" \
+        "${C_WHITE}[7]${C_RESET} Update PHP to 8.2.35 + phpMyAdmin (Temporary)" \
+        "${C_RED}[8]${C_RESET} Back to main menu"
 
     local option
-    printf '  %s❯%s Select an option [1-6]: ' "$C_YELLOW" "$C_RESET"
+    printf '  %s❯%s Select an option [1-8]: ' "$C_YELLOW" "$C_RESET"
     read -r option
 
     case "$option" in
@@ -5456,7 +6267,9 @@ menu_maintenance() {
         3) menu_db_credentials ;;
         4) menu_service_management ;;
         5) set_max_connections ;;
-        6) return 0 ;;
+        6) manage_phpmyadmin ;;
+        7) upgrade_php_runtime ;;
+        8) return 0 ;;
         *)
             ui_err "Invalid option. Please try again."
             sleep 2
@@ -5494,6 +6307,7 @@ process_arguments() {
             install_bot "-beta"
             ;;
         *)
+            pma_finish_pending_migration
             show_menu
             ;;
     esac

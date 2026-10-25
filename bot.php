@@ -3449,8 +3449,35 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
             return;
         }
 
+        // اجرا با کرون: همان tools/sync_templates.php که update.sh صدا می‌زند،
+        // ولی با مالکِ کرون — برای وقتی که کاربر وب به git/شبکه/templates/ دسترسی ندارد.
+        if ($action === 'queue') {
+            $en = SelfUpdate::enqueueUpdate('templates', $uid);
+            $t = !empty($en['ok'])
+                ? "⏳ <b>در نوبت کرون ثبت شد</b>\n\n"
+                    . "همان <code>tools/sync_templates.php</code> که <code>update.sh</code> اجرا می‌کند، "
+                    . "حداکثر ۵ دقیقه بعد با دسترسی درست اجرا می‌شود؛ نتیجه در «📜 آخرین لاگ» است.\n"
+                    . "<i>اگر کرون این سرور فعال نیست، روی سرور اجرا کنید:</i>\n"
+                    . "<code>php tools/sync_templates.php</code>"
+                : "⚠️ " . htmlspecialchars((string)($en['note'] ?? 'ثبت در نوبت کرون ممکن نشد'), ENT_QUOTES, 'UTF-8');
+            $kb = BotApi::ikb([
+                [['text' => '📜 آخرین لاگ', 'callback_data' => 'src:log']],
+                [['text' => '🔄 پنل سورس', 'callback_data' => 'src:refresh']],
+            ]);
+            if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, $t, ['reply_markup' => $kb]);
+            else BotApi::send($TOKEN, $chatId, $t, ['reply_markup' => $kb]);
+            return;
+        }
+
         if ($action === 'go') {
-            runTemplatesUpdate($TOKEN, $chatId);
+            runTemplatesUpdate($TOKEN, $chatId, $uid);
+            return;
+        }
+
+        // هم‌ترازسازیِ اجباری با مخزن (مثل git reset در update.sh): حتی وقتی
+        // وضعیت «به‌روز» است، فایل‌های متفاوت با مخزن بازنویسی می‌شوند.
+        if ($action === 'force') {
+            runTemplatesUpdate($TOKEN, $chatId, $uid, true);
             return;
         }
 
@@ -4647,6 +4674,25 @@ function sourceNothingText(array $st): string
 }
 
 /**
+ * متنِ خطاهای «بررسی ریموت» — «بررسی نشد» با «تغییری نیست» یکی نیست.
+ * بدون این، وقتی git/شبکه از کاربر وب کار نمی‌کرد، پنل «همه‌چیز به‌روز»
+ * می‌گفت و دکمه بی‌صدا هیچ کاری نمی‌کرد (در حالی که update.sh در SSH کار می‌کرد).
+ */
+function sourceCheckErrorsText(array $st, int $max = 4, int $chars = 150): string
+{
+    $errors = (array)($st['errors'] ?? []);
+    if ($errors === []) return '';
+    $t = "\n⚠️ بررسی مخزن این قالب‌ها ناموفق بود؛ پس «همه‌چیز به‌روز است» ثابت نشده:\n";
+    $i = 0;
+    foreach ($errors as $k => $e) {
+        $t .= "• <code>" . htmlspecialchars((string)$k, ENT_QUOTES, 'UTF-8') . "</code> — "
+            . htmlspecialchars(mb_substr(trim((string)$e), 0, $chars), ENT_QUOTES, 'UTF-8') . "\n";
+        if (++$i >= $max) { $t .= "• …\n"; break; }
+    }
+    return $t;
+}
+
+/**
  * پنل «🔄 دریافت سورس بروز» — تازه‌کردنِ templates/ از گیت.
  *
  * این بخش دیگر هیچ رباتِ ساخته‌شده‌ای را تغییر نمی‌دهد: کدِ تازه فقط وارد
@@ -4657,9 +4703,11 @@ function showSourcePanel(array $cfg, Store $store, string $TOKEN, $chatId, int $
 {
     $st = SelfUpdate::templatesStatus();
     $outdated = count((array)$st['templates']);
+    $checkErr = (array)($st['errors'] ?? []);
+    $missing  = (array)($st['missing'] ?? []);
     $behind = $outdated > 0
         ? "🟡 {$outdated} قالب نیاز به بروزرسانی"
-        : '🟢 همهٔ قالب‌ها هم‌ترازند';
+        : ($checkErr !== [] ? '🟠 وضعیت نامشخص (بررسی ریموت ناموفق)' : '🟢 همهٔ قالب‌ها هم‌ترازند');
 
     $txt = "🔄 <b>دریافت سورس بروز (قالب‌ها)</b>\n"
         . Manager::versionLine() . "\n\n"
@@ -4679,24 +4727,39 @@ function showSourcePanel(array $cfg, Store $store, string $TOKEN, $chatId, int $
             $txt .= "• <code>" . htmlspecialchars((string)$name, ENT_QUOTES, 'UTF-8') . "</code> — " . ($n > 1 ? "{$n} فایل" : 'نیاز به بروزرسانی') . "\n";
             if (++$i >= 8) { $txt .= "• …\n"; break; }
         }
-    } elseif ($st['behind'] === 0 && SelfUpdate::sourceDir() !== null) {
+    } elseif ($missing !== []) {
+        $txt .= "\n🟠 پوشهٔ این قالب‌ها روی دیسک نیست و با «دریافت سورس تازه» بازسازی می‌شوند:\n• "
+            . htmlspecialchars(implode('، ', array_map('strval', $missing)), ENT_QUOTES, 'UTF-8') . "\n";
+    } elseif ($checkErr !== []) {
+        // عمداً «همه‌چیز به‌روز» گفته نمی‌شود؛ علت پایین‌تر می‌آید.
+    } else {
         $txt .= "\n✅ همه‌چیز به‌روز است؛ چیزی برای دریافت نیست.\n";
-    } elseif ($st['behind'] > 0 && SelfUpdate::sourceDir() !== null) {
-        // قالب‌های عقب‌مانده هست ولی فایل‌های دقیق محاسبه نشد: صریح گفته شود
-        $txt .= "\n" . sourceNothingText($st) . "\n";
     }
 
-    $probs = SelfUpdate::problems();
+    $txt .= sourceCheckErrorsText($st);
+    if ($checkErr !== []) {
+        $txt .= "این یعنی کاربر وب به git/شبکه دسترسی ندارد یا خروجی git خطا داده؛ "
+            . "«⏳ اجرا با کرون» همان کارِ <code>update.sh</code> را با دسترسی درست انجام می‌دهد.\n";
+    }
+
+    $probs = SelfUpdate::templatesProblems();
     if ($probs !== []) {
-        $txt .= "\n⛔️ برای اجرا لازم است:\n• "
+        $txt .= "\n⚠️ نکته‌های اجرا:\n• "
             . htmlspecialchars(implode("\n• ", $probs), ENT_QUOTES, 'UTF-8') . "\n";
+    }
+    if (SelfUpdate::hasPendingUpdate('templates')) {
+        $txt .= "\n⏳ یک درخواست تازه‌سازی در نوبت کرون است (حداکثر ۵ دقیقه). نتیجه در «📜 آخرین لاگ» است.\n";
     }
     if ($note !== '') $txt .= "\n" . htmlspecialchars($note, ENT_QUOTES, 'UTF-8') . "\n";
 
     $rows = [];
-    if ($probs === []) $rows[] = [['text' => '⬇️ دریافت سورس تازه', 'callback_data' => 'src:ask']];
+    if (SelfUpdate::templatesRunnable()) {
+        $rows[] = [['text' => '⬇️ دریافت سورس تازه', 'callback_data' => 'src:ask']];
+    }
     $rows[] = [['text' => '🔄 بررسی (git fetch)', 'callback_data' => 'src:check']];
     $rows[] = [['text' => '📜 آخرین لاگ', 'callback_data' => 'src:log']];
+    // ثبت در نوبت کرون به proc_open نیاز ندارد؛ کرون خودش اسکریپت را اجرا می‌کند.
+    $rows[] = [['text' => '⏳ اجرا با کرون', 'callback_data' => 'src:queue']];
     if ((int)$outdated > 0) $rows[] = [['text' => '🚀 اعمال سورس بروز روی ربات‌های ساخته‌شده', 'callback_data' => 'src:apply']];
     $rows[] = [['text' => '🏠 منو', 'callback_data' => Nav::CB_BACK_MAIN]];
     $kb = BotApi::ikb($rows);
@@ -4712,9 +4775,26 @@ function showSourceConfirm(array $cfg, Store $store, string $TOKEN, $chatId, int
 {
     $st = SelfUpdate::templatesStatus();
     $files = (array)$st['files'];
-    if ($files === []) {
-        $t = sourceNothingText($st);
-        $kb = BotApi::ikb([[['text' => '🔄 پنل سورس', 'callback_data' => 'src:refresh']]]);
+    $checkErr = (array)($st['errors'] ?? []);
+    $missing = (array)($st['missing'] ?? []);
+    if ($files === [] && $missing === []) {
+        if ($checkErr !== []) {
+            $t = "🟠 <b>وضعیت قالب‌ها از راه دور بررسی نشد</b>\n" . sourceCheckErrorsText($st)
+                . "\nهمان اسکریپتِ <code>update.sh</code> را با دسترسی کرون اجرا کنم؟";
+            $kb = BotApi::ikb([
+                [['text' => '⏳ بله، با کرون اجرا کن', 'callback_data' => 'src:queue']],
+                [['text' => '🔄 پنل سورس', 'callback_data' => 'src:refresh']],
+            ]);
+        } else {
+            $t = sourceNothingText($st)
+                . "\nاگر مطمئن نیستی فایل‌های <code>templates/</code> با مخزن یکی است، "
+                . "«بازنویسی از مخزن» فقط فایل‌های متفاوت را هم‌تراز می‌کند "
+                . "(<code>config.php</code>، داده و دیتابیس‌ها دست‌نخورده می‌مانند).";
+            $kb = BotApi::ikb([
+                [['text' => '🔁 بازنویسی از مخزن', 'callback_data' => 'src:force']],
+                [['text' => '🔄 پنل سورس', 'callback_data' => 'src:refresh']],
+            ]);
+        }
         if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, $t, ['reply_markup' => $kb]);
         else BotApi::send($TOKEN, $chatId, $t, ['reply_markup' => $kb]);
         return;
@@ -4725,9 +4805,18 @@ function showSourceConfirm(array $cfg, Store $store, string $TOKEN, $chatId, int
         $list .= "• <code>" . htmlspecialchars((string)$name, ENT_QUOTES, 'UTF-8') . "</code> — " . ($n > 1 ? "{$n} فایل" : 'نیاز به بروزرسانی') . "\n";
         if (++$i >= 10) { $list .= "• …\n"; break; }
     }
+    if ($missing !== []) {
+        // پوشه‌های گم‌شده‌ای که قبلاً در فهرست قالب‌ها آمده‌اند تکرار نمی‌شوند
+        $missingOnly = array_values(array_filter($missing, fn($k) => !isset($st['templates'][$k])));
+        if ($missingOnly !== []) {
+            $list .= "• بازسازی پوشهٔ حذف‌شده: <code>"
+                . htmlspecialchars(implode('، ', array_map('strval', $missingOnly)), ENT_QUOTES, 'UTF-8') . "</code>\n";
+        }
+    }
     $text = "🔄 <b>دریافت سورس تازهٔ قالب‌ها</b>\n\n"
         . "تعداد قالب‌های منتظر: " . count((array)$st['templates']) . "\n"
         . $list . "\n"
+        . sourceCheckErrorsText($st)
         . "🛡 ربات‌های ساخته‌شده، <code>config.php</code>‌ها و دیتابیس‌ها دست‌نخورده می‌مانند.\n"
         . "🗂 پیش از تغییر، از هر قالبِ در حال عوض‌شدن بکاپ گرفته و فقط برای شما فرستاده می‌شود.\n"
         . "⏱ ممکن است چند ثانیه تا یک دقیقه طول بکشد.\n\nشروع شود؟";
@@ -4776,7 +4865,7 @@ function sendTemplatesBackup(string $TOKEN, $chatId, array $backup, string $tplN
  *   fetch (هر قالب از ریپوی خودش) → قالب‌های در حال تغییر → بکاپ (فقط برای همین
  *   سوپرادمین) → SelfUpdate::updateTemplates (کپیِ امن؛ config/دیتابیس دست‌نخورده) → گزارش.
  */
-function runTemplatesUpdate(string $TOKEN, $chatId): void
+function runTemplatesUpdate(string $TOKEN, $chatId, int $uid = 0, bool $force = false): void
 {
     @set_time_limit(0);
     @ignore_user_abort(true);
@@ -4787,10 +4876,21 @@ function runTemplatesUpdate(string $TOKEN, $chatId): void
             ['reply_markup' => BotApi::ikb([[['text' => '🔄 پنل سورس', 'callback_data' => 'src:refresh']]])]);
         return;
     }
-    $probs = SelfUpdate::problems();
-    if ($probs !== []) {
-        BotApi::send($TOKEN, $chatId,
-            "⛔️ امکان اجرا نیست:\n• " . htmlspecialchars(implode("\n• ", $probs), ENT_QUOTES, 'UTF-8'));
+    // نکته: problems() پیش‌نیازهای آپدیتِ کدِ ربات‌ساز است (source_dir/bash) و
+    // به قالب‌ها ربطی ندارد؛ اینجا فقط اجرای پروسه و دسترسیِ نوشتن مهم است و
+    // updateTemplates خودش در صورت نبودِ دسترسی، درخواست را به کرون می‌سپارد.
+    if (!SelfUpdate::templatesRunnable()) {
+        $en = SelfUpdate::enqueueUpdate('templates', $uid);
+        $t = !empty($en['ok'])
+            ? "⏳ proc_open روی این سرور غیرفعال است؛ درخواست به کرون سپرده شد.\n\n"
+                . "حداکثر ۵ دقیقه بعد همان <code>tools/sync_templates.php</code> اجرا می‌شود.\n"
+                . "<i>اگر کرون فعال نیست، روی سرور بزنید:</i>\n<code>php tools/sync_templates.php</code>"
+            : "⛔️ proc_open غیرفعال است و ثبت در نوبت کرون هم ممکن نشد.\n"
+                . "روی سرور اجرا کنید:\n<code>php tools/sync_templates.php</code>";
+        BotApi::send($TOKEN, $chatId, $t, ['reply_markup' => BotApi::ikb([
+            [['text' => '📜 آخرین لاگ', 'callback_data' => 'src:log']],
+            [['text' => '🔄 پنل سورس', 'callback_data' => 'src:refresh']],
+        ])]);
         return;
     }
 
@@ -4804,27 +4904,56 @@ function runTemplatesUpdate(string $TOKEN, $chatId): void
         if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, $t, ['reply_markup' => $kb]);
         else BotApi::send($TOKEN, $chatId, $t, ['reply_markup' => $kb]);
     };
+    // وقتی اجرای مستقیم از داخل وب قابل اعتماد نیست (git/شبکه/مجوز)، همان کار را
+    // به کرون بسپار تا با مالکِ درست اجرا شود — به‌جای پایانِ بی‌صدا.
+    $queueFallback = function (string $why) use ($TOKEN, $chatId, $report, $uid): void {
+        $en = SelfUpdate::enqueueUpdate('templates', $uid);
+        $t = "🟠 <b>اجرای مستقیم ممکن نشد</b>\n"
+            . htmlspecialchars(mb_substr(trim($why), 0, 400), ENT_QUOTES, 'UTF-8') . "\n\n";
+        if (!empty($en['ok'])) {
+            $t .= "⏳ درخواست به کرون سپرده شد؛ حداکثر ۵ دقیقه بعد همان "
+                . "<code>tools/sync_templates.php</code> با دسترسی درست اجرا می‌شود.\n"
+                . "نتیجه در «📜 لاگ کامل» ثبت می‌شود.";
+        } else {
+            $t .= "⚠️ ثبت در نوبت کرون هم ممکن نشد. روی سرور اجرا کنید:\n"
+                . "<code>php tools/sync_templates.php</code>";
+        }
+        $report($t);
+    };
 
     $t0 = microtime(true);
     $fetchWarn = '';
     $fetch = SelfUpdate::fetchSource();
     if (!$fetch['ok']) {
-        $fetchWarn = "⚠️ fetch از برخی مخازن کامل نشد (با نسخهٔ کش‌شده ادامه می‌دم):\n<pre>"
+        $fetchWarn = "⚠️ fetch از برخی مخازن کامل نشد:\n<pre>"
             . htmlspecialchars(mb_substr((string)$fetch['out'], -700), ENT_QUOTES, 'UTF-8') . "</pre>\n";
         // اگر هیچ مخزنی به‌روز نشد و اصلاً کلنی نداریم، ادامه معنی ندارد
         $anyClone = false;
         foreach (array_keys(Manager::buildableTypes()) as $k) {
             if (is_dir(SelfUpdate::templateCloneDir($k))) { $anyClone = true; break; }
         }
-        if (!$anyClone && trim((string)$fetch['out']) !== '') {
-            BotApi::send($TOKEN, $chatId, "❌ دسترسی به گیتهاب ندارم و کلون محلی هم نیست؛ بروزرسانی امکان‌پذیر نیست.");
+        if (!$anyClone) {
+            $queueFallback('دسترسی به گیت‌هاب ندارم و کلون محلی هم نیست: ' . (string)$fetch['out']);
             return;
         }
     }
 
     $st = SelfUpdate::templatesStatus();
     $files = (array)$st['files'];
-    if ($files === []) {
+    $missing = (array)($st['missing'] ?? []);
+    $checkErr = (array)($st['errors'] ?? []);
+    // شکستِ fetch هم «نامعلوم» است، نه «به‌روز»؛ وگرنه با کلونِ کش‌شده
+    // «همه‌چیز به‌روز» گزارش می‌شد در حالی که ریموت بررسی نشده بود.
+    foreach ((array)($fetch['errors'] ?? []) as $fk => $fe) {
+        if (!isset($checkErr[$fk])) $checkErr[$fk] = 'fetch ناموفق: ' . $fe;
+    }
+    if (!$force && $files === [] && $missing === []) {
+        if ($checkErr !== []) {
+            $why = "بررسی ریموت قالب‌ها ناموفق بود:\n";
+            foreach ($checkErr as $k => $e) $why .= "• {$k}: {$e}\n";
+            $queueFallback($why);
+            return;
+        }
         $report(sourceNothingText($st));
         return;
     }
@@ -4858,8 +4987,20 @@ function runTemplatesUpdate(string $TOKEN, $chatId): void
     foreach ($baks as $b) sendTemplatesBackup($TOKEN, $chatId, (array)$b['res'], (string)$b['name']);
 
     // همگام‌سازیِ هر قالب از مخزنِ گیتهابِ خودش (بدون لمس config/دیتابیس)
-    $run = SelfUpdate::updateTemplates(600);
+    $run = SelfUpdate::updateTemplates(600, $force);
     $ms = (int)round((microtime(true) - $t0) * 1000);
+
+    // هشدارِ بررسیِ ناموفقِ ریموت؛ بدون آن، «همه‌چیز به‌روز است» گمراه‌کننده می‌شود.
+    $checkWarn = '';
+    if ($checkErr !== []) {
+        $checkWarn = "\n🟠 بررسی ریموت این قالب‌ها ناموفق بود (نتیجهٔ «به‌روز است» قطعی نیست):\n";
+        $i = 0;
+        foreach ($checkErr as $ck => $ce) {
+            $checkWarn .= "• <code>" . htmlspecialchars((string)$ck, ENT_QUOTES, 'UTF-8') . "</code> — "
+                . htmlspecialchars(mb_substr(trim((string)$ce), 0, 150), ENT_QUOTES, 'UTF-8') . "\n";
+            if (++$i >= 4) { $checkWarn .= "• …\n"; break; }
+        }
+    }
 
     if (!empty($run['queued'])) {
         $report("ℹ️ بروزرسانی مستقیم ممکن نبود؛ درخواست به کرون واگذار شد:\n\n" . htmlspecialchars((string)($run['out'] ?? ''), ENT_QUOTES, 'UTF-8'));
@@ -4876,8 +5017,10 @@ function runTemplatesUpdate(string $TOKEN, $chatId): void
 
     if ($failedTpl !== [] && $doneTpl === []) {
         $txt = "❌ <b>بروزرسانی سورس انجام نشد</b>\n• "
-            . htmlspecialchars(implode("\n• ", $failedTpl), ENT_QUOTES, 'UTF-8');
-        $txt .= "\n⏱ " . SourceUpdate::fmtMs($ms);
+            . htmlspecialchars(implode("\n• ", $failedTpl), ENT_QUOTES, 'UTF-8')
+            . $checkWarn;
+        $txt .= "\n💡 اگر علت مجوزِ نوشتن بود، «🔄 پنل سورس» → «⏳ اجرا با کرون» همان کار را با دسترسی درست انجام می‌دهد.\n";
+        $txt .= "⏱ " . SourceUpdate::fmtMs($ms);
         $report($txt);
         try { Logger::getInstance()->warning('source', 'templates update failed: ' . implode(' | ', $failedTpl)); } catch (Throwable $e) { /* لاگر خاموش */ }
         return;
@@ -4889,7 +5032,21 @@ function runTemplatesUpdate(string $TOKEN, $chatId): void
         $totalApplied += $d['applied'];
         $lines[] = "• <code>" . htmlspecialchars($d['key'], ENT_QUOTES, 'UTF-8') . "</code> — {$d['applied']} فایل";
     }
-    $txt = $fetchWarn . "✅ <b>سورس تازه شد</b>\n\n"
+
+    if ($totalApplied === 0 && $failedTpl === []) {
+        $txt = $fetchWarn . "✅ <b>همهٔ فایل‌های قالب‌ها با مخزن یکسان‌اند</b>\n"
+            . ($force
+                ? "🔁 هم‌ترازسازی اجباری انجام شد؛ هیچ فایلی نیاز به بازنویسی نداشت.\n"
+                : "چیزی برای بازنویسی نبود.\n")
+            . $checkWarn
+            . "\n⏱ " . SourceUpdate::fmtMs($ms);
+        $report($txt);
+        return;
+    }
+
+    $txt = $fetchWarn
+        . ($failedTpl === [] ? "✅ <b>سورس تازه شد</b>\n\n" : "🟠 <b>سورس تازه شد، ولی چند قالب ناتمام ماند</b>\n\n")
+        . ($force ? "🔁 هم‌ترازسازی اجباری با مخزن.\n\n" : '')
         . "📥 " . $totalApplied . " فایل در " . count($doneTpl) . " قالب به‌روز شد:\n"
         . implode("\n", $lines) . "\n\n"
         . "🛡 ربات‌های ساخته‌شده تغییری نکردند؛ <code>config.php</code>‌ها و دیتابیس‌ها دست‌نخورده ماندند.\n"
@@ -4903,7 +5060,13 @@ function runTemplatesUpdate(string $TOKEN, $chatId): void
     if ($failedTpl !== []) {
         $txt .= "\n⚠️ این قالب‌ها آپدیت نشدند:\n• "
             . htmlspecialchars(implode("\n• ", $failedTpl), ENT_QUOTES, 'UTF-8') . "\n";
+        $txt .= "💡 «⏳ اجرا با کرون» همان همگام‌سازی را با دسترسی درست دوباره امتحان می‌کند.\n";
     }
+    if ($force && $baks === [] && $failedTpl === []) {
+        $txt .= "\nℹ️ چون تغییری از قبل تشخیص داده نشده بود، بکاپِ جدا گرفته نشد؛ "
+            . "<code>config.php</code>، داده و دیتابیس‌ها در هر حالت دست‌نخورده‌اند.\n";
+    }
+    $txt .= $checkWarn;
     $txt .= "\n⏱ " . SourceUpdate::fmtMs($ms);
     $report($txt);
     try {

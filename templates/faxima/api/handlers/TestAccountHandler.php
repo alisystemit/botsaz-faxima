@@ -298,6 +298,7 @@ final class TestAccountHandler extends BaseHandler
                     'content'  => $mrContent,
                     'file_ext' => strtolower(ltrim(trim((string)($mr['file_ext'] ?? '')), '.')),
                     'sub_link' => trim((string)($mr['sub_link'] ?? '')),
+                    'name'     => trim((string)($mr['namerecord'] ?? '')),
                 ];
             }
             $manualExt = '';
@@ -312,10 +313,8 @@ final class TestAccountHandler extends BaseHandler
             $isManualText = ($manualExt === 'text');
             if ($manualContent !== '' && !$isManualLink && !$isManualText) {
                 $ext = ($manualExt !== '') ? $manualExt : 'bin';
-                $cleanUser = preg_replace('/[^a-zA-Z0-9\-]/', '', str_replace('_', '-', $usernameAc));
-                if ($cleanUser === '') $cleanUser = 'config';
                 $manualDelivered = true;
-                $manualFileName = $cleanUser . '.' . $ext;
+                $manualFileName = faoxima_manualsale_public_filename(is_array($manualRow) ? (string)($manualRow['namerecord'] ?? '') : '', $ext);
                 $manualFileB64  = base64_encode($manualContent);
                 $configsArr = [];
             } elseif ($isManualText && $manualContent !== '') {

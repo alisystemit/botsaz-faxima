@@ -248,6 +248,21 @@ class RemnawaveManager
         return $this->getJson('/api/system/metadata', 'system-metadata', $pdo);
     }
 
+    public function probeGet($path, $pdo = null)
+    {
+        $token = $this->getToken($pdo);
+        if ($token === null) {
+            return ['status' => 0, 'json' => null, 'error' => 'missing API token'];
+        }
+        $result = $this->request('GET', $path, null, $token);
+        return [
+            'status' => (int) $result['code'],
+            'json' => $result['json'],
+            'body' => $result['code'] === 0 ? '' : (string) $result['raw'],
+            'error' => $result['code'] === 0 ? (string) $result['raw'] : '',
+        ];
+    }
+
     public function getInternalSquads($pdo = null)
     {
         return $this->getJson('/api/internal-squads', 'internal-squads', $pdo);
@@ -367,18 +382,23 @@ class RemnawaveManager
         }
 
 
+        $isRead = strtoupper((string) $method) === 'GET' && function_exists('faoxima_panel_timeout_info');
+        $timeoutInfo = $isRead ? faoxima_panel_timeout_info() : null;
         $curl = curl_init();
         $opts = [
             CURLOPT_URL => $url,
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_ENCODING => '',
             CURLOPT_MAXREDIRS => 5,
-            CURLOPT_TIMEOUT => $this->timeout,
+            CURLOPT_TIMEOUT => $isRead ? (int) $timeoutInfo['timeout'] : $this->timeout,
             CURLOPT_FOLLOWLOCATION => true,
             CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
             CURLOPT_CUSTOMREQUEST => $method,
             CURLOPT_HTTPHEADER => $headers,
         ];
+        if ($isRead) {
+            $opts[CURLOPT_CONNECTTIMEOUT] = (int) $timeoutInfo['connect_timeout'];
+        }
         if ($body !== null) {
             $opts[CURLOPT_POSTFIELDS] = json_encode($body, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         }

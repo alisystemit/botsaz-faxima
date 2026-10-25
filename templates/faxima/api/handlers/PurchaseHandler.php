@@ -175,7 +175,8 @@ final class PurchaseHandler extends BaseHandler
         $serviceTime = (int)$product['Service_time'];
 
 
-        $shortfall = (float)$product['price_product'] - (float)$this->user['Balance'];
+        $walletState = function_exists('rx_wallet_available') ? rx_wallet_available($this->user['id']) : ['balance' => (int) $this->user['Balance'], 'available' => (int) $this->user['Balance']];
+        $shortfall = (float)$product['price_product'] - (float)$walletState['available'];
         if ($shortfall > 0.0) {
             $directBuyEnabled = panel_feature_enabled($panel, 'directbuy');
 
@@ -225,10 +226,8 @@ final class PurchaseHandler extends BaseHandler
             }
             fx_store_invoice_snapshot($orderId, $fxSnapshot);
 
-            $amountDue = (int) ceil($shortfall);
-
-
-            if ($amountDue <= 1) $amountDue = 0;
+            $opened = $this->openCheckout('getconfigafterpay', 'getconfigafterpay|' . $usernameAc, (string) $usernameAc, (int) round((float) $product['price_product']), ['order_id' => $orderId]);
+            $amountDue = (int) $opened['checkout']['external_amount'];
 
             FaoximaLogger::debug('Direct-buy initiated', [
                 'user_id'    => $this->user['id'],
@@ -237,15 +236,17 @@ final class PurchaseHandler extends BaseHandler
                 'amount_due' => $amountDue,
                 'price'      => $product['price_product'],
                 'balance'    => $this->user['Balance'],
+                'checkout_id' => $opened['checkout']['checkout_id'],
             ]);
 
-            $payload = [
+            $payload = array_merge($this->checkoutResponseFields($opened), [
                 'success'          => true,
                 'status'           => true,
                 'message'          => faoxima_textbot_get('dyn_purchase_insufficient_balance_pay_shortfall', 'موجودی کافی نیست — لطفاً مبلغ کسری را پرداخت کنید'),
                 'requires_payment' => true,
                 'amount_due'       => $amountDue,
                 'balance'          => (float)$this->user['Balance'],
+                'available_balance' => (float)$walletState['available'],
                 'price'            => (float)$product['price_product'],
                 'username'         => $usernameAc,
                 'username_requested' => $requestedUsernameAc,
@@ -260,7 +261,7 @@ final class PurchaseHandler extends BaseHandler
                     'id'   => (string)$panel['code_panel'],
                     'name' => (string)$panel['name_panel'],
                 ],
-            ];
+            ]);
             if (function_exists('__miniapp_emit')) {
                 __miniapp_emit(200, $payload);
             } else {

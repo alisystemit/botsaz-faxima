@@ -131,7 +131,7 @@ if (is_file($_flagT)) {
     $_root = dirname(__DIR__);
     $_out = [];
     $_rc = 1;
-    @exec('cd ' . escapeshellarg($_root) . ' && ' . escapeshellarg(phpBin($cfg)) . ' tools/sync_templates.php 2>&1', $_out, $_rc);
+    @exec('cd ' . escapeshellarg($_root) . ' && ' . escapeshellarg(phpBin($cfg)) . ' tools/sync_templates.php 600 --force 2>&1', $_out, $_rc);
     $_tail = implode("\n", array_slice($_out, -30));
     $log->info('cron', "pending 'templates' sync finished rc={$_rc}");
     @file_put_contents(__DIR__ . '/../data/logs/selfupdate.log', "\n========== pending templates " . date('Y-m-d H:i:s') . " ==========\nrc={$_rc}\n" . $_tail . "\n", FILE_APPEND | LOCK_EX);

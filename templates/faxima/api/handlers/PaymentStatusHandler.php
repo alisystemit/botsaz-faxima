@@ -53,9 +53,10 @@ final class PaymentStatusHandler extends BaseHandler
             }
         }
 
+        $sbvView = function_exists('rx_sbv_public_view') ? rx_sbv_public_view($orderId) : null;
         if ($report === null) {
             $report = FaoximaDb::fetchOne(
-                'SELECT * FROM Payment_report WHERE id_order = :o AND id_user = :u AND source = \'miniapp\' LIMIT 1',
+                'SELECT * FROM Payment_report WHERE id_order = :o AND id_user = :u AND ' . ($sbvView !== null ? '1 = 1' : '(source = \'miniapp\' OR (Payment_Method = \'tonpay\' AND tonpay_gateway_mode = \'custom\') OR (Payment_Method = \'atlaspay\' AND atlaspay_gateway_mode = \'custom\'))') . ' LIMIT 1',
                 [
                     ':o' => $orderId,
                     ':u' => (string)$this->user['id'],
@@ -112,6 +113,11 @@ final class PaymentStatusHandler extends BaseHandler
             $ttlSec = $this->resolveTtl($report);
             $expiresAt = $createdAt > 0 ? ($createdAt + $ttlSec) : 0;
         }
+        if ($sbvView !== null && (string) ($report['id_user'] ?? '') === (string) $this->user['id']) {
+            $expiresAt = (int) $sbvView['expires_at'];
+        } else {
+            $sbvView = null;
+        }
 
         $rawInvoiceField = (string)($report['id_invoice'] ?? '');
         $hasPurchaseTarget = false;
@@ -143,6 +149,20 @@ final class PaymentStatusHandler extends BaseHandler
             $tonpayGatewayUrl = tonpaySelectPaymentUrl($tonpayGatewayUrl, $report['tonpay_web_invoice_url'] ?? '');
         }
 
+        $tonpayCustomView = null;
+        if ((string)($report['Payment_Method'] ?? '') === 'tonpay'
+            && (string)($report['tonpay_gateway_mode'] ?? '') === 'custom'
+            && function_exists('tonpayCustomPublicView')) {
+            $tonpayCustomView = tonpayCustomPublicView($report);
+        }
+
+        $atlaspayCustomView = null;
+        if ((string)($report['Payment_Method'] ?? '') === 'atlaspay'
+            && (string)($report['atlaspay_gateway_mode'] ?? '') === 'custom'
+            && function_exists('atlaspayCustomPublicView')) {
+            $atlaspayCustomView = atlaspayCustomPublicView($report);
+        }
+
         $payload = [
             'order_id'         => $orderId,
             'payment_status'   => $paymentStatus,
@@ -160,6 +180,10 @@ final class PaymentStatusHandler extends BaseHandler
             'currency_code'    => trim((string)($report['crypto_currency'] ?? '')) ?: null,
             'crypto_amount'    => trim((string)($report['crypto_amount']   ?? '')) ?: null,
             'wallet_to'        => trim((string)($report['crypto_wallet_to'] ?? '')) ?: null,
+            'verify'           => $sbvView,
+            'tonpay_custom'    => $tonpayCustomView,
+            'atlaspay_custom'  => $atlaspayCustomView,
+            'fulfillment'      => ($sbvView !== null && function_exists('rx_sbv_fulfillment_outcome')) ? rx_sbv_fulfillment_outcome($orderId) : null,
             'gateway_url'      => trim((string)($report['tronado_payment_url'] ?? '')) ?: ($tonpayGatewayUrl ?: (trim((string)($report['cubepay_payment_link'] ?? '')) ?: (trim((string)($report['blupal_payment_link'] ?? '')) ?: (trim((string)($report['atlaspay_payment_url'] ?? '')) ?: (trim((string)($report['tetrapay_payment_link'] ?? '')) ?: $abangatewayUrl))))),
         ];
 

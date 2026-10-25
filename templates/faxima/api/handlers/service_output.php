@@ -16,6 +16,27 @@ if (!function_exists('faoxima_manualsale_ext_is_file')) {
     }
 }
 
+if (!function_exists('faoxima_manualsale_public_filename')) {
+    function faoxima_manualsale_public_filename(string $name, string $ext): string
+    {
+        if (function_exists('rxManualsalePublicName')) {
+            return rxManualsalePublicName($name, $ext);
+        }
+        $ext = strtolower(ltrim(trim($ext), '.'));
+        if ($ext === '') {
+            $ext = 'bin';
+        }
+        $stem = trim($name);
+        $suffix = '.' . $ext;
+        if ($stem !== '' && strtolower(substr($stem, -strlen($suffix))) === $suffix) {
+            $stem = substr($stem, 0, -strlen($suffix));
+        }
+        return function_exists('normalizeConfigFilename')
+            ? normalizeConfigFilename($stem . $suffix, '', $ext === 'conf')
+            : ($stem !== '' ? $stem : 'config') . $suffix;
+    }
+}
+
 if (!function_exists('faoxima_build_service_output')) {
     function faoxima_build_service_output(array $opts): array
     {
@@ -23,10 +44,7 @@ if (!function_exists('faoxima_build_service_output')) {
         $content   = (string)($opts['content'] ?? '');
         $subLink   = trim((string)($opts['sub_link'] ?? ''));
         $fileExt   = strtolower(ltrim(trim((string)($opts['file_ext'] ?? '')), '.'));
-        $username  = preg_replace('/[^A-Za-z0-9-]/', '', str_replace('_', '-', (string)($opts['username'] ?? 'config')));
-        if ($username === '') {
-            $username = 'config';
-        }
+        $recordName = trim((string)($opts['name'] ?? ''));
 
         $configs = [];
         if (isset($opts['configs']) && is_array($opts['configs'])) {
@@ -51,8 +69,12 @@ if (!function_exists('faoxima_build_service_output')) {
                     'content'  => $itContent,
                     'file_ext' => strtolower(ltrim(trim((string)($it['file_ext'] ?? '')), '.')),
                     'sub_link' => trim((string)($it['sub_link'] ?? '')),
+                    'name'     => trim((string)($it['name'] ?? '')),
                 ];
             }
+        }
+        if ($recordName === '' && !empty($items)) {
+            $recordName = $items[0]['name'];
         }
 
         $output = [];
@@ -71,9 +93,7 @@ if (!function_exists('faoxima_build_service_output')) {
                 if ($unifiedSub !== '') {
                     $output[] = ['type' => 'link', 'value' => $unifiedSub];
                 }
-                $index = 0;
                 foreach ($items as $it) {
-                    $index++;
                     $itExt = $it['file_ext'];
                     $itContent = $it['content'];
                     if ($itExt === 'sub') {
@@ -88,7 +108,7 @@ if (!function_exists('faoxima_build_service_output')) {
                         $output[] = [
                             'type'     => 'file',
                             'value'    => 'data:application/octet-stream;base64,' . base64_encode($itContent),
-                            'filename' => function_exists('normalizeConfigFilename') ? normalizeConfigFilename($username . '-' . $index . '.' . $ext, '', $ext === 'conf') : $username . '-' . $index . '.' . $ext,
+                            'filename' => faoxima_manualsale_public_filename($it['name'], $ext),
                         ];
                     } else {
                         $output[] = ['type' => 'text', 'value' => $itContent];
@@ -118,7 +138,7 @@ if (!function_exists('faoxima_build_service_output')) {
                     $output[] = [
                         'type'     => 'file',
                         'value'    => 'data:application/octet-stream;base64,' . base64_encode($content),
-                        'filename' => function_exists('normalizeConfigFilename') ? normalizeConfigFilename($username . '.' . $ext, '', $ext === 'conf') : $username . '.' . $ext,
+                        'filename' => faoxima_manualsale_public_filename($recordName, $ext),
                     ];
                 } else {
                     $output[] = ['type' => 'text', 'value' => $content];

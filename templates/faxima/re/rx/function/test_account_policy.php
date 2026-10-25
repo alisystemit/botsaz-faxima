@@ -559,7 +559,7 @@ if (!function_exists('rx_test_eligible_panels')) {
             return [];
         }
         try {
-            $stmt = $pdo->prepare("SELECT * FROM marzban_panel WHERE TestAccount = 'ONTestAccount' AND (agent = ? OR agent = 'all') ORDER BY id ASC");
+            $stmt = $pdo->prepare("SELECT * FROM marzban_panel WHERE TestAccount = 'ONTestAccount' AND (agent = ? OR agent = 'all') ORDER BY (position = 0) ASC, position ASC, id ASC");
             $stmt->execute([rx_test_user_agent($user)]);
             $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
         } catch (Throwable $e) {

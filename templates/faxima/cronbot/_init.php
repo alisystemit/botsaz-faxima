@@ -17,17 +17,26 @@ if (!defined('RX_CRON_INIT_LOADED')) {
     if (!defined('FAOXIMA_LAZY_MYSQLI')) {
         define('FAOXIMA_LAZY_MYSQLI', true);
     }
+}
 
-
-    if (function_exists('fastcgi_finish_request') && PHP_SAPI !== 'cli') {
-        if (!headers_sent()) {
-            @header('Content-Type: text/plain; charset=utf-8');
-            @header('Content-Length: 0');
-            @header('Connection: close');
+if (!function_exists('rx_cron_release_http')) {
+    function rx_cron_release_http(): void
+    {
+        static $released = false;
+        if ($released || PHP_SAPI === 'cli') {
+            return;
         }
-        @ob_end_flush();
-        @flush();
-        @fastcgi_finish_request();
+        $released = true;
+        if (function_exists('fastcgi_finish_request')) {
+            if (!headers_sent()) {
+                @header('Content-Type: text/plain; charset=utf-8');
+                @header('Content-Length: 0');
+                @header('Connection: close');
+            }
+            @ob_end_flush();
+            @flush();
+            @fastcgi_finish_request();
+        }
     }
 }
 
@@ -143,6 +152,7 @@ if (!function_exists('rx_cron_verify_web_access')) {
             http_response_code(403);
             exit('Cron request is not authorized');
         }
+        rx_cron_release_http();
     }
 }
 

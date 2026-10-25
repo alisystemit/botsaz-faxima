@@ -132,6 +132,43 @@ class SelfUpdate
         return DIRECTORY_SEPARATOR === '\\';
     }
 
+    /**
+     * آیا تازه‌سازیِ templates/ از داخلِ وب اصلاً ممکن است؟
+     * (برای گرفتن/کپی، proc_open لازم است؛ بقیهٔ پیش‌نیازها فقط هشدارند.)
+     */
+    public static function templatesRunnable(): bool
+    {
+        return function_exists('proc_open');
+    }
+
+    /**
+     * پیش‌نیازهای «تازه‌سازی قالب‌ها» — عمداً مستقل از problems().
+     *
+     * problems() برای آپدیتِ کدِ ربات‌ساز است و به مسیر سورس/bash نیاز دارد؛
+     * اما templates/ فقط به git و اجازهٔ نوشتن روی data/tpl_repos و templates/
+     * نیاز دارد. قبلاً نبودِ مسیر سورس، دکمهٔ دریافت سورس را هم قفل می‌کرد.
+     *
+     * خروجی: فهرست هشدارها. هشدارِ «نمی‌شود نوشت» یعنی execution به کرون
+     * سپرده می‌شود، نه اینکه دکمه بی‌فایده باشد.
+     */
+    public static function templatesProblems(): array
+    {
+        $out = [];
+        if (!self::templatesRunnable()) {
+            $out[] = 'proc_open روی این سرور غیرفعال است؛ تازه‌سازی قالب‌ها فقط با bash tools/update.sh ممکن است.';
+        }
+        if (!self::canWriteInto(self::tplCacheDir())) {
+            $out[] = 'پوشهٔ کش مخازن (data/tpl_repos) برای کاربر وب قابل نوشتن نیست؛ درخواست خودکار به کرون سپرده می‌شود.';
+        }
+        if (!self::canWriteInto(self::rootDir() . '/templates')) {
+            $out[] = 'پوشهٔ templates/ برای کاربر وب قابل نوشتن نیست؛ درخواست خودکار به کرون سپرده می‌شود.';
+        }
+        if (!is_writable(self::rootDir() . '/data/logs')) {
+            $out[] = 'پوشهٔ data/logs/ قابل نوشتن نیست؛ گزارشِ نتیجه در لاگ ثبت نمی‌شود.';
+        }
+        return $out;
+    }
+
     /** پوشهٔ pending برای exec هایی که کاربر وب نمی‌تواند مستقیم بزند */
     private static function pendingDir(): string
     {
@@ -329,6 +366,18 @@ class SelfUpdate
         return preg_replace('/[^A-Za-z0-9._-]+/', '_', $key) ?: 'tpl';
     }
 
+    /** پوشهٔ قالب واقعاً محتوا دارد؟ (پوشهٔ خالی/پاک‌شده باید از مخزن پر شود) */
+    private static function templateDirReady(string $dir): bool
+    {
+        if (!is_dir($dir)) return false;
+        $list = @scandir($dir);
+        if (!is_array($list)) return false;
+        foreach ($list as $e) {
+            if ($e !== '.' && $e !== '..') return true;
+        }
+        return false;
+    }
+
     /** پوشهٔ کشِ کلون‌های bare قالب‌ها (برای diff و archive) */
     private static function tplCacheDir(): string
     {
@@ -363,14 +412,33 @@ class SelfUpdate
         return trim((string)($r['out'] ?? ''));
     }
 
-    /** شناسهٔ HEADِ ریپوی ریموت (بدون کلون) */
-    private static function lsRemoteHead(string $repo, int $timeout = 20): string
+    /**
+     * شناسهٔ HEADِ ریپوی ریموت (بدون کلون) + علتِ خطا اگر به‌دست نیامد.
+     *
+     * «بررسی نشد» با «تغییری نیست» یکی نیست؛ قبلاً خروجیِ خالیِ git همان
+     * «همه‌چیز به‌روز است» تفسیر می‌شد و دکمهٔ سورس بی‌صدا هیچ کاری نمی‌کرد
+     * (در حالی که همان اسکریپت با دسترسی روت/SSH درست کار می‌کرد).
+     *
+     * @return array{sha:string, error:string}
+     */
+    private static function lsRemoteHeadDetail(string $repo, int $timeout = 20): array
     {
         $r = self::runCmd('git ls-remote ' . escapeshellarg($repo) . ' HEAD 2>&1',
             self::rootDir(), $timeout, self::tplEnv());
         $out = trim((string)($r['out'] ?? ''));
-        if (preg_match('/^([0-9a-f]{40})/', $out, $m)) return $m[1];
-        return '';
+        if (preg_match('/^([0-9a-f]{40})/m', $out, $m)) return ['sha' => $m[1], 'error' => ''];
+        if ($out === '') {
+            $out = empty($r['ok'])
+                ? ('git بدون خروجی تمام شد (rc=' . (int)($r['rc'] ?? -1) . ')')
+                : 'git پاسخی نداد';
+        }
+        return ['sha' => '', 'error' => $out];
+    }
+
+    /** شناسهٔ HEADِ ریپوی ریموت (بدون کلون)؛ '' یعنی بررسی ممکن نشد */
+    private static function lsRemoteHead(string $repo, int $timeout = 20): string
+    {
+        return (string)(self::lsRemoteHeadDetail($repo, $timeout)['sha'] ?? '');
     }
 
     /**
@@ -414,8 +482,10 @@ class SelfUpdate
      * files    مسیرهای templates/ که عوض می‌شوند (تقریبی؛ وقتی diffِ محلی در دست است)
      * templates کلید قالب ⇒ تعداد فایلِ در حال تغییر (یا ۱: فقط «نیاز به بروزرسانی»)
      * repos    وضعیتِ تفکیکی برای هر قالب
+     * errors   کلید قالب ⇒ علتِ ناموفق‌بودنِ بررسیِ ریموت (نه «به‌روز بودن»)
+     * missing  کلید قالب‌هایی که پوشه‌شان روی دیسک نیست
      *
-     * @return array{branch:string, commit:string, behind:int, files:array<string>, templates:array<string,int>, repos:array<string,array>}
+     * @return array{branch:string, commit:string, behind:int, files:array<string>, templates:array<string,int>, repos:array<string,array>, errors:array<string,string>, missing:array<string>}
      */
     public static function templatesStatus(): array
     {
@@ -429,6 +499,11 @@ class SelfUpdate
             'files'     => [],
             'templates' => [],
             'repos'     => [],
+            // «بررسی نشد» ≠ «تغییری نیست»: اگر git/شبکه از کاربر وب کار نکند،
+            // پنل نباید بگوید «همه‌چیز به‌روز است» و دکمه بی‌صدا هیچ کاری نکند.
+            'errors'    => [],
+            // پوشهٔ قالب روی دیسک نیست ⇒ با اجرای بعدی باید کامل بازسازی شود
+            'missing'   => [],
         ];
         $state = self::templateSourceState();
         $now = time();
@@ -440,23 +515,32 @@ class SelfUpdate
             $repo = (string)($spec['repo'] ?? '');
             if ($repo === '') continue;
             $dir = Manager::templateDir($key);
-            if (!is_dir($dir)) continue;
+            $dirExists = is_dir($dir);
+            $dirReady = self::templateDirReady($dir);
+            if (!$dirExists) $out['missing'][] = (string)$key;
             // نتیجهٔ ls-remote را ۲ دقیقه کش می‌کنیم تا باز شدن پنل کند نشود
             $cachedSha = (string)($state['_remote'][$key]['sha'] ?? '');
             $cachedAt = (int)($state['_remote'][$key]['at'] ?? 0);
+            $checkErr = '';
             if ($cachedSha !== '' && $cachedAt > $now - 120) {
                 $remoteSha = $cachedSha;
             } else {
-                $remoteSha = self::lsRemoteHead($repo, 20);
+                $det = self::lsRemoteHeadDetail($repo, 20);
+                $remoteSha = (string)$det['sha'];
                 if ($remoteSha !== '') {
                     $state['_remote'][$key] = ['sha' => $remoteSha, 'at' => $now];
                     self::saveTemplateSourceState($state);
+                } else {
+                    $checkErr = (string)$det['error'];
+                    $out['errors'][$key] = $checkErr;
                 }
             }
             $old = (string)($state[$key]['sha'] ?? '');
-            $changed = ($remoteSha !== '') && ($old === '' || $old !== $remoteSha);
+            // پوشهٔ نبوده باید دوباره از مخزن پر شود، حتی اگر SHA عوض نشده باشد
+            $changed = $remoteSha !== ''
+                && ($old === '' || $old !== $remoteSha || !$dirReady);
             $files = [];
-            if ($changed && $old !== '') {
+            if ($changed && $old !== '' && $dirExists) {
                 $diff = self::gitDir(self::templateCloneDir($key), "diff --name-only {$old} {$remoteSha}", 20);
                 foreach (preg_split('/\r\n|\r|\n/', $diff) ?: [] as $f) {
                     $f = trim(str_replace('\\', '/', $f));
@@ -464,8 +548,9 @@ class SelfUpdate
                 }
             }
             $out['repos'][$key] = [
-                'repo' => $repo, 'ok' => $remoteSha !== '',
+                'repo' => $repo, 'ok' => $remoteSha !== '' && $checkErr === '',
                 'changed' => $changed, 'old' => $old, 'new' => $remoteSha, 'files' => $files,
+                'error' => $checkErr, 'local_missing' => !$dirExists,
             ];
             if ($changed) {
                 $out['behind']++;
@@ -479,6 +564,8 @@ class SelfUpdate
     /** fetch ایمن برای همین بخش (قبل از محاسبهٔ وضعیت قالب‌ها)؛ bare clone هر قالب را تازه می‌کند */
     public static function fetchSource(): array
     {
+        // کلید قالب ⇒ علتِ شکست؛ جدا از out تا فراخوان بتواند «نامعلوم» را از
+        // «به‌روز» تشخیص بدهد (منبع اصلی باگِ «دکمه هیچ کاری نمی‌کند»).
         $errors = [];
         $seen = 0;
         foreach (Manager::templates() as $key => $spec) {
@@ -487,7 +574,7 @@ class SelfUpdate
             if ($repo === '') continue;
             $seen++;
             $r = self::refreshTemplateClone($key, 90);
-            if (!$r['ok']) $errors[] = $key . ': ' . mb_substr((string)$r['out'], -200);
+            if (!$r['ok']) $errors[$key] = mb_substr((string)$r['out'], -200);
         }
         if ($seen === 0) return ['ok' => false, 'out' => 'هیچ قالبی لینک گیتهاب ندارد'];
         // چکِ زندهٔ ls-remote را هم به‌روز کن تا پنل عددِ درست نشان دهد
@@ -500,7 +587,9 @@ class SelfUpdate
             if ($sha !== '') $state['_remote'][$key] = ['sha' => $sha, 'at' => time()];
         }
         self::saveTemplateSourceState($state);
-        return ['ok' => $errors === [], 'out' => implode("\n", $errors)];
+        $lines = [];
+        foreach ($errors as $ek => $ee) $lines[] = $ek . ': ' . $ee;
+        return ['ok' => $errors === [], 'out' => implode("\n", $lines), 'errors' => $errors];
     }
 
     /**
@@ -510,23 +599,36 @@ class SelfUpdate
      *
      * فایل‌هایی که دیگر در نسخهٔ تازه نیستند حذف نمی‌شوند (امن؛ فقط گزارش می‌شوند).
      *
-     * @return array{ok:bool, results:array<string,array>, out:string}
+     * $force = true یعنی حتی اگر SHA با state یکی باشد، همهٔ فایل‌های متفاوت با
+     * مخزن بازنویسی شوند (هم‌ترازسازی صریح؛ معادلِ بخشِ templates در update.sh).
+     * بدون force، SHA یکسان و پوشهٔ آماده ⇒ skip (برای اجرای خودکارِ سبک).
+     *
+     * @return array{ok:bool, results:array<string,array>, out:string, failed_files:int, queued?:bool}
      */
-    public static function updateTemplates(int $timeoutSec = 600): array
+    public static function updateTemplates(int $timeoutSec = 600, bool $force = false): array
     {
-        $out = ['ok' => true, 'results' => [], 'out' => ''];
-        // اگر کاربرِ وب نمی‌تواند روی templates/ بنویسد، همان update.sh --templates-only
-        // را به کرون واگذار کن که با مالکِ صحیح اجرا می‌شود.
-        if (!self::canWriteInto(self::rootDir() . '/templates')) {
+        $out = ['ok' => true, 'results' => [], 'out' => '', 'failed_files' => 0];
+        // اگر کاربرِ وب نمی‌تواند روی templates/ یا کشِ مخازن بنویسد، همان اسکریپت
+        // را به کرون واگذار کن که با مالکِ صحیح اجرا می‌شود. بدون این، کپی‌ها
+        // بی‌صدا شکست می‌خوردند و state هم جلو می‌رفت ⇒ دکمه هیچ‌وقت دوباره تلاش نمی‌کرد.
+        if (!self::canWriteInto(self::rootDir() . '/templates')
+            || !self::canWriteInto(self::tplCacheDir())) {
             $en = self::enqueueUpdate('templates', 0);
-            return ['ok' => true, 'results' => [], 'out' => $en['note'], 'queued' => true];
+            return ['ok' => true, 'results' => [], 'out' => $en['note'], 'queued' => true, 'failed_files' => 0];
         }
         $state = self::templateSourceState();
         foreach (Manager::templates() as $key => $spec) {
             if (!Manager::isBuildable($key)) continue;
             $repo = (string)($spec['repo'] ?? '');
+            if ($repo === '') continue;
             $dir = Manager::templateDir($key);
-            if ($repo === '' || !is_dir($dir)) continue;
+            $dirExists = is_dir($dir);
+            $restoredMissing = !$dirExists;
+            if (!$dirExists && !@mkdir($dir, 0755, true) && !is_dir($dir)) {
+                $out['ok'] = false;
+                $out['results'][$key] = ['ok' => false, 'applied' => 0, 'error' => 'پوشهٔ قالب ساخته نشد (مجوز نوشتن templates/): ' . $dir];
+                continue;
+            }
             $r = self::refreshTemplateClone($key, 120);
             if (!$r['ok']) {
                 $out['ok'] = false;
@@ -534,7 +636,10 @@ class SelfUpdate
                 continue;
             }
             $old = (string)($state[$key]['sha'] ?? '');
-            if ($old !== '' && $old === $r['sha']) {
+            // پوشهٔ حذف‌شده/خالی هرگز skip نمی‌شود: باید از مخزن بازسازی شود.
+            // force: حتی با SHA یکسان، فایل‌های متفاوت با مخزن بازنویسی می‌شوند
+            // (هم‌ترازسازیِ صریح، مثل git reset در update.sh).
+            if (!$force && $old !== '' && $old === $r['sha'] && self::templateDirReady($dir)) {
                 $out['results'][$key] = ['ok' => true, 'skipped' => true, 'applied' => 0, 'files' => []];
                 continue;
             }
@@ -559,26 +664,54 @@ class SelfUpdate
                 continue;
             }
             $applied = [];
+            $failed = [];
             foreach (SourceUpdate::walk($work) as $rel => $abs) {
                 $relN = ltrim(str_replace('\\', '/', $rel), '/');
                 if ($relN === '.git' || str_starts_with($relN, '.git/')) continue;
                 // config.php، .env، دیتابیس‌ها، data/، logs/ : هرگز بازنویسی نمی‌شوند
-                if (SourceUpdate::isProtected($relN)) continue;
+                // استثنا: وقتی کل پوشهٔ قالب گم شده بود، config.php و .htaccessِ
+                // مخزن هم بیایند؛ وگرنه قالبِ بازسازی‌شده فایل required/امنیتی
+                // را ندارد و نصب ربات تازه با آن ممکن نیست.
+                $protected = SourceUpdate::isProtected($relN);
+                $restoreBasename = basename($relN);
+                $restoreAllowed = $restoredMissing
+                    && ($restoreBasename === 'config.php' || $restoreBasename === '.htaccess');
+                if ($protected && !$restoreAllowed) continue;
                 $dst = rtrim(str_replace('\\', '/', $dir), '/') . '/' . $relN;
                 $need = !is_file($dst) || SourceUpdate::hashFile($abs) !== SourceUpdate::hashFile($dst);
                 if (!$need) continue;
                 $ddir = dirname($dst);
-                if (!is_dir($ddir) && !@mkdir($ddir, 0755, true) && !is_dir($ddir)) continue;
+                if (!is_dir($ddir) && !@mkdir($ddir, 0755, true) && !is_dir($ddir)) {
+                    $failed[] = $relN;
+                    continue;
+                }
                 $tmp = $dst . '.botsaztmp';
-                if (!@copy($abs, $tmp)) { continue; }
+                if (!@copy($abs, $tmp)) { $failed[] = $relN; continue; }
                 if (!@rename($tmp, $dst)) {
                     @unlink($dst);
-                    if (!@rename($tmp, $dst)) { @unlink($tmp); continue; }
+                    if (!@rename($tmp, $dst)) { @unlink($tmp); $failed[] = $relN; continue; }
                 }
                 @chmod($dst, 0644);
                 $applied[] = $relN;
             }
             try { Manager::removeDir($work); } catch (Throwable $e) { /* بی‌اهمیت */ }
+            if ($failed !== []) {
+                // هیچ‌چیز از این قالب «انجام‌شده» حساب نمی‌شود: state جلو نمی‌رود تا
+                // اجرای بعدی (مثلاً با دسترسی کرون) همان فایل‌ها را دوباره امتحان کند.
+                $out['ok'] = false;
+                $out['failed_files'] += count($failed);
+                $sample = implode('، ', array_slice($failed, 0, 5));
+                $out['results'][$key] = [
+                    'ok' => false,
+                    'skipped' => false,
+                    'applied' => count($applied),
+                    'files' => $applied,
+                    'failed_files' => $failed,
+                    'error' => count($failed) . ' فایل کپی/بازنویسی نشد (مجوز نوشتن templates/ یا فضای دیسک): '
+                        . $sample . (count($failed) > 5 ? ' …' : ''),
+                ];
+                continue;
+            }
             $state[$key] = ['sha' => $r['sha'], 'at' => date('Y-m-d H:i:s'), 'applied' => count($applied)];
             unset($state['_remote'][$key]);
             $out['results'][$key] = ['ok' => true, 'skipped' => false, 'applied' => count($applied), 'files' => $applied];

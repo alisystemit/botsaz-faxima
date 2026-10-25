@@ -1,19 +1,23 @@
 <?php
 
 
+if (!function_exists('fx_ad_gate')) {
+    http_response_code(503);
+    header('Retry-After: 3600');
+    exit;
+}
+fx_ad_gate();
+
 if (session_status() === PHP_SESSION_NONE) {
     ini_set('session.cookie_samesite', 'Lax');
     ini_set('session.cookie_httponly', '1');
     session_start();
 }
-if (empty($_SESSION['csrf_token'])) {
-    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
-}
 
 // Panel version (read from the project root `version` file). Displayed in the
 // sidebar footer on every page. Always shown with a leading "v".
 $__panelVersionRaw = trim((string)@file_get_contents(__DIR__ . '/../version'));
-if ($__panelVersionRaw === '') $__panelVersionRaw = '1.1.5';
+if ($__panelVersionRaw === '') $__panelVersionRaw = '1.2.0';
 $__panelVersion = (stripos($__panelVersionRaw, 'v') === 0) ? $__panelVersionRaw : ('v' . $__panelVersionRaw);
 
 if (isset($_SESSION["user"])) {
@@ -226,7 +230,7 @@ if (isset($pdo) && $pdo instanceof PDO) {
     background: transparent;
     border: 1px solid transparent;
     border-radius: var(--radius-md);
-    box-shadow: var(--shadow-1);
+    box-shadow: none;
     height: 28px;
 }
 [data-theme="dark"] .version-pill,
@@ -239,7 +243,7 @@ if (isset($pdo) && $pdo instanceof PDO) {
     flex-shrink: 0;
     background: #fff;
     margin: 0;
-    box-shadow: var(--shadow-1);
+    box-shadow: none;
 }
 [data-theme="dark"] .version-pill .logo,
 :root:not([data-theme="light"]) .version-pill .logo { box-shadow: none; }
@@ -519,6 +523,7 @@ if (isset($pdo) && $pdo instanceof PDO) {
                 <ul class="sidebar-menu">
                     <li><a href="textbot.php"><span class="menu-symbol"><?php echo icon('text', 'svg-icon'); ?></span><span>متن‌های ربات</span></a></li>
                     <li><a href="keyboard.php"><span class="menu-symbol"><?php echo icon('keyboard', 'svg-icon'); ?></span><span>چیدمان کیبورد</span></a></li>
+                    <li><a href="account_layout.php"><span class="menu-symbol"><?php echo icon('wallet', 'svg-icon'); ?></span><span>چیدمان حساب</span></a></li>
                     <li><a href="service_keyboard.php"><span class="menu-symbol"><?php echo icon('palette', 'svg-icon'); ?></span><span>رنگ‌بندی دکمه‌ها</span></a></li>
                     <li><a href="appearance.php"><span class="menu-symbol"><?php echo icon('sparkles', 'svg-icon'); ?></span><span>تنظیمات ظاهر</span></a></li>
                     <li><a href="miscsettings.php"><span class="menu-symbol"><?php echo icon('sliders', 'svg-icon'); ?></span><span>تنظیمات متفرقه</span></a></li>
@@ -541,6 +546,12 @@ if (isset($pdo) && $pdo instanceof PDO) {
 </aside>
 
 <div class="sidebar-overlay"></div>
+
+<?php if (isset($_SESSION['user']) && $_SESSION['user'] !== ''): ?>
+<link rel="stylesheet" href="css/ads.css?v=ad1">
+<div id="fxAdModalHost" data-endpoint="ad_api.php" hidden></div>
+<script src="js/ads.js?v=ad1" defer></script>
+<?php endif; ?>
 
 <script>
 (function () {
@@ -565,7 +576,7 @@ if (isset($pdo) && $pdo instanceof PDO) {
                 try { localStorage.setItem('faoxima_notif_seen', String(orderLatest)); } catch (e) {}
                 if (ticketsUnseen) {
                     ticketsUnseen = false;
-                    try { fetch('tickets.php?ajax=mark_ticket_seen', { method: 'POST', credentials: 'same-origin', headers: { 'X-CSRF-Token': <?php echo json_encode((string)($_SESSION['csrf_token'] ?? '')); ?> } }); } catch (e) {}
+                    try { fetch('tickets.php?ajax=mark_ticket_seen', { method: 'POST', credentials: 'same-origin' }); } catch (e) {}
                 }
                 orderSeen = orderLatest;
                 orderUnseen = false;
@@ -696,30 +707,6 @@ if (isset($pdo) && $pdo instanceof PDO) {
             });
         }
     }
-})();
-
-/* CSRF: همهٔ فرم‌های POST که فیلد توکن ندارند، هنگام ارسال توکن می‌گیرند.
-   فرم‌های حساس به‌صورت صریح هم توکن دارند؛ این لایه برای فرم‌های قدیمی/
-   داینامیک است و بدون JavaScript، گارد same-origin در سمت سرور کار می‌کند. */
-(function () {
-    var token = <?php echo json_encode((string)($_SESSION['csrf_token'] ?? '')); ?>;
-    if (!token) return;
-    function ensure(f) {
-        if (!f || f.tagName !== 'FORM') return;
-        var method = (f.getAttribute('method') || 'get').toLowerCase();
-        if (method !== 'post') return;
-        if (f.querySelector('input[name="_csrf"]')) return;
-        var i = document.createElement('input');
-        i.type = 'hidden';
-        i.name = '_csrf';
-        i.value = token;
-        f.appendChild(i);
-    }
-    document.addEventListener('DOMContentLoaded', function () {
-        var forms = document.querySelectorAll('form');
-        for (var i = 0; i < forms.length; i++) ensure(forms[i]);
-    });
-    document.addEventListener('submit', function (ev) { ensure(ev.target); }, true);
 })();
 </script>
 

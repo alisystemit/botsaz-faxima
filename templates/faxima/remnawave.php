@@ -790,3 +790,59 @@ if (!function_exists('remnawave_admin_log')) {
         error_log("[REMNAWAVE-ADMIN-ERROR] Button: $button | UserID: $userId | Action: $action | Error: $error");
     }
 }
+
+if (!function_exists('remnawave_capability_report')) {
+    function remnawave_capability_report(array $panel, array &$report)
+    {
+        global $pdo;
+        $mgr = new RemnawaveManager($panel);
+        if (trim((string) ($panel['remna_api_token'] ?? '')) === '') {
+            rx_cap_set($report, 'connection', 'failed', 'توکن API برای این پنل تنظیم نشده است.');
+            rx_cap_mark_untested_after_connection_failure($report);
+            return;
+        }
+        $test = $mgr->testConnection($pdo);
+        if (empty($test['ok'])) {
+            rx_cap_set($report, 'connection', 'failed', rx_cap_clean_text((string) ($test['message'] ?? ''), 160));
+            rx_cap_mark_untested_after_connection_failure($report);
+            return;
+        }
+        rx_cap_set($report, 'connection', 'verified', 'GET /api/system/stats موفق بود.');
+        rx_cap_set_writes($report, 'unknown', 'رمن‌ویو برای توکن API متادیتای نقش یا مجوز ارائه نمی‌دهد؛ عملیات نوشتنی تست نشد.');
+
+        $list = $mgr->probeGet('/api/users?size=1&start=0', $pdo);
+        $listRead = rx_cap_http_read($list);
+        if ($listRead[0] === 'verified') {
+            $total = $list['json']['response']['total'] ?? null;
+            $listRead[1] = 'GET /api/users موفق بود' . ($total !== null ? '؛ تعداد کل: ' . (int) $total : '') . '.';
+        }
+        rx_cap_set($report, 'list_users', $listRead[0], $listRead[1]);
+
+        rx_cap_probe_sample_user_via_manager($panel, $report);
+
+        $squads = $mgr->probeGet('/api/internal-squads', $pdo);
+        $squadRead = rx_cap_http_read($squads);
+        if ($squadRead[0] === 'verified') {
+            $list = $squads['json']['response']['internalSquads'] ?? [];
+            $available = [];
+            foreach ((array) $list as $squad) {
+                if (is_array($squad) && !empty($squad['uuid'])) {
+                    $available[] = strtolower((string) $squad['uuid']);
+                }
+            }
+            $configured = array_values(array_filter(array_map(function ($v) {
+                return strtolower(trim($v));
+            }, explode(',', (string) ($panel['remna_squad'] ?? '')))));
+            $missing = array_values(array_diff($configured, $available));
+            $note = count($available) . ' Squad قابل مشاهده.';
+            if (empty($configured)) {
+                $note .= ' Squad پیش‌فرضی در ربات تنظیم نشده است.';
+            } elseif (!empty($missing)) {
+                $note .= ' ' . count($missing) . ' Squad تنظیم‌شده در پنل یافت نشد.';
+            }
+            rx_cap_set($report, 'resources', (empty($missing) && !empty($configured)) ? 'verified' : 'failed', $note);
+        } else {
+            rx_cap_set($report, 'resources', $squadRead[0], 'GET /api/internal-squads: ' . $squadRead[1]);
+        }
+    }
+}

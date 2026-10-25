@@ -64,6 +64,8 @@ function faoxima_schema_ready(PDO $pdo): void {
     }
 
 
+    faoxima_schema_ensure_column($pdo, 'admin', 'ad_modal_hidden_until', 'INT(11) NULL DEFAULT 0');
+
     faoxima_schema_ensure_column(
         $pdo, 'marzban_panel', 'national_net_status',
         "VARCHAR(50) NOT NULL DEFAULT 'off_national_net'"

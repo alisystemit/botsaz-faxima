@@ -3,11 +3,13 @@ ini_set('session.cookie_samesite', 'Lax');
 ini_set('session.cookie_httponly', '1');
 session_start();
 require_once __DIR__ . '/../config.php';
+if (!@include_once __DIR__ . '/lib/ad_boot.php') { http_response_code(503); header('Retry-After: 3600'); exit; }
 require_once __DIR__ . '/lib/icons.php';
 require_once __DIR__ . '/lib/pagination.php';
 require_once __DIR__ . '/lib/bulk_delete.php';
 require_once __DIR__ . '/lib/search_filter.php';
 require_once __DIR__ . '/lib/csrf.php';
+require_once __DIR__ . '/lib/ordering.php';
 require_once __DIR__ . '/../function.php';
 
 $query = $pdo->prepare("SELECT * FROM admin WHERE username=:username");
@@ -79,6 +81,7 @@ if (!empty($_POST['action']) && $_POST['action'] === 'bulk_delete') {
     fx_bulk_delete_redirect('category.php', count($requestedIds), $deletedCount);
 }
 
+fx_order_ensure_schema($pdo, 'category');
 $catQ = fx_search_current();
 $catWhereSql = '1=1';
 $catParams = [];
@@ -90,7 +93,7 @@ if ($catQ !== '') {
 }
 
 $pg = fx_paginate($pdo, "SELECT COUNT(*) FROM category WHERE $catWhereSql", $catParams, 5);
-$query = $pdo->prepare("SELECT * FROM category WHERE $catWhereSql ORDER BY id ASC LIMIT :perPage OFFSET :offset");
+$query = $pdo->prepare("SELECT * FROM category WHERE $catWhereSql ORDER BY (position = 0) ASC, position ASC, id ASC LIMIT :perPage OFFSET :offset");
 foreach ($catParams as $k => $v) $query->bindValue($k, $v, PDO::PARAM_STR);
 $query->bindValue(':perPage', $pg['perPage'], PDO::PARAM_INT);
 $query->bindValue(':offset', $pg['offset'], PDO::PARAM_INT);
@@ -104,6 +107,7 @@ $categories = $query->fetchAll();
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>مدیریت دسته‌بندی‌ها | ربات فاکسیما</title>
     <link rel="stylesheet" href="css/theme.css?v=flat50">
+    <link rel="stylesheet" href="css/order_modal.css?v=ord1">
     <script src="js/theme.js?v=flat50" defer></script>
 </head>
 <body>
@@ -122,6 +126,9 @@ $categories = $query->fetchAll();
                 <div class="chip-row">
                     <button onclick="openModal('modal-add-category')" class="btn btn-primary btn-sm">
                         <?php echo icon('plus', 'svg-icon'); ?> افزودن دسته‌بندی
+                    </button>
+                    <button onclick="openModal('modal-move-category')" class="btn btn-soft-purple btn-sm">
+                        <?php echo icon('arrow-right-arrow-left', 'svg-icon'); ?> جابجایی دسته‌بندی‌ها
                     </button>
                 </div>
             </div>
@@ -189,6 +196,8 @@ $categories = $query->fetchAll();
     <input type="hidden" name="id" id="del-id" value="">
 </form>
 
+<?php echo fx_order_modal_html('category', 'modal-move-category'); ?>
+
 <div id="modal-add-category" class="modal-overlay">
     <div class="modal-box" style="max-width:420px;">
         <div class="modal-head">
@@ -227,6 +236,7 @@ $categories = $query->fetchAll();
 </div>
 
 <script src="js/bulk-select.js?v=fx2"></script>
+<script src="js/order_modal.js?v=ord1"></script>
 <script>
 function faoximaOpenEdit(id, remark) {
     document.getElementById('edit-cat-id').value = id;

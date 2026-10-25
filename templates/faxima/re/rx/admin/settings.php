@@ -324,7 +324,30 @@ if ($datain == "settimecornremove" && $adminrulecheck['rule'] == "administrator"
         nm_adminInstantReply($from_id, "❌ نام آموزش باید کمتر از 150 کاراکتر باشد", null, 'HTML');
         return;
     }
-    update("help", "name_os", $text, "name_os", $user['Processing_value']);
+    try {
+        $rxHelpStmt = $pdo->prepare("SELECT id FROM help WHERE name_os = ? ORDER BY id LIMIT 1");
+        $rxHelpStmt->execute([(string) $user['Processing_value']]);
+        $rxHelpId = $rxHelpStmt->fetchColumn();
+        if ($rxHelpId === false) {
+            nm_adminInstantReply($from_id, "❌ آموزش انتخاب‌شده یافت نشد. لطفاً دوباره آموزش را انتخاب کنید.", $backadmin, 'HTML');
+            return;
+        }
+        $rxHelpDupStmt = $pdo->prepare("SELECT 1 FROM help WHERE name_os = ? AND id <> ? LIMIT 1");
+        $rxHelpDupStmt->execute([$text, $rxHelpId]);
+        if ($rxHelpDupStmt->fetchColumn() !== false) {
+            nm_adminInstantReply($from_id, "❌ آموزشی با این نام قبلاً ثبت شده است. نام دیگری ارسال کنید.", $backadmin, 'HTML');
+            return;
+        }
+        $rxHelpRenameStmt = $pdo->prepare("UPDATE help SET name_os = ? WHERE id = ?");
+        $rxHelpRenameStmt->execute([$text, $rxHelpId]);
+    } catch (PDOException $e) {
+        error_log('help rename failed: ' . $e->getMessage());
+        nm_adminInstantReply($from_id, "❌ بروزرسانی نام آموزش ناموفق بود. دوباره تلاش کنید.", $backadmin, 'HTML');
+        return;
+    }
+    clearSelectCache('help');
+    update("user", "Processing_value", $text, "id", $from_id);
+    $user['Processing_value'] = $text;
     nm_adminInstantReply($from_id, "✅ نام آموزش بروزرسانی شد", $helpedit, 'HTML');
     step('help_edit', $from_id);
 } elseif ($text == "ویرایش دسته بندی" && $adminrulecheck['rule'] == "administrator") {
@@ -413,23 +436,123 @@ if ($datain == "settimecornremove" && $adminrulecheck['rule'] == "administrator"
     nm_adminInstantReply($from_id, $textbotlang['Admin']['SettingnowPayment']['activeshowcardstatus'], null, 'HTML');
     update("user", "cardpayment", "1");
     update("setting", "showcard", "1");
+} elseif (is_string($datain ?? null) && strpos($datain, 'rsva:') === 0) {
+    $rxReservationAnswer = function ($message = '', $alert = false) use ($callback_query_id) {
+        if (!empty($callback_query_id)) {
+            telegram('answerCallbackQuery', array_filter([
+                'callback_query_id' => $callback_query_id,
+                'text' => $message !== '' ? strip_tags($message) : null,
+                'show_alert' => $alert ?: null,
+            ], function ($value) {
+                return $value !== null;
+            }));
+        }
+    };
+    if (!in_array($from_id, $admin_ids) || ($adminrulecheck['rule'] ?? '') != "administrator") {
+        $rxReservationAnswer('⛔️', true);
+        return;
+    }
+    $rxReservationParsed = rxReservationAdminParse($datain);
+    $rxReservationPanel = is_array($rxReservationParsed) ? select("marzban_panel", "*", "code_panel", $rxReservationParsed['code'], "select") : false;
+    if (!is_array($rxReservationParsed) || !is_array($rxReservationPanel) || ($rxReservationPanel['type'] ?? '') === 'Manualsale') {
+        $rxReservationAnswer(rxRenewalText('admin_outdated'), true);
+        return;
+    }
+    $rxReservationState = $rxReservationParsed['state'];
+    $rxReservationAction = $rxReservationParsed['action'];
+    if ($rxReservationAction === 'p') {
+        $rxReservationState['selected'] = true;
+    } elseif (empty($rxReservationState['selected']) && !in_array($rxReservationAction, ['x', 'b'], true)) {
+        $rxReservationAnswer(rxRenewalText('admin_outdated'), true);
+        return;
+    }
+    if ($rxReservationAction === 'x') {
+        $rxReservationAnswer();
+        return;
+    }
+    if ($rxReservationAction === 'b') {
+        $rxReservationAnswer(rxRenewalText('admin_cancelled'));
+        Editmessagetext($from_id, $message_id, rxRenewalText('admin_cancelled'), json_encode(['inline_keyboard' => []]));
+        update("user", "Processing_value", $rxReservationPanel['name_panel'], "id", $from_id);
+        step('PanelMenu', $from_id);
+        outtypepanel($rxReservationPanel['type'], $textbotlang['Admin']['Back-menu']);
+        return;
+    }
+    $rxReservationDateOn = (((int) $rxReservationState['mask'] >> 2) & 1) === 1;
+    if ($rxReservationAction === 'e' || ($rxReservationAction === 'c' && $rxReservationParsed['arg'] === 2 && !$rxReservationDateOn)) {
+        $rxReservationAnswer();
+        $rxReservationState['mask'] = ((int) $rxReservationState['mask'] | 4) & 7;
+        update("user", "Processing_value", $rxReservationPanel['name_panel'], "id", $from_id);
+        step(rxReservationAdminStepEncode((string) $rxReservationPanel['code_panel'], $rxReservationState), $from_id);
+        nm_adminInstantReply($from_id, rxRenewalText('admin_date_prompt', ['tz' => date_default_timezone_get()]), $backadmin ?? null, 'HTML');
+        return;
+    }
+    if ($rxReservationAction === 's') {
+        $rxReservationError = rxReservationAdminValidate($rxReservationState, time());
+        if ($rxReservationError !== null) {
+            $rxReservationAnswer($rxReservationError, true);
+            $rxReservationAdminView = rxReservationAdminView($rxReservationPanel, $rxReservationState, $rxReservationError);
+            Editmessagetext($from_id, $message_id, $rxReservationAdminView['text'], $rxReservationAdminView['keyboard'], 'HTML');
+            return;
+        }
+        rx_rn_ensure_schema();
+        update("marzban_panel", "reservation_settings", rxReservationSettingsJson(rxReservationAdminSettingsFromState($rxReservationState)), "code_panel", $rxReservationPanel['code_panel']);
+        update("marzban_panel", "Methodextend", 'رزرو اشتراک', "code_panel", $rxReservationPanel['code_panel']);
+        $rxReservationAnswer(rxRenewalText('admin_saved'));
+        Editmessagetext($from_id, $message_id, rxRenewalText('admin_saved') . "\n" . rxRenewalText('admin_summary', ['text' => rxReservationActivationText(rxReservationAdminSettingsFromState($rxReservationState)['conditions'], $rxReservationState['at'])]), json_encode(['inline_keyboard' => []]));
+        update("user", "Processing_value", $rxReservationPanel['name_panel'], "id", $from_id);
+        step('PanelMenu', $from_id);
+        outtypepanel($rxReservationPanel['type'], $textbotlang['Admin']['Algortimeextend']['SaveData']);
+        return;
+    }
+    $rxReservationState = rxReservationAdminApply($rxReservationState, $rxReservationAction, $rxReservationParsed['arg']);
+    $rxReservationAnswer();
+    $rxReservationAdminView = rxReservationAdminView($rxReservationPanel, $rxReservationState);
+    Editmessagetext($from_id, $message_id, $rxReservationAdminView['text'], $rxReservationAdminView['keyboard'], 'HTML');
+} elseif (is_string($user['step'] ?? null) && strpos((string) $user['step'], 'rsvadate|') === 0) {
+    if (!isset($update['message']) && empty($text)) { return; }
+    $rxReservationDraft = rxReservationAdminStepDecode((string) $user['step']);
+    $rxReservationPanel = is_array($rxReservationDraft) ? select("marzban_panel", "*", "code_panel", $rxReservationDraft['code'], "select") : false;
+    if (!in_array($from_id, $admin_ids) || ($adminrulecheck['rule'] ?? '') != "administrator" || !is_array($rxReservationDraft) || !is_array($rxReservationPanel)) {
+        step('home', $from_id);
+        nm_adminInstantReply($from_id, rxRenewalText('admin_outdated'), $keyboardadmin ?? null, 'HTML');
+        return;
+    }
+    $rxReservationAt = rxReservationParseDate($text, time());
+    if ($rxReservationAt === null) {
+        nm_adminInstantReply($from_id, rxRenewalText('admin_date_invalid'), null, 'HTML');
+        return;
+    }
+    $rxReservationState = $rxReservationDraft['state'];
+    $rxReservationState['selected'] = true;
+    $rxReservationState['mask'] = ((int) $rxReservationState['mask'] | 4) & 7;
+    $rxReservationState['at'] = $rxReservationAt;
+    step('PanelMenu', $from_id);
+    $rxReservationAdminView = rxReservationAdminView($rxReservationPanel, $rxReservationState, rxRenewalText('admin_date_saved', ['date' => rxRenewalFormatExpire($rxReservationAt)]));
+    sendmessage($from_id, $rxReservationAdminView['text'], $rxReservationAdminView['keyboard'], 'HTML');
 } elseif ($text == "🔋 روش تمدید سرویس" && $adminrulecheck['rule'] == "administrator") {
     $rxExtendMethodGuide = "🔋 روش تمدید را انتخاب کنید.
 
 "
-        . "همه روش‌ها زمان و حجم باقی‌مانده مشتری را حفظ می‌کنند و هیچ‌کدام مقدار پرداخت‌شده را حذف نمی‌کند:
+        . "♻️ «ریست حجم و زمان»: مصرف صفر می‌شود و حجم و زمان باقی‌مانده حذف می‌شود؛ حجم کل = فقط حجم خرید؛ انقضا = زمان اجرا + روزهای خرید.
 
 "
-        . "✅ «اضافه شدن زمان و حجم به ماه بعد» و «ریست زمان و اضافه کردن حجم قبلی» (پیشنهادی): مصرف حفظ می‌شود؛ حجم کل = حجم فعلی + حجم خرید؛ انقضا = انقضای فعلی + روزهای خرید.
+        . "➕ «اضافه شدن زمان و حجم به ماه بعد»: مصرف حفظ می‌شود؛ حجم باقی‌مانده + حجم خرید قابل استفاده است (حجم کل = مصرف + باقی‌مانده + خرید)؛ انقضا = انقضای فعلی + روزهای خرید.
 
 "
-        . "♻️ «ریست حجم و زمان»، «ریست شدن حجم و اضافه شدن زمان» و «اضافه شدن زمان و تبدیل حجم کل به حجم باقی مانده»: مصرف صفر می‌شود؛ حجم کل = حجم باقی‌مانده + حجم خرید؛ انقضا = انقضای فعلی + روزهای خرید.
+        . "🔁 «ریست زمان و اضافه کردن حجم قبلی»: مصرف حفظ می‌شود؛ حجم باقی‌مانده + حجم خرید؛ زمان باقی‌مانده حذف و انقضا = زمان اجرا + روزهای خرید.
 
 "
-        . "📌 «رزرو اشتراک»: تمدید رزرو می‌شود و پس از پایان سرویس فعلی فعال می‌گردد.
+        . "🔂 «ریست شدن حجم و اضافه شدن زمان»: مصرف صفر و حجم باقی‌مانده حذف می‌شود؛ حجم کل = فقط حجم خرید؛ انقضا = انقضای فعلی + روزهای خرید.
 
 "
-        . "برای سرویس منقضی‌شده، روزهای خرید از زمان تمدید محاسبه می‌شود.";
+        . "🔄 «اضافه شدن زمان و تبدیل حجم کل به حجم باقی مانده»: مصرف صفر می‌شود اما حجم باقی‌مانده حذف نمی‌شود؛ حجم کل = حجم باقی‌مانده + حجم خرید؛ انقضا = انقضای فعلی + روزهای خرید.
+
+"
+        . "📌 «رزرو اشتراک»: سرویس فعلی تغییر نمی‌کند؛ ابتدا مدیر یکی از چهار روش تمدید را انتخاب می‌کند و سپس یک یا چند شرط فعال‌سازی (اتمام حجم، پایان زمان یا تاریخ مشخص) را تعیین می‌کند. رزرو با رسیدن اولین شرط انتخاب‌شده فعال می‌شود. مشتری فقط خرید را تأیید می‌کند و امکان تغییر تنظیمات را ندارد؛ حجم و زمان باقی‌مانده در لحظه فعال‌سازی محاسبه می‌شود.
+
+"
+        . "ℹ️ مصرف بیش از سقف قبلی هیچ‌گاه از حجم خریداری‌شده کم نمی‌شود. برای سرویس منقضی‌شده، روزهای خرید از زمان اجرا محاسبه و سرویس دوباره فعال می‌شود. سرویسی که توسط مدیر غیرفعال شده تمدید خودکار نمی‌شود.";
     nm_adminInstantReply($from_id, $rxExtendMethodGuide, $Methodextend, 'HTML');
     step('updateextendmethod', $from_id);
 } elseif ($user['step'] == "updateextendmethod") {
@@ -450,6 +573,19 @@ if ($datain == "settimecornremove" && $adminrulecheck['rule'] == "administrator"
     if ($panelName === '') {
         nm_adminInstantReply($from_id, "❌ پنل انتخاب نشده است.", $keyboardadmin, 'HTML');
         step('home', $from_id);
+        return;
+    }
+    if ($text == 'رزرو اشتراک') {
+        rx_rn_ensure_schema();
+        $rxReservationPanel = select("marzban_panel", "*", "name_panel", $panelName, "select");
+        if (!is_array($rxReservationPanel) || ($rxReservationPanel['type'] ?? '') === 'Manualsale') {
+            nm_adminInstantReply($from_id, rxRenewalText('reason_reservation_unsupported'), null, 'HTML');
+            return;
+        }
+        update("user", "Processing_value", $panelName, "id", $from_id);
+        step('PanelMenu', $from_id);
+        $rxReservationAdminView = rxReservationAdminView($rxReservationPanel, array_merge(rxReservationAdminState(rxReservationPanelSettings($rxReservationPanel)), ['selected' => false]));
+        nm_adminInstantReply($from_id, $rxReservationAdminView['text'], $rxReservationAdminView['keyboard'], 'HTML');
         return;
     }
     update("marzban_panel", "Methodextend", $text, "name_panel", $panelName);
@@ -1260,24 +1396,34 @@ if ($datain == "settimecornremove" && $adminrulecheck['rule'] == "administrator"
     ]);
     Editmessagetext($from_id, $message_id, "روشن گردید", $statusternadoo);
 } elseif ($text == "🔑 ثبت API Key ترونادو" && $adminrulecheck['rule'] == "administrator") {
-    $PaySetting = select("PaySetting", "ValuePay", "NamePay", "apiternado", "select");
-    $currentKey = $PaySetting['ValuePay'] ?? 'ثبت نشده';
-    $texttronseller = "🔑 کلید API ترونادو خود را اینجا وارد کنید.\n\nکلید فعلی شما: {$currentKey}";
-    nm_adminInstantReply($from_id, $texttronseller, $backadmin, 'HTML');
+    sendmessage($from_id, tronadoAdminSetupText(), tronadoAdminSetupKeyboard(), 'HTML');
+    nm_adminInstantReply($from_id, "🔑 کلید API ترونادو خود را اینجا وارد کنید.\n\nبرای حفظ امنیت، مقدار کلید فعلی نمایش داده نمی‌شود.", $backadmin, 'HTML');
     step('apiternado', $from_id);
 } elseif ($user['step'] == "apiternado") {
-    nm_adminInstantReply($from_id, $textbotlang['Admin']['SettingnowPayment']['Savaapi'], $trnado, 'HTML');
-    update("PaySetting", "ValuePay", $text, "NamePay", "apiternado");
+    $newTronadoKey = trim((string) $text);
+    if ($newTronadoKey === '' || preg_match('/\s/', $newTronadoKey)) {
+        nm_adminInstantReply($from_id, "❌ کلید API نامعتبر است. کلید را بدون فاصله و به‌صورت یک متن ارسال کنید.", $backadmin, 'HTML');
+        return;
+    }
+    update("PaySetting", "ValuePay", $newTronadoKey, "NamePay", "apiternado");
+    nm_adminInstantReply($from_id, $textbotlang['Admin']['SettingnowPayment']['Savaapi'] . "\n\nℹ️ صحت کلید با ترونادو بررسی نشد؛ پس از ثبت دامنه‌ی Callback، با یک پرداخت آزمایشی کوچک از عملکرد آن مطمئن شوید.", $trnado, 'HTML');
+    sendmessage($from_id, tronadoAdminSetupText(), tronadoAdminSetupKeyboard(), 'HTML');
     step('home', $from_id);
 } elseif ($text == "🔏 ثبت کلید امضای IPN ترونادو" && $adminrulecheck['rule'] == "administrator") {
     $PaySetting = select("PaySetting", "ValuePay", "NamePay", "ipnsigningkeytronado", "select");
-    $currentKey = $PaySetting['ValuePay'] ?? 'ثبت نشده';
-    $texttronseller = "🔏 کلید امضای IPN (IpnSigningKey) ترونادو را اینجا وارد کنید.\n\nکلید فعلی شما: {$currentKey}";
+    $currentSigning = trim((string) ($PaySetting['ValuePay'] ?? ''));
+    $signingStatus = $currentSigning === '' ? 'ثبت نشده' : 'ثبت شده (' . tronadoAdminMaskSecret($currentSigning) . ')';
+    $texttronseller = "🔏 کلید امضای IPN (IpnSigningKey) ترونادو را اینجا وارد کنید.\n\nوضعیت فعلی: {$signingStatus}\n\nاین کلید با API Key جداست و برای تأیید امضای Callbackها استفاده می‌شود. برای حفظ امنیت، مقدار کلید نمایش داده نمی‌شود.";
     nm_adminInstantReply($from_id, $texttronseller, $backadmin, 'HTML');
     step('ipnsigningkeytronado', $from_id);
 } elseif ($user['step'] == "ipnsigningkeytronado") {
+    $newSigningKey = trim((string) $text);
+    if ($newSigningKey === '' || preg_match('/\s/', $newSigningKey)) {
+        nm_adminInstantReply($from_id, "❌ کلید امضا نامعتبر است. کلید را بدون فاصله و به‌صورت یک متن ارسال کنید.", $backadmin, 'HTML');
+        return;
+    }
     nm_adminInstantReply($from_id, $textbotlang['Admin']['SettingnowPayment']['Savaapi'], $trnado, 'HTML');
-    update("PaySetting", "ValuePay", $text, "NamePay", "ipnsigningkeytronado");
+    update("PaySetting", "ValuePay", $newSigningKey, "NamePay", "ipnsigningkeytronado");
     step('home', $from_id);
 } elseif ($text == "💼 آدرس کیف پول ترونادو" && $adminrulecheck['rule'] == "administrator") {
     $PaySetting = select("PaySetting", "ValuePay", "NamePay", "walletaddress", "select");
@@ -1305,6 +1451,7 @@ if ($datain == "settimecornremove" && $adminrulecheck['rule'] == "administrator"
         . "🔹 ۱۰۰: کل کارمزد را شما پرداخت می‌کنید. کاربر تقریباً همان مبلغ فاکتور را پرداخت می‌کند، اما مقدار ترونی که به کیف پول شما واریز می‌شود کمتر از درخواستی است.\n\n"
         . "🔹 بین ۰ تا ۱۰۰: کارمزد بین شما و کاربر به‌نسبت تقسیم می‌شود.\n\n"
         . "⚠️ توجه: تغییر این عدد فقط نحوه تقسیم کارمزد را مشخص می‌کند و باعث تغییر در فاکتور شما نمی‌شود؛ اگر مطمئن نیستید، آن را روی ۰ نگه دارید.\n\n"
+        . "ℹ️ این تنظیم «کش‌بک» نیست؛ کش‌بک کاربران از دکمه «💰 کش بک ترونادو» تنظیم می‌شود. تغییر این عدد فقط برای فاکتورهای جدید اعمال می‌شود.\n\n"
         . "لطفاً عددی بین ۰ تا ۱۰۰ ارسال کنید.\n\nمقدار فعلی: {$currentValue}";
     nm_adminInstantReply($from_id, $texttronseller, $backadmin, 'HTML');
     step('wageFromBusinessPercentageTronado', $from_id);
@@ -1330,7 +1477,22 @@ if ($datain == "settimecornremove" && $adminrulecheck['rule'] == "administrator"
     nm_adminInstantReply($from_id, $textbotlang['Admin']['SettingnowPayment']['Savaapi'], $tonpay, 'HTML');
     update("PaySetting", "ValuePay", $text, "NamePay", "apitonpay");
     step('home', $from_id);
-} elseif (($text == "🔀 مقصد پرداخت تون‌پی" || preg_match('/^tonpay_paymode_(bot|web)$/', (string) $datain, $tonpayModeMatch)) && $adminrulecheck['rule'] == "administrator") {
+} elseif ($text == "🔐 ثبت API Key کاستوم تون‌پی" && $adminrulecheck['rule'] == "administrator") {
+    $currentCustomKey = function_exists('tonpayMaskSecret') && function_exists('tonpayCustomApiKey') ? tonpayMaskSecret(tonpayCustomApiKey()) : '';
+    if ($currentCustomKey === '') {
+        $currentCustomKey = 'ثبت نشده';
+    }
+    $currentCustomKey = htmlspecialchars($currentCustomKey, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+    nm_adminInstantReply($from_id, "🔐 کلید API درگاه کاستوم تلگرام تون‌پی را اینجا وارد کنید.\n\nاین کلید با کلید درگاه معمولی متفاوت است و فقط برای حالت پرداخت داخلی (کاستوم) استفاده می‌شود.\n\nکلید فعلی شما: {$currentCustomKey}", $backadmin, 'HTML');
+    step('apitonpaycustom', $from_id);
+} elseif ($user['step'] == "apitonpaycustom") {
+    if (!function_exists('tonpayCustomSaveApiKey') || !tonpayCustomSaveApiKey($text)) {
+        nm_adminInstantReply($from_id, "❌ ذخیره کلید ناموفق بود. دوباره تلاش کنید.", $tonpay, 'HTML');
+    } else {
+        nm_adminInstantReply($from_id, $textbotlang['Admin']['SettingnowPayment']['Savaapi'], $tonpay, 'HTML');
+    }
+    step('home', $from_id);
+} elseif (($text == "🔀 مقصد پرداخت تون‌پی" || preg_match('/^tonpay_paymode_(bot|web|custom)$/', (string) $datain, $tonpayModeMatch)) && $adminrulecheck['rule'] == "administrator") {
     if (!empty($tonpayModeMatch[1])) {
         update("PaySetting", "ValuePay", $tonpayModeMatch[1], "NamePay", "tonpay_payment_mode");
         telegram('answerCallbackQuery', ['callback_query_id' => $callback_query_id, 'text' => '✅ مقصد پرداخت تون‌پی ذخیره شد', 'show_alert' => false]);
@@ -1340,13 +1502,50 @@ if ($datain == "settimecornremove" && $adminrulecheck['rule'] == "administrator"
     }
     $tonpayBotMark = $tonpayMode === 'bot' ? '✅ ' : '';
     $tonpayWebMark = $tonpayMode === 'web' ? '✅ ' : '';
+    $tonpayCustomMark = $tonpayMode === 'custom' ? '✅ ' : '';
     $tonpayModeKb = json_encode(['inline_keyboard' => [
         [['text' => "{$tonpayBotMark}🤖 پرداخت از طریق ربات تلگرام", 'callback_data' => 'tonpay_paymode_bot']],
         [['text' => "{$tonpayWebMark}🌐 پرداخت از طریق وب", 'callback_data' => 'tonpay_paymode_web']],
+        [['text' => "{$tonpayCustomMark}💳 درگاه کاستوم (پرداخت داخل ربات و مینی‌اپ)", 'callback_data' => 'tonpay_paymode_custom']],
         [['text' => "🔙 بازگشت", 'callback_data' => 'tonpaysetting']],
     ]], JSON_UNESCAPED_UNICODE);
-    $tonpayModeLabel = $tonpayMode === 'web' ? '🌐 پرداخت از طریق وب' : '🤖 پرداخت از طریق ربات تلگرام';
-    nm_adminInstantReply($from_id, "🔀 مقصد پرداخت تون‌پی\n\nلینک پرداختی که برای کاربر ارسال می‌شود را انتخاب کنید. اگر لینک وب از سمت تون‌پی دریافت نشود، لینک ربات تلگرام ارسال خواهد شد.\n\nحالت فعلی: <b>{$tonpayModeLabel}</b>", $tonpayModeKb, 'HTML');
+    $tonpayModeLabels = [
+        'bot' => '🤖 پرداخت از طریق ربات تلگرام',
+        'web' => '🌐 پرداخت از طریق وب',
+        'custom' => '💳 درگاه کاستوم (پرداخت داخل ربات و مینی‌اپ)',
+    ];
+    $tonpayModeLabel = $tonpayModeLabels[$tonpayMode] ?? $tonpayModeLabels['bot'];
+    $tonpayCustomWarning = '';
+    if ($tonpayMode === 'custom' && (!function_exists('tonpayCustomApiKey') || tonpayCustomApiKey() === '')) {
+        $tonpayCustomWarning = "\n\n⚠️ کلید API درگاه کاستوم هنوز ثبت نشده است؛ تا زمان ثبت کلید، ساخت فاکتور جدید با خطا مواجه می‌شود.";
+    }
+    nm_adminInstantReply($from_id, "🔀 مقصد پرداخت تون‌پی\n\nلینک پرداختی که برای کاربر ارسال می‌شود را انتخاب کنید. اگر لینک وب از سمت تون‌پی دریافت نشود، لینک ربات تلگرام ارسال خواهد شد.\n\nدر حالت کاستوم، کاربر تمام مراحل پرداخت (کارت، رسید و پیگیری) را داخل ربات یا مینی‌اپ انجام می‌دهد. فاکتورهای قبلی با همان روشی که ساخته شده‌اند ادامه پیدا می‌کنند.\n\nحالت فعلی: <b>{$tonpayModeLabel}</b>{$tonpayCustomWarning}", $tonpayModeKb, 'HTML');
+} elseif (($text == "🔀 مقصد پرداخت اطلس‌پی" || preg_match('/^atlaspay_paymode_(official|custom)$/', (string) $datain, $atlaspayModeMatch)) && $adminrulecheck['rule'] == "administrator") {
+    $atlaspayRegisterNote = '';
+    if (!empty($atlaspayModeMatch[1])) {
+        atlaspayCustomSaveSetting('atlaspay_payment_mode', $atlaspayModeMatch[1]);
+        telegram('answerCallbackQuery', ['callback_query_id' => $callback_query_id, 'text' => '✅ مقصد پرداخت اطلس‌پی ذخیره شد', 'show_alert' => false]);
+        $atlaspayMode = $atlaspayModeMatch[1];
+        if ($atlaspayMode === 'custom') {
+            $atlaspayRegistration = atlaspayCustomRegisterWebhook();
+            $atlaspayRegisterNote = "\n\n" . (!empty($atlaspayRegistration['ok']) ? '✅ ' : '⚠️ ') . htmlspecialchars((string) ($atlaspayRegistration['message'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+        }
+    } else {
+        $atlaspayMode = atlaspayPaymentMode();
+    }
+    $atlaspayOfficialMark = $atlaspayMode === 'official' ? '✅ ' : '';
+    $atlaspayCustomMark = $atlaspayMode === 'custom' ? '✅ ' : '';
+    $atlaspayModeKb = json_encode(['inline_keyboard' => [
+        [['text' => "{$atlaspayOfficialMark}🌐 پرداخت از طریق اطلس‌پی", 'callback_data' => 'atlaspay_paymode_official']],
+        [['text' => "{$atlaspayCustomMark}💎 پرداخت مستقیم در ربات و مینی‌اپ ما", 'callback_data' => 'atlaspay_paymode_custom']],
+        [['text' => "🔙 بازگشت", 'callback_data' => 'atlaspaysetting']],
+    ]], JSON_UNESCAPED_UNICODE);
+    $atlaspayModeLabel = $atlaspayMode === 'custom' ? '💎 پرداخت مستقیم در ربات و مینی‌اپ ما' : '🌐 پرداخت از طریق اطلس‌پی';
+    $atlaspayModeWarning = '';
+    if ($atlaspayMode === 'custom') {
+        $atlaspayModeWarning = "\n\n⚠️ برای نمایش شماره کارت داخل ربات و مینی‌اپ، قابلیت «نمایش مستقیم اطلاعات پرداخت» باید از سمت اطلس‌پی برای فروشگاه شما فعال شده باشد (از دکمه «🆘 پشتیبانی» ربات اطلس‌پی درخواست فعال‌سازی بدهید). تا زمان فعال‌سازی، کاربر فقط از طریق دکمه «ارسال رسید پرداخت» به صفحه رسمی اطلس‌پی هدایت می‌شود.";
+    }
+    nm_adminInstantReply($from_id, "🔀 مقصد پرداخت اطلس‌پی\n\nدر حالت رسمی، کاربر برای پرداخت به مینی‌اپ رسمی اطلس‌پی هدایت می‌شود. در حالت مستقیم، اطلاعات پرداخت داخل ربات و مینی‌اپ نمایش داده می‌شود و فقط ارسال رسید در مینی‌اپ رسمی اطلس‌پی انجام می‌شود. فاکتورهای قبلی با همان روشی که ساخته شده‌اند ادامه پیدا می‌کنند.\n\nحالت فعلی: <b>{$atlaspayModeLabel}</b>{$atlaspayModeWarning}{$atlaspayRegisterNote}", $atlaspayModeKb, 'HTML');
 } elseif ($text == "🔑 ثبت API Key اطلس‌پی" && $adminrulecheck['rule'] == "administrator") {
     $PaySetting = select("PaySetting", "ValuePay", "NamePay", "apiatlaspay", "select");
     $currentKey = $PaySetting['ValuePay'] ?? 'ثبت نشده';
@@ -1570,7 +1769,12 @@ if ($datain == "settimecornremove" && $adminrulecheck['rule'] == "administrator"
         nm_adminInstantReply($from_id, $textbotlang['Admin']['managepanel']['Inbound']['invalidprotocol'], null, 'HTML');
         return;
     }
-    $getinbounds = getinbounds($user['Processing_value'])[$text];
+    $getinbounds = getinbounds($user['Processing_value']);
+    if (is_array($getinbounds) && !empty($getinbounds['error'])) {
+        nm_adminInstantReply($from_id, "❌ " . rx_panel_error_text($getinbounds['error']), null, 'HTML');
+        return;
+    }
+    $getinbounds = $getinbounds[$text];
     $list_marzban_panel_inbounds = [
         'keyboard' => [],
         'resize_keyboard' => true,
@@ -1720,7 +1924,6 @@ if ($datain == "settimecornremove" && $adminrulecheck['rule'] == "administrator"
         $response = false;
         $httpCode = null;
 
-        $fxVerifyTls = function_exists('faoxima_ssl_verify') ? faoxima_ssl_verify() : true;
         if (function_exists('curl_init')) {
             $curlHandle = @curl_init($url);
             if ($curlHandle !== false) {
@@ -1729,8 +1932,8 @@ if ($datain == "settimecornremove" && $adminrulecheck['rule'] == "administrator"
                     CURLOPT_TIMEOUT => 20,
                     CURLOPT_CONNECTTIMEOUT => 10,
                     CURLOPT_FOLLOWLOCATION => true,
-                    CURLOPT_SSL_VERIFYPEER => $fxVerifyTls,
-                    CURLOPT_SSL_VERIFYHOST => $fxVerifyTls ? 2 : 0,
+                    CURLOPT_SSL_VERIFYPEER => false,
+                    CURLOPT_SSL_VERIFYHOST => false,
                 ]);
                 $response = curl_exec($curlHandle);
                 if ($response === false) {
@@ -1748,8 +1951,8 @@ if ($datain == "settimecornremove" && $adminrulecheck['rule'] == "administrator"
                     'timeout' => 20,
                 ],
                 'ssl' => [
-                    'verify_peer' => $fxVerifyTls,
-                    'verify_peer_name' => $fxVerifyTls,
+                    'verify_peer' => false,
+                    'verify_peer_name' => false,
                 ],
             ]);
             $response = @file_get_contents($url, false, $streamContext);
@@ -2541,7 +2744,12 @@ if ($datain == "settimecornremove" && $adminrulecheck['rule'] == "administrator"
     $config = array(
         'usage_coefficient' => $text
     );
-    Modifyuser_node($user['Processing_value'], $user['Processing_value_one'], $config);
+    $rxNodeResult = Modifyuser_node($user['Processing_value'], $user['Processing_value_one'], $config);
+    if (is_array($rxNodeResult) && !empty($rxNodeResult['error'])) {
+        nm_adminInstantReply($from_id, "❌ " . rx_panel_error_text($rxNodeResult['error']), null, 'HTML');
+        step('home', $from_id);
+        return;
+    }
     $backinfoss = json_encode([
         'inline_keyboard' => [
             [
@@ -2567,7 +2775,12 @@ if ($datain == "settimecornremove" && $adminrulecheck['rule'] == "administrator"
     $config = array(
         'name' => $text
     );
-    Modifyuser_node($user['Processing_value'], $user['Processing_value_one'], $config);
+    $rxNodeResult = Modifyuser_node($user['Processing_value'], $user['Processing_value_one'], $config);
+    if (is_array($rxNodeResult) && !empty($rxNodeResult['error'])) {
+        nm_adminInstantReply($from_id, "❌ " . rx_panel_error_text($rxNodeResult['error']), null, 'HTML');
+        step('home', $from_id);
+        return;
+    }
     $backinfoss = json_encode([
         'inline_keyboard' => [
             [
@@ -2593,7 +2806,12 @@ if ($datain == "settimecornremove" && $adminrulecheck['rule'] == "administrator"
     $config = array(
         'address' => $text
     );
-    Modifyuser_node($user['Processing_value'], $user['Processing_value_one'], $config);
+    $rxNodeResult = Modifyuser_node($user['Processing_value'], $user['Processing_value_one'], $config);
+    if (is_array($rxNodeResult) && !empty($rxNodeResult['error'])) {
+        nm_adminInstantReply($from_id, "❌ " . rx_panel_error_text($rxNodeResult['error']), null, 'HTML');
+        step('home', $from_id);
+        return;
+    }
     $backinfoss = json_encode([
         'inline_keyboard' => [
             [
@@ -2604,7 +2822,11 @@ if ($datain == "settimecornremove" && $adminrulecheck['rule'] == "administrator"
     nm_adminInstantReply($from_id, "✅  آدرس نود با موفقیت ذخیره گردید.", $backinfoss, 'HTML');
     step('home', $from_id);
 } elseif ($datain == "reconnectnode") {
-    reconnect_node($user['Processing_value'], $user['Processing_value_one']);
+    $rxNodeResult = reconnect_node($user['Processing_value'], $user['Processing_value_one']);
+    if (is_array($rxNodeResult) && !empty($rxNodeResult['error'])) {
+        nm_adminInstantReply($from_id, "❌ " . rx_panel_error_text($rxNodeResult['error']), null, 'HTML');
+        return;
+    }
     $backinfoss = json_encode([
         'inline_keyboard' => [
             [
@@ -2615,7 +2837,11 @@ if ($datain == "settimecornremove" && $adminrulecheck['rule'] == "administrator"
     $textnode = "✅ اتصال مجدد نود انجام گردید.";
     Editmessagetext($from_id, $message_id, $textnode, $backinfoss);
 } elseif ($datain == "removenode") {
-    removenode($user['Processing_value'], $user['Processing_value_one']);
+    $rxNodeResult = removenode($user['Processing_value'], $user['Processing_value_one']);
+    if (is_array($rxNodeResult) && !empty($rxNodeResult['error'])) {
+        nm_adminInstantReply($from_id, "❌ " . rx_panel_error_text($rxNodeResult['error']), null, 'HTML');
+        return;
+    }
     $backinfoss = json_encode([
         'inline_keyboard' => [
             [
@@ -5742,9 +5968,14 @@ elseif ($text == "🫣 مخفی پنل برای کاربر" && $adminrulecheck['
     } else {
         nm_adminInstantReply($from_id, $msg, $ip_keyboard_json, 'HTML');
     }
-} elseif (preg_match('/extendadmin_(\w+)/', $datain, $dataget) || strpos($text, "/extend ") !== false) {
+} elseif (is_string($datain) && strpos($datain, 'rxar:') === 0) {
+    rxArOnCallback($ManagePanel, $from_id, $datain);
+} elseif (preg_match('/^extendadmin_(\w+)/', (string) $datain, $dataget) || strpos((string) $text, "/extend ") === 0) {
+    if (!in_array($from_id, $admin_ids)) {
+        return;
+    }
     if ($text[0] == "/") {
-        $usernameconfig = explode(" ", $text)[1];
+        $usernameconfig = explode(" ", $text)[1] ?? '';
         $id_invoice = select("invoice", "id_invoice", "username", $usernameconfig, 'select');
         if ($id_invoice == false) {
             nm_adminInstantReply($from_id, "❌ کاربر وجو ندارد.", null, 'HTML');
@@ -5754,149 +5985,14 @@ elseif ($text == "🫣 مخفی پنل برای کاربر" && $adminrulecheck['
     } else {
         $id_invoice = $dataget[1];
     }
-    $nameloc = select("invoice", "*", "id_invoice", $id_invoice, "select");
-    if ($nameloc == false) {
-        nm_adminInstantReply($from_id, "❌ تمدید با خطا مواجه گردید مراحل تمدید را مجددا انجام دهید.", null, 'HTML');
+    rxArStart($ManagePanel, $from_id, $id_invoice);
+} elseif ($user['step'] == "rxar_vol" || $user['step'] == "rxar_days") {
+    if (!isset($update['message']) && empty($text)) {
         return;
     }
-    $DataUserOut = $ManagePanel->DataUser($nameloc['Service_location'], $nameloc['username']);
-    if ($DataUserOut['status'] == "Unsuccessful") {
-        nm_adminInstantReply($from_id, $textbotlang['users']['stateus']['error'], null, 'html');
-        return;
-    }
-    update("user", "Processing_value_one", $nameloc['id_invoice'], "id", $from_id);
-    savedata("clear", "id_invoice", $nameloc['id_invoice']);
-    $textcustom = "📌 حجم درخواستی خود را ارسال کنید.";
-    nm_adminInstantReply($from_id, $textcustom, $backuser, 'html');
-    step('gettimecustomvolomforextendadmin', $from_id);
-} elseif ($user['step'] == "gettimecustomvolomforextendadmin") {
-    $userdate = json_decode($user['Processing_value'], true);
-    $nameloc = select("invoice", "*", "id_invoice", $userdate['id_invoice'], "select");
-    $marzban_list_get = select("marzban_panel", "*", "name_panel", $nameloc['Service_location'], "select");
-    if (!ctype_digit($text)) {
-        nm_adminInstantReply($from_id, $textbotlang['Admin']['Product']['Invalidvolume'], $backuser, 'HTML');
-        return;
-    }
-    savedata("save", "volume", $text);
-    $textcustom = "⌛️ زمان سرویس خود را انتخاب نمایید ";
-    nm_adminInstantReply($from_id, $textcustom, $backuser, 'html');
-    step('getvolumecustomuserforextendadmin', $from_id);
-} elseif ($user['step'] == "getvolumecustomuserforextendadmin") {
-    $userdate = json_decode($user['Processing_value'], true);
-    $nameloc = select("invoice", "*", "id_invoice", $userdate['id_invoice'], "select");
-    $marzban_list_get = select("marzban_panel", "*", "name_panel", $nameloc['Service_location'], "select");
-    if (!ctype_digit($text)) {
-        nm_adminInstantReply($from_id, $textbotlang['Admin']['Product']['Invalidtime'], $backuser, 'HTML');
-        return;
-    }
-    $prodcut['name_product'] = $nameloc['name_product'];
-    $prodcut['note'] = "";
-    $prodcut['price_product'] = 0;
-    $prodcut['Service_time'] = $text;
-    $prodcut['Volume_constraint'] = $userdate['volume'];
-    update("invoice", "name_product", $prodcut['name_product'], "id_invoice", $userdate['id_invoice']);
-    update("invoice", "price_product", $prodcut['price_product'], "id_invoice", $userdate['id_invoice']);
-    update("invoice", "Volume", $prodcut['Volume_constraint'], "id_invoice", $userdate['id_invoice']);
-    update("invoice", "Service_time", $prodcut['Service_time'], "id_invoice", $userdate['id_invoice']);
-    step("home", $from_id);
-    $keyboardextend = json_encode([
-        'inline_keyboard' => [
-            [
-                ['text' => $textbotlang['users']['extend']['confirm'], 'callback_data' => "confirmserivceadmin-" . $nameloc['id_invoice']],
-            ],
-            [
-                ['text' => "🏠 بازگشت به منوی اصلی", 'callback_data' => "backuser"]
-            ]
-        ]
-    ]);
-    $textextend = "📜 فاکتور تمدید شما برای نام کاربری {$nameloc['username']} ایجاد شد.
-
-🛍 نام محصول :{$prodcut['name_product']}
-⏱ مدت زمان تمدید :{$prodcut['Service_time']} روز
-🔋 حجم تمدید :{$prodcut['Volume_constraint']} گیگ
-✍️ توضیحات : {$prodcut['note']}
-✅ برای تایید و تمدید سرویس روی دکمه زیر کلیک کنید";
-    if ($user['step'] == "getvolumecustomuserforextendadmin") {
-        nm_adminInstantReply($from_id, $textextend, $keyboardextend, 'HTML');
-    } else {
-        Editmessagetext($from_id, $message_id, $textextend, $keyboardextend);
-    }
-} elseif (preg_match('/^confirmserivceadmin-(.*)/', $datain, $dataget)) {
-    Editmessagetext($from_id, $message_id, $text_inline, json_encode(['inline_keyboard' => []]));
-    $id_invoice = $dataget[1];
-    $nameloc = select("invoice", "*", "id_invoice", $id_invoice, "select");
-    $marzban_list_get = select("marzban_panel", "*", "name_panel", $nameloc['Service_location'], "select");
-    $prodcut['code_product'] = "custom_volume";
-    $prodcut['name_product'] = $nameloc['name_product'];
-    $prodcut['price_product'] = 0;
-    $prodcut['Service_time'] = $nameloc['Service_time'];
-    $prodcut['Volume_constraint'] = $nameloc['Volume'];
-    if ($prodcut == false || !in_array($nameloc['Status'], ['active', 'end_of_time', 'end_of_volume', 'sendedwarn', 'send_on_hold'])) {
-        nm_adminInstantReply($from_id, "❌ تمدید با خطا مواجه گردید مراحل تمدید را مجددا انجام دهید.", null, 'HTML');
-        return;
-    }
-    deletemessage($from_id, $message_id);
-    $extend = $ManagePanel->extend($marzban_list_get['Methodextend'], $prodcut['Volume_constraint'], $prodcut['Service_time'], $nameloc['username'], $prodcut['code_product'], $marzban_list_get['code_panel']);
-    if ($extend['status'] == false) {
-        $extend['msg'] = rx_panel_error_text($extend['msg'] ?? null, $extend['detail'] ?? null);
-        $textreports = "
-        خطای تمدید سرویس
-<blockquote>نام پنل : {$marzban_list_get['name_panel']}</blockquote>
-<blockquote>نام کاربری سرویس : {$nameloc['username']}</blockquote>
-<blockquote>دلیل خطا : {$extend['msg']}</blockquote>";
-        $rxAdminExtendMsg = "❌خطایی در تمدید سرویس رخ داده با پشتیبانی در ارتباط باشید";
-        if (($extend['code'] ?? '') === 'manual_stock_empty') {
-            $rxAdminExtendMsg = "❌ موجودی انبار فروش دستی برای این محصول تمام شده است.";
-        } elseif (($extend['code'] ?? '') === 'queued_renewal_exists') {
-            $rxAdminExtendMsg = "❌ یک رزرو اشتراک برای این سرویس در انتظار فعال‌سازی است.";
-        }
-        nm_adminInstantReply($from_id, $rxAdminExtendMsg, null, 'HTML');
-        if (strlen($setting['Channel_Report']) > 0) {
-            telegram('sendmessage', [
-                'chat_id' => $setting['Channel_Report'],
-                'message_thread_id' => $errorreport,
-                'text' => $textreports,
-                'parse_mode' => "HTML"
-            ]);
-        }
-        return;
-    }
-    $stmt = $pdo->prepare("INSERT IGNORE INTO service_other (id_user, username, value, type, time, price, output) VALUES (:id_user, :username, :value, :type, :time, :price, :output)");
-    $dateacc = date('Y/m/d H:i:s');
-    $value = $prodcut['Volume_constraint'] . "_" . $prodcut['Service_time'];
-    $type = "extend_user_by_admin";
-    $stmt->bindParam(':id_user', $from_id, PDO::PARAM_STR);
-    $stmt->bindParam(':username', $nameloc['username'], PDO::PARAM_STR);
-    $stmt->bindParam(':value', $value, PDO::PARAM_STR);
-    $stmt->bindParam(':type', $type, PDO::PARAM_STR);
-    $stmt->bindParam(':time', $dateacc, PDO::PARAM_STR);
-    $stmt->bindParam(':price', $prodcut['price_product'], PDO::PARAM_STR);
-    $output_json = json_encode($extend);
-    $stmt->bindParam(':output', $output_json, PDO::PARAM_STR);
-    $stmt->execute();
-    update("invoice", "Status", "active", "id_invoice", $id_invoice);
-    $rxAdminExtendThanks = $textbotlang['users']['extend']['thanks'];
-    if (!empty($extend['queued'])) {
-        $rxAdminExtendThanks .= "\n\n⏳ این بسته هم‌اکنون فعال نشد. به محض اتمام حجم یا زمان سرویس فعلی، این بسته به‌صورت خودکار فعال خواهد شد.";
-    }
-    nm_adminInstantReply($from_id, $rxAdminExtendThanks, null, 'HTML');
-    $text_report = "⭕️ ادمین سرویس کاربر را تمدید کرد.
-
-اطلاعات کاربر :
-
-<blockquote>🪪 آیدی عددی ادمین : <code>$from_id</code></blockquote>
-<blockquote>🪪 آیدی عددی : <code>{$nameloc['id_user']}</code></blockquote>
-<blockquote>🛍 نام محصول :  {$prodcut['name_product']}</blockquote>
-<blockquote>👤 نام کاربری مشتری در پنل  : {$nameloc['username']}</blockquote>
-<blockquote>موقعیت سرویس سرویس کاربر : {$nameloc['Service_location']}</blockquote>";
-    if (strlen($setting['Channel_Report']) > 0) {
-        telegram('sendmessage', [
-            'chat_id' => $setting['Channel_Report'],
-            'message_thread_id' => $otherservice,
-            'text' => $text_report,
-            'parse_mode' => "HTML"
-        ]);
-    }
+    rxArOnText($ManagePanel, $from_id, (string) $text);
+} elseif (is_string($datain) && strpos($datain, 'confirmserivceadmin-') === 0) {
+    rxArAnswer($callback_query_id, rxRenewalText('button_outdated'));
 } elseif (preg_match('/removeresid_(\w+)/', $datain, $dataget)) {
     $idorder = $dataget[1];
     if (function_exists('rxReceiptHardDelete')) {

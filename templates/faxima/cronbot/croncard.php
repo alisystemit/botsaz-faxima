@@ -55,10 +55,15 @@ foreach ($datatxtbot as $item) {
         $datatextbot[$item['id_text']] = $item['text'];
     }
 }
+if (function_exists('rx_sbv_cron_run')) {
+    $textbotlang = languagechange('../text.json');
+    rx_sbv_cron_run('../images.jpg');
+}
+$rxSbvExclude = (function_exists('rx_sbv_has_schema') && rx_sbv_has_schema()) ? " AND NOT EXISTS (SELECT 1 FROM card_sms_payment csp WHERE csp.id_order = Payment_report.id_order)" : "";
 list($rxW, $rxN) = function_exists('rx_cron_shard') ? rx_cron_shard() : [0, 1];
 $rxShard = ($rxN > 1) ? " AND MOD(id, $rxN) = $rxW " : "";
 $rxCroncardQueue = [];
-$recoverStmt = $pdo->prepare("SELECT id_order FROM Payment_report WHERE payment_Status IN ('processing', 'reconciling') AND (Payment_Method = 'cart to cart' OR Payment_Method = 'arze digital offline') AND bottype IS NULL$rxShard ORDER BY id ASC LIMIT 20");
+$recoverStmt = $pdo->prepare("SELECT id_order FROM Payment_report WHERE payment_Status IN ('processing', 'reconciling') AND (Payment_Method = 'cart to cart' OR Payment_Method = 'arze digital offline') AND bottype IS NULL$rxSbvExclude$rxShard ORDER BY id ASC LIMIT 20");
 $recoverStmt->execute();
 foreach ($recoverStmt->fetchAll(PDO::FETCH_COLUMN) as $recoverOrderId) {
     $rxCroncardQueue[] = ['id_order' => (string) $recoverOrderId, 'mode' => 'recover'];
@@ -67,7 +72,7 @@ $timecheck = $setting['timeauto_not_verify']*60;
 $paymentverify = select("PaySetting","ValuePay","NamePay","autoconfirmcart","select")['ValuePay'];
 $rxAutoConfirmEnabled = $paymentverify != "offauto" && ($setting['card_verify_status'] ?? 'offcardverify') !== 'oncardverify';
 if ($rxAutoConfirmEnabled) {
-    $stmt = $pdo->prepare("SELECT * FROM Payment_report WHERE payment_Status = 'waiting' AND COALESCE(direct_payment_done, 0) = 0 AND (Payment_Method = 'cart to cart' OR Payment_Method = 'arze digital offline') AND bottype IS NULL AND NOT EXISTS (SELECT 1 FROM payment_fulfillment pf WHERE pf.id_order = Payment_report.id_order AND pf.state IN ('completed', 'manual_review'))$rxShard ORDER BY id ASC LIMIT 50");
+    $stmt = $pdo->prepare("SELECT * FROM Payment_report WHERE payment_Status = 'waiting' AND COALESCE(direct_payment_done, 0) = 0 AND (Payment_Method = 'cart to cart' OR Payment_Method = 'arze digital offline') AND bottype IS NULL AND NOT EXISTS (SELECT 1 FROM payment_fulfillment pf WHERE pf.id_order = Payment_report.id_order AND pf.state IN ('completed', 'manual_review'))$rxSbvExclude$rxShard ORDER BY id ASC LIMIT 50");
     $stmt->execute();
     while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
         if (function_exists('rx_cron_time_up') && rx_cron_time_up()) break;

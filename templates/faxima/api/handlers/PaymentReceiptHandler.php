@@ -7,6 +7,8 @@ require_once __DIR__ . '/BaseHandler.php';
 
 final class PaymentReceiptHandler extends BaseHandler
 {
+    private string $srcSql = "source = 'miniapp'";
+
     public function handle(): void
     {
         $this->requireMethod('POST');
@@ -32,9 +34,12 @@ final class PaymentReceiptHandler extends BaseHandler
         }
 
 
+        if (function_exists('rx_sbv_is_verify_order') && rx_sbv_is_verify_order($orderId)) {
+            $this->srcSql = '1 = 1';
+        }
         $payment = FaoximaDb::fetchOne(
             'SELECT * FROM Payment_report
-              WHERE id_order = :o AND id_user = :u AND source = \'miniapp\'
+              WHERE id_order = :o AND id_user = :u AND ' . $this->srcSql . '
               LIMIT 1',
             [':o' => $orderId, ':u' => $this->user['id']]
         );
@@ -51,6 +56,16 @@ final class PaymentReceiptHandler extends BaseHandler
         }
         if ($currentStatus !== 'unpaid') {
             FaoximaResponse::fail(409, faoxima_textbot_get('dyn_receipt_payment_not_pending', '❌ این تراکنش دیگر در وضعیت قابل ارسال رسید نیست.'));
+        }
+        if (function_exists('rx_sbv_receipt_gate')) {
+            $sbvGate = rx_sbv_receipt_gate($orderId);
+            if (empty($sbvGate['ok'])) {
+                FaoximaResponse::fail(409, (string) $sbvGate['message'], [
+                    'code' => (string) ($sbvGate['code'] ?? 'verify_gate'),
+                    'available_at' => $sbvGate['available_at'] ?? null,
+                    'wait_sec' => $sbvGate['wait_sec'] ?? null,
+                ]);
+            }
         }
 
 
@@ -120,6 +135,10 @@ final class PaymentReceiptHandler extends BaseHandler
         ]);
 
 
+        if (function_exists('rx_sbv_receipt_admin_note')) {
+            $caption .= rx_sbv_receipt_admin_note($orderId);
+        }
+
         $keyboard = json_encode([
             'inline_keyboard' => [
                 [
@@ -135,13 +154,16 @@ final class PaymentReceiptHandler extends BaseHandler
                 ],
             ],
         ], JSON_UNESCAPED_UNICODE);
+        if (function_exists('rx_sbv_receipt_keyboard')) {
+            $keyboard = (string) rx_sbv_receipt_keyboard($keyboard, $orderId);
+        }
 
 
         try {
             $reserveStmt = FaoximaDb::pdo()->prepare(
                 'UPDATE Payment_report
                     SET payment_Status = \'pending\', dec_not_confirmed = \'receipt-uploading\', at_updated = :au
-                  WHERE id_order = :o AND id_user = :u AND source = \'miniapp\' AND payment_Status = \'Unpaid\'
+                  WHERE id_order = :o AND id_user = :u AND ' . $this->srcSql . ' AND payment_Status = \'Unpaid\'
                     AND (dec_not_confirmed IS NULL OR dec_not_confirmed = \'\')'
             );
             $reserveStmt->execute([
@@ -369,7 +391,7 @@ final class PaymentReceiptHandler extends BaseHandler
                 $stmt = $pdo->prepare(
                     'UPDATE Payment_report
                         SET payment_Status = :s, dec_not_confirmed = :d, at_updated = :au
-                      WHERE id_order = :o AND id_user = :u AND source = \'miniapp\'
+                      WHERE id_order = :o AND id_user = :u AND ' . $this->srcSql . '
                         AND payment_Status = \'pending\' AND dec_not_confirmed = \'receipt-uploading\''
                 );
                 $stmt->execute([
@@ -410,7 +432,7 @@ final class PaymentReceiptHandler extends BaseHandler
             FaoximaDb::pdo()->prepare(
                 'UPDATE Payment_report
                     SET payment_Status = \'Unpaid\', dec_not_confirmed = NULL, at_updated = NULL
-                  WHERE id_order = :o AND id_user = :u AND source = \'miniapp\'
+                  WHERE id_order = :o AND id_user = :u AND ' . $this->srcSql . '
                     AND payment_Status = \'pending\' AND dec_not_confirmed = \'receipt-uploading\'
                     AND (report_message_id IS NULL OR report_message_id = 0)
                     AND (private_receipt_targets IS NULL OR private_receipt_targets = \'\')'

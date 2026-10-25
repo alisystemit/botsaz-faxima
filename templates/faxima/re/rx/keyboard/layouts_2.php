@@ -207,7 +207,7 @@ $result = $stmt->fetchAll();
 $table_exists = count($result) > 0;
 $namepanel = [];
 if ($table_exists) {
-    $stmt = $pdo->prepare("SELECT * FROM marzban_panel WHERE name_panel IS NOT NULL AND name_panel <> ''");
+    $stmt = $pdo->prepare("SELECT * FROM marzban_panel WHERE name_panel IS NOT NULL AND name_panel <> '' ORDER BY (position = 0) ASC, position ASC, id ASC");
     $stmt->execute();
     while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
         $rxPanelName = trim((string)$row['name_panel']);
@@ -229,7 +229,7 @@ if ($table_exists) {
     ];
     $json_list_marzban_panel = json_encode($list_marzban_panel);
 
-    $stmt = $pdo->prepare("SELECT * FROM marzban_panel WHERE name_panel IS NOT NULL AND name_panel <> ''");
+    $stmt = $pdo->prepare("SELECT * FROM marzban_panel WHERE name_panel IS NOT NULL AND name_panel <> '' ORDER BY (position = 0) ASC, position ASC, id ASC");
     $stmt->execute();
     $list_marzban_panel_edit_product = ['inline_keyboard' => []];
     while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
@@ -340,7 +340,7 @@ $helpcwtgory['inline_keyboard'][] = [
 ];
 $json_list_helpـcategory = json_encode($helpcwtgory);
 
-    $stmt = $pdo->prepare("SELECT * FROM marzban_panel WHERE status = 'active' AND (agent = :agent OR agent = 'all')");
+    $stmt = $pdo->prepare("SELECT * FROM marzban_panel WHERE status = 'active' AND (agent = :agent OR agent = 'all') ORDER BY (position = 0) ASC, position ASC, id ASC");
     $stmt->bindParam(':agent', $users['agent']);
     $stmt->execute();
     $list_marzban_panel_users = ['inline_keyboard' => []];
@@ -406,7 +406,7 @@ $list_marzban_panel_users['inline_keyboard'][] = [
 $list_marzban_panel_user = json_encode($list_marzban_panel_users);
 
 
-    $stmt = $pdo->prepare("SELECT * FROM marzban_panel WHERE status = 'active' AND (agent = :agent OR agent = 'all')");
+    $stmt = $pdo->prepare("SELECT * FROM marzban_panel WHERE status = 'active' AND (agent = :agent OR agent = 'all') ORDER BY (position = 0) ASC, position ASC, id ASC");
     $stmt->bindParam(':agent', $users['agent']);
     $stmt->execute();
     $list_marzban_panel_users_om = ['inline_keyboard' => []];
@@ -421,7 +421,7 @@ $list_marzban_panel_users_om['inline_keyboard'][] = [
 $list_marzban_panel_userom = json_encode($list_marzban_panel_users_om);
 
 
-    $stmt = $pdo->prepare("SELECT * FROM marzban_panel WHERE status = 'active' AND (agent = :ag OR agent = 'all') AND name_panel != :exclude");
+    $stmt = $pdo->prepare("SELECT * FROM marzban_panel WHERE status = 'active' AND (agent = :ag OR agent = 'all') AND name_panel != :exclude ORDER BY (position = 0) ASC, position ASC, id ASC");
     $stmt->execute([':ag' => (string)($users['agent'] ?? ''), ':exclude' => (string)($users['Processing_value_four'] ?? '')]);
     $list_marzban_panel_users_change = ['inline_keyboard' => []];
     $panelcount = select("marzban_panel","*","status","active","count");
@@ -813,6 +813,7 @@ $optionMarzban = rx_finalizeInlineAdminKb(json_encode([
         [$rxAdminPanelBtn("🔄 تغییر نوع پنل", 'admin_panel_marzban')],
         [$rxAdminPanelBtn("✍️ نام پنل", 'admin_panel_marzban'), $rxAdminPanelBtn("❌ حذف پنل", 'admin_panel_marzban', 'danger')],
         [$rxAdminPanelBtn("🔐 ویرایش رمز عبور", 'admin_panel_marzban'), $rxAdminPanelBtn("👤 ویرایش نام", 'admin_panel_marzban')],
+        [$rxAdminPanelBtn("⁉️ اتصال به پنل", 'admin_panel_marzban')],
         [$rxAdminPanelBtn("🔗 ویرایش آدرس پنل", 'admin_panel_marzban'), $rxAdminPanelBtn("⚙️ پروتکل اینباند", 'admin_panel_marzban')],
         [$rxAdminPanelBtn("🔋 روش تمدید سرویس", 'admin_panel_marzban'), $rxAdminPanelBtn("💡 ساخت نام کاربری", 'admin_panel_marzban')],
         [$rxAdminPanelBtn("🚨 محدودیت اکانت", 'admin_panel_marzban'), $rxAdminPanelBtn("📍 تغییر گروه", 'admin_panel_marzban')],

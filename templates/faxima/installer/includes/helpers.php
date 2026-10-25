@@ -633,6 +633,8 @@ function rx_table_migrations_verify_ready(array $dbInfo, ?array &$diagnostics = 
         ['setting', 'redis_enabled'],
         ['setting', 'banner_start_status'],
         ['setting', 'auto_remove_reply_keyboard'],
+        ['setting', 'user_rich_buttons_enabled'],
+        ['setting', 'user_rich_sections'],
         ['invoice', 'invalidated_at'],
         ['Payment_report', 'atlaspay_order_id'],
         ['marzban_panel', 'xui_api_mode'],

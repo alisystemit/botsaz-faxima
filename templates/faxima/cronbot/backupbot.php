@@ -415,8 +415,16 @@ try {
             'caption' => "📦 خروجی دیتابیس ربات اصلی\n\nبرای حمایت از این پروژه، لطفاً در گیت‌هاب به آن ستاره (Star) دهید.\n⭐ https://github.com/Mmd-Amir/Faoxima",
         ]);
 
+        $rxSendOk = is_array($sendResult) && ($sendResult['ok'] ?? false) === true;
+        if (!$rxSendOk) {
+            logMessage('ERROR', 'Telegram sendDocument for DB backup failed', [
+                'error_code' => is_array($sendResult) ? ($sendResult['error_code'] ?? null) : null,
+                'description' => is_array($sendResult) ? substr((string) ($sendResult['description'] ?? ''), 0, 200) : 'no response',
+            ]);
+        }
+
         logMessage('INFO', 'Telegram sendDocument for DB backup attempted', [
-            'result' => $sendResult ? 'success' : 'failed',
+            'result' => $rxSendOk ? 'success' : 'failed',
             'caption_length' => strlen("📦 خروجی دیتابیس ربات اصلی\n\nبرای حمایت از این پروژه، لطفاً در گیت‌هاب به آن ستاره (Star) دهید.\n⭐ https://github.com/Mmd-Amir/Faoxima"),
         ]);
         if (file_exists($zip_file_name)) {

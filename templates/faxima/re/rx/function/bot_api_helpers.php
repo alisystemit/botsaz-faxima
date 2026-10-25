@@ -161,6 +161,13 @@ function rx_send_banner_message($chat_id, $section, $text, $keyboard = null, $pa
         }
     }
     if ($status == '1' && $fileId !== '' && !$startMediaActive) {
+        if (function_exists('rx_richUi_sendBanner')) {
+            $richBannerResult = rx_richUi_sendBanner($chat_id, $fileId, $text, $keyboard, $parse_mode, $section === 'start' ? 'main_menu' : null);
+            if (is_array($richBannerResult)) {
+                rx_decor_record($chat_id, $richBannerResult, 'screen', $section);
+                return $richBannerResult;
+            }
+        }
         $photoResult = telegram('sendphoto', [
             'chat_id' => $chat_id,
             'photo' => $fileId,
@@ -169,6 +176,7 @@ function rx_send_banner_message($chat_id, $section, $text, $keyboard = null, $pa
             'parse_mode' => $parse_mode,
         ]);
         if (is_array($photoResult) && !empty($photoResult['ok'])) {
+            rx_decor_record($chat_id, $photoResult, 'screen', $section);
             return $photoResult;
         }
     }
@@ -279,34 +287,112 @@ function rx_start_media_build_config($type, $fileId, $text, $entities)
     }
     return ['type' => 'custom_emoji', 'file_id' => '', 'text' => $text, 'entities' => $normalizedEntities];
 }
-function rx_start_media_stored_config($settingRow = null)
+function rx_section_media_sections()
 {
-    if ($settingRow === null) {
-        $settingRow = $GLOBALS['setting'] ?? null;
+    return [
+        'start' => '🚀 استارت (/start)',
+        'buy' => '🔐 خرید اشتراک',
+        'extend' => '♻️ تمدید سرویس',
+        'test' => '🔑 اکانت تست',
+        'services' => '🛍 سرویس‌های من',
+        'wallet' => '🏦 کیف پول + شارژ',
+        'support' => '📞 پشتیبانی',
+        'tariff' => '💵 تعرفه اشتراک',
+        'help' => '📚 آموزش',
+    ];
+}
+function rx_section_media_is_valid_section($section)
+{
+    return is_string($section) && array_key_exists($section, rx_section_media_sections());
+}
+function rx_section_media_empty_row()
+{
+    return ['status' => '0', 'type' => '', 'file_id' => '', 'text' => '', 'entities' => ''];
+}
+function rx_section_media_table_rows($refresh = false)
+{
+    global $pdo;
+    static $rows = null;
+    if ($refresh) {
+        $rows = null;
     }
-    if (!is_array($settingRow)) {
+    if ($rows !== null) {
+        return $rows;
+    }
+    if (!($pdo instanceof PDO)) {
+        return [];
+    }
+    $rows = [];
+    try {
+        $stmt = $pdo->query("SELECT section_id, media_status, media_type, media_file_id, media_text, media_entities FROM section_media");
+        foreach (($stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : []) as $record) {
+            $rows[(string)$record['section_id']] = [
+                'status' => (string)($record['media_status'] ?? '0'),
+                'type' => (string)($record['media_type'] ?? ''),
+                'file_id' => (string)($record['media_file_id'] ?? ''),
+                'text' => (string)($record['media_text'] ?? ''),
+                'entities' => (string)($record['media_entities'] ?? ''),
+            ];
+        }
+    } catch (\Throwable $tableError) {
+        rx_start_media_log('section table read failed: ' . $tableError->getMessage());
+    }
+    return $rows;
+}
+function rx_section_media_row($section, $settingRow = null, $refresh = false)
+{
+    if (!rx_section_media_is_valid_section($section)) {
         return null;
     }
-    return rx_start_media_build_config(
-        $settingRow['start_media_type'] ?? '',
-        $settingRow['start_media_file_id'] ?? '',
-        $settingRow['start_media_text'] ?? '',
-        $settingRow['start_media_entities'] ?? ''
-    );
+    if ($section === 'start') {
+        if ($settingRow === null) {
+            $settingRow = $GLOBALS['setting'] ?? null;
+        }
+        if (!is_array($settingRow)) {
+            return null;
+        }
+        return [
+            'status' => (string)($settingRow['start_media_status'] ?? '0'),
+            'type' => (string)($settingRow['start_media_type'] ?? ''),
+            'file_id' => (string)($settingRow['start_media_file_id'] ?? ''),
+            'text' => (string)($settingRow['start_media_text'] ?? ''),
+            'entities' => (string)($settingRow['start_media_entities'] ?? ''),
+        ];
+    }
+    $rows = rx_section_media_table_rows($refresh);
+    return $rows[$section] ?? rx_section_media_empty_row();
+}
+function rx_section_media_stored_config($section, $settingRow = null, $refresh = false)
+{
+    $row = rx_section_media_row($section, $settingRow, $refresh);
+    if ($row === null) {
+        return null;
+    }
+    return rx_start_media_build_config($row['type'], $row['file_id'], $row['text'], $row['entities']);
+}
+function rx_section_media_is_enabled($section, $settingRow = null, $refresh = false)
+{
+    $row = rx_section_media_row($section, $settingRow, $refresh);
+    return $row !== null && $row['status'] === '1';
+}
+function rx_section_media_active_config($section, $settingRow = null, $refresh = false)
+{
+    if (!rx_section_media_is_enabled($section, $settingRow, $refresh)) {
+        return null;
+    }
+    return rx_section_media_stored_config($section, $settingRow, $refresh);
+}
+function rx_start_media_stored_config($settingRow = null)
+{
+    return rx_section_media_stored_config('start', $settingRow);
 }
 function rx_start_media_is_enabled($settingRow = null)
 {
-    if ($settingRow === null) {
-        $settingRow = $GLOBALS['setting'] ?? null;
-    }
-    return is_array($settingRow) && (string)($settingRow['start_media_status'] ?? '0') === '1';
+    return rx_section_media_is_enabled('start', $settingRow);
 }
 function rx_start_media_active_config($settingRow = null)
 {
-    if (!rx_start_media_is_enabled($settingRow)) {
-        return null;
-    }
-    return rx_start_media_stored_config($settingRow);
+    return rx_section_media_active_config('start', $settingRow);
 }
 function rx_start_media_parse_message($message)
 {
@@ -385,21 +471,54 @@ function rx_start_media_dispatch($chat_id, array $config)
     }
     return ['ok' => false, 'description' => 'unsupported start media type'];
 }
-function rx_send_start_media($chat_id)
+function rx_section_media_send($section, $chat_id)
 {
     try {
-        $config = rx_start_media_active_config();
+        $config = rx_section_media_active_config($section);
         if ($config === null) {
             return false;
         }
         $result = rx_start_media_dispatch($chat_id, $config);
         if (is_array($result) && !empty($result['ok'])) {
+            rx_decor_record($chat_id, $result, 'separate', (string) $section);
             return true;
         }
         $description = is_array($result) ? (string)($result['description'] ?? 'unknown error') : 'no response';
-        rx_start_media_log('send ' . $config['type'] . ' failed: ' . $description);
+        rx_start_media_log($section . ' send ' . $config['type'] . ' failed: ' . $description);
     } catch (\Throwable $startMediaError) {
-        rx_start_media_log('send exception: ' . $startMediaError->getMessage());
+        rx_start_media_log($section . ' send exception: ' . $startMediaError->getMessage());
+    }
+    return false;
+}
+function rx_send_start_media($chat_id)
+{
+    return rx_section_media_send('start', $chat_id);
+}
+function rx_section_media_enter($section, $chat_id, &$datain, $message_id = 0, array $entryCallbacks = [], array $editCallbacks = [])
+{
+    static $handled = [];
+    try {
+        if (isset($handled[$section])) {
+            return false;
+        }
+        $callback = is_string($datain) ? $datain : '';
+        if ($callback !== '' && !in_array($callback, $entryCallbacks, true)) {
+            return false;
+        }
+        if (rx_section_media_active_config($section) === null) {
+            return false;
+        }
+        $handled[$section] = true;
+        if (!rx_section_media_send($section, $chat_id)) {
+            return false;
+        }
+        if ($callback !== '' && in_array($callback, $editCallbacks, true) && (int)$message_id > 0) {
+            deletemessage($chat_id, $message_id);
+            $datain = 'rx_media_entry';
+        }
+        return true;
+    } catch (\Throwable $entryError) {
+        rx_start_media_log($section . ' entry hook failed: ' . $entryError->getMessage());
     }
     return false;
 }
@@ -408,7 +527,17 @@ function rx_buy_banner_file_id()
     global $setting;
     $status = is_array($setting) ? ($setting['banner_buy_status'] ?? '0') : '0';
     $fileId = is_array($setting) ? trim((string)($setting['banner_buy_file_id'] ?? '')) : '';
-    return ($status == '1' && $fileId !== '') ? $fileId : '';
+    if ($status != '1' || $fileId === '') {
+        return '';
+    }
+    try {
+        if (rx_section_media_active_config('buy') !== null) {
+            return '';
+        }
+    } catch (\Throwable $buyMediaError) {
+        rx_start_media_log('buy exclusion check failed: ' . $buyMediaError->getMessage());
+    }
+    return $fileId;
 }
 function rx_send_buy_first_step($chat_id, $message_id, $datain, $text, $keyboard, $isCallback)
 {
@@ -425,6 +554,7 @@ function rx_send_buy_first_step($chat_id, $message_id, $datain, $text, $keyboard
             if ($isCallback) {
                 deletemessage($chat_id, $message_id);
             }
+            rx_decor_record($chat_id, $photoResult, 'screen', 'buy');
             return $photoResult;
         }
     }
@@ -457,6 +587,17 @@ function panel_features_all_off_json()
     $out = [];
     foreach (panel_feature_keys() as $featureKey) {
         $out[$featureKey] = "0";
+    }
+    return json_encode($out, JSON_UNESCAPED_UNICODE);
+}
+function panel_features_new_panel_defaults_json()
+{
+    $out = [];
+    foreach (panel_feature_keys() as $featureKey) {
+        $out[$featureKey] = "0";
+    }
+    foreach (['categorygeneral', 'configbtn', 'directbuy'] as $featureKey) {
+        $out[$featureKey] = "1";
     }
     return json_encode($out, JSON_UNESCAPED_UNICODE);
 }
@@ -592,6 +733,59 @@ function panel_limit_lock_release($lockKey)
         $stmt->execute([$lockKey]);
     } catch (Throwable $e) {
         error_log('panel_limit_lock_release: ' . $e->getMessage());
+    }
+}
+if (!function_exists('rx_panel_token_lock_acquire')) {
+    function rx_panel_token_lock_acquire($scope, $identity, $timeout = 10)
+    {
+        $pdo = function_exists('getDatabaseConnection') ? getDatabaseConnection() : ($GLOBALS['pdo'] ?? null);
+        if (!($pdo instanceof PDO)) {
+            return null;
+        }
+        $lockKey = 'fx_ptok_' . md5((string) $scope . '|' . (string) $identity);
+        try {
+            $stmt = $pdo->prepare("SELECT GET_LOCK(?, ?)");
+            $stmt->execute([$lockKey, max(1, (int) $timeout)]);
+            if ((int) $stmt->fetchColumn() === 1) {
+                return $lockKey;
+            }
+        } catch (Throwable $e) {
+            error_log('rx_panel_token_lock_acquire: ' . $e->getMessage());
+        }
+        return null;
+    }
+}
+if (!function_exists('rx_panel_token_lock_release')) {
+    function rx_panel_token_lock_release($lockKey)
+    {
+        if ($lockKey === null) {
+            return;
+        }
+        $pdo = function_exists('getDatabaseConnection') ? getDatabaseConnection() : ($GLOBALS['pdo'] ?? null);
+        if (!($pdo instanceof PDO)) {
+            return;
+        }
+        try {
+            $stmt = $pdo->prepare("SELECT RELEASE_LOCK(?)");
+            $stmt->execute([$lockKey]);
+        } catch (Throwable $e) {
+            error_log('rx_panel_token_lock_release: ' . $e->getMessage());
+        }
+    }
+}
+if (!function_exists('rx_panel_token_jwt_exp')) {
+    function rx_panel_token_jwt_exp($token)
+    {
+        $parts = explode('.', (string) $token);
+        if (count($parts) !== 3) {
+            return null;
+        }
+        $payload = base64_decode(strtr($parts[1], '-_', '+/') . str_repeat('=', (4 - strlen($parts[1]) % 4) % 4), true);
+        $decoded = $payload === false ? null : json_decode($payload, true);
+        if (!is_array($decoded) || !isset($decoded['exp']) || !is_numeric($decoded['exp'])) {
+            return null;
+        }
+        return (int) $decoded['exp'];
     }
 }
 function panel_limit_set($panel, $newLimit)

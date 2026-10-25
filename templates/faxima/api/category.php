@@ -148,7 +148,7 @@ switch ($data['actions'] ?? '') {
             $stmt->execute();
             $totalcategory = (int) $stmt->fetchColumn();
             $totalPages = ceil($totalcategory / $limit);
-            $query = "SELECT * FROM category WHERE remark  LIKE CONCAT('%', :remark, '%') ORDER BY id LIMIT :limit OFFSET :offset";
+            $query = "SELECT * FROM category WHERE remark  LIKE CONCAT('%', :remark, '%') ORDER BY (position = 0) ASC, position ASC, id ASC LIMIT :limit OFFSET :offset";
             $stmt = $pdo->prepare($query);
             $stmt->bindValue(':remark', $q, PDO::PARAM_STR);
             $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);

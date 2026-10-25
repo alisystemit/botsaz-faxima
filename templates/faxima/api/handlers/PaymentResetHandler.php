@@ -16,9 +16,10 @@ final class PaymentResetHandler extends BaseHandler
             FaoximaResponse::badRequest('order_id is required');
         }
 
+        $isVerify = function_exists('rx_sbv_is_verify_order') && rx_sbv_is_verify_order($orderId);
         $payment = FaoximaDb::fetchOne(
             'SELECT * FROM Payment_report
-              WHERE id_order = :o AND id_user = :u AND source = \'miniapp\'
+              WHERE id_order = :o AND id_user = :u AND ' . ($isVerify ? '1 = 1' : 'source = \'miniapp\'') . '
               LIMIT 1',
             [':o' => $orderId, ':u' => $this->user['id']]
         );
@@ -58,14 +59,21 @@ final class PaymentResetHandler extends BaseHandler
             FaoximaResponse::fail(409, '❌ رسید این پرداخت قبلاً برای ادمین ارسال شده و قابل بازنشانی نیست.');
         }
 
-        $result = rxCancelAbandonedCardPayment($orderId, (string)$this->user['id'], 'user_reset', ['source' => 'miniapp']);
+        $result = rxCancelAbandonedCardPayment($orderId, (string)$this->user['id'], 'user_reset', $isVerify ? [] : ['source' => 'miniapp']);
         if (empty($result['ok'])) {
             $reason = (string)($result['reason'] ?? '');
             FaoximaLogger::warn('Payment_report cancel failed', ['order' => $orderId, 'user_id' => $this->user['id'], 'reason' => $reason]);
             if ($reason === 'db_error' || $reason === 'pdo_unavailable') {
                 FaoximaResponse::serverError('❌ خطا در بازنشانی وضعیت پرداخت');
             }
+            if ($reason === 'verify_locked' || $reason === 'verify_window_active') {
+                FaoximaResponse::fail(409, '🔎 واریز این پرداخت شناسایی شده یا پرداخت هنوز در مهلت بررسی است و قابل لغو نیست.');
+            }
             FaoximaResponse::fail(409, '❌ رسید این پرداخت قبلاً برای ادمین ارسال شده و قابل بازنشانی نیست.');
+        }
+
+        if (function_exists('rx_ck_release_for_order')) {
+            rx_ck_release_for_order($orderId, 'cancelled', 'payment_reset');
         }
 
         FaoximaLogger::debug('Payment status reset', [

@@ -206,14 +206,26 @@ final class AdminController
                 break;
 
             // ⚠️ فقط کلید API. قدم‌های نام‌کاربری/رمز حذف شده‌اند و `setOwnerAccount`
-                // خودش پیام راهنما می‌دهد، پس اینجا نشستی ساخته نمی‌شود.
-                case 'admin.settings.panel.owner':
-                    (new PasarguardSettings($this->bot))->setOwnerAccount($chatId);
-                    break;
+            // خودش پیام راهنما می‌دهد، پس اینجا نشستی ساخته نمی‌شود.
+            case 'admin.settings.panel.owner':
+                (new PasarguardSettings($this->bot))->setOwnerAccount($chatId);
+                break;
 
-                case 'admin.settings.panel.owner.test':
-                    (new PasarguardSettings($this->bot))->testOwnerConnection($chatId);
-                    break;
+            case 'admin.settings.panel.owner.test':
+                (new PasarguardSettings($this->bot))->testOwnerConnection($chatId);
+                break;
+
+            case 'admin.settings.panel.owner.set':
+                (new PasarguardSettings($this->bot))->startSetApiKey(
+                    $chatId,
+                    (int) $update->userId(),
+                    $this->sessions
+                );
+                break;
+
+            case 'admin.settings.panel.owner.delete':
+                (new PasarguardSettings($this->bot))->deleteApiKey($chatId);
+                break;
 
             case 'admin.settings.panel.role':
                 (new PasarguardSettings($this->bot))->setRepRole($chatId);
@@ -394,7 +406,7 @@ final class AdminController
                 $this->toggleTestAutoDelete($chatId, (int) ($data['id'] ?? 0));
                 break;
 
-            // ---------------- سهمیه دیسک / ربات مرده ----------------
+            // ---------------- سهمیه دیسک ----------------
             case 'admin.panel.disk_quota':
                 $this->showPanelDiskQuota($chatId, (int) ($data['id'] ?? 0));
                 break;
@@ -405,15 +417,6 @@ final class AdminController
 
             case 'admin.panel.disk_quota.save':
                 $this->savePanelDiskQuota($chatId, (int) ($data['id'] ?? 0), (int) ($data['v'] ?? 0));
-                break;
-
-            case 'admin.panel.dead_bot':
-                $this->showDeadBots($chatId);
-                break;
-
-            // ---------------- مانیتورینگ مرکزی ----------------
-            case 'admin.monitoring':
-                $this->showMonitoring($chatId);
                 break;
 
             // ---------------- عملیات گروهی ----------------
@@ -631,10 +634,6 @@ final class AdminController
                 ['text' => '📋 لاگ حسابرسی', 'data' => BotApi::encodeData('admin.audit_log')],
             ],
             [
-                ['text' => '🔔 مانیتورینگ', 'data' => BotApi::encodeData('admin.monitoring')],
-                ['text' => '💀 ربات‌های مرده', 'data' => BotApi::encodeData('admin.panel.dead_bot')],
-            ],
-            [
                 ['text' => '⚡ عملیات گروهی', 'data' => BotApi::encodeData('admin.bulk_ops')],
                 ['text' => '👥 دعوت', 'data' => BotApi::encodeData('admin.referrals')],
             ],
@@ -801,6 +800,9 @@ final class AdminController
             '🌐 آدرس: ' . Str::escape(PanelRepository::loginUrl(
                 $panel['login_url'] === null ? null : (string) $panel['login_url']
             )) . ' 🔗',
+            // نام کاربری جدا و کپی‌پذیر کنار رمز تکرار می‌شود؛ در عنوان پیام
+            // فقط برای شناسایی پنل است و ادمین برای ورود باید آن را کپی کند.
+            '👤 یوزر: <code>' . Str::escape((string) $panel['panel_username']) . '</code> 🔑',
             '🔒 رمز: <code>' . Str::escape($this->panels->plainPassword($panel)) . '</code> 🔑',
             '🎭 نقش پنل: ' . Str::escape((string) ($panel['panel_role'] ?? '—')) . ' 👑',
             '',
@@ -812,7 +814,6 @@ final class AdminController
                 ? '♾️ بدون محدودیت'
                 : Str::date((int) $panel['access_expire_at']) . ' 🗓'),
             $panel['disk_quota'] > 0 ? '💿 سقف دیسک: ' . Str::formatBytes((int) $panel['disk_quota']) : '',
-            $panel['is_dead'] ? '⚠️ وضعیت: پنل مرده' : '',
         ];
 
         if ($daysLeft !== null && !$expired) {
@@ -1413,7 +1414,7 @@ final class AdminController
         if ($user !== null) {
             $this->notifier->notifyUser(
                 (int) $user['telegram_id'],
-                ($approved ? '✅ ' : '❌ ') . '<b>سفارش ' . Str::escape((string) $order['code']) . '</b>\n\n'
+                ($approved ? '✅ ' : '❌ ') . '<b>سفارش ' . Str::escape((string) $order['code']) . "</b>\n\n"
                 . Str::escape((string) $result['message'])
             );
         }
@@ -1672,7 +1673,7 @@ final class AdminController
             $note  = '';
 
             if (!$status['configured']) {
-                $note = '  (⚠️ پیکربندی نشده در config.php)';
+                $note = '  (⚠️ از «🌐 تنظیمات Pasargad» کامل کنید)';
             }
 
             $lines[] = $icon . ' ' . $label . ': <b>' . ($status['enabled'] ? 'فعال ✅' : 'غیرفعال 🔴') . '</b>' . $note;
@@ -1697,7 +1698,7 @@ final class AdminController
         $lines[] = '💧 هشدار حجم کم: <b>' . Str::faNumber(max(1, $this->settings->int(Settings::LOW_VOLUME_ALERT, 5))) . '٪</b>';
 
         $lines[] = ($agencyReady ? '🟢' : '🔴') . ' ساخت پنل نمایندگی: <b>'
-            . ($agencyReady ? 'آماده' : 'نیازمند تنظیم اکانت سازنده در config.php') . '</b>';
+            . ($agencyReady ? 'آماده' : 'نیازمند کلید سازندهٔ پنل') . '</b>';
 
         $testPanelId = $this->settings->int(Settings::TEST_CONFIG_PANEL_ID, 0);
         $testPanelLabel = '👤 خودکار';
@@ -1754,12 +1755,10 @@ final class AdminController
                 ['text' => '📡 تنظیم کانال', 'data' => BotApi::encodeData('admin.channel')],
                 ['text' => '📜 ویرایش قوانین', 'data' => BotApi::encodeData('admin.rules.edit')],
             ],
+            // ⚠️ «متن‌ها»، «بکاپ»، «رشد و نگهداشت»، «پنل‌ها» و «آمار» عمداً
+            // این‌جا تکرار نشده‌اند: همین دکمه‌ها در پنل مدیریت (admin.home)
+            // هستند و تکرارشان فقط صفحهٔ تنظیمات را شلوغ می‌کرد.
             [
-                ['text' => '✏️✨ متن‌های ثابت', 'data' => BotApi::encodeData('admin.texts')],
-                ['text' => '💾 بکاپ', 'data' => BotApi::encodeData('admin.backup')],
-            ],
-            [
-                ['text' => '🚀 رشد و نگهداشت', 'data' => BotApi::encodeData('admin.grow')],
                 ['text' => ($flags->isCouponsEnabled() ? '🔴' : '🟢') . ' کد تخفیف',
                  'data' => BotApi::encodeData('admin.flag.toggle', ['key' => Settings::COUPONS_ENABLED])],
             ],
@@ -1772,10 +1771,6 @@ final class AdminController
             [['text' => '💳 مدیریت درگاه‌های پرداخت', 'data' => BotApi::encodeData('admin.gateways')]],
             [['text' => ($dailyReport ? '🔴' : '🟢') . ' گزارش روزانه ادمین', 'data' => BotApi::encodeData('admin.flag.toggle', ['key' => Settings::REPORT_DAILY])]],
             [['text' => ($weeklyReport ? '🔴' : '🟢') . ' گزارش هفتگی ادمین', 'data' => BotApi::encodeData('admin.flag.toggle', ['key' => Settings::REPORT_WEEKLY])]],
-            [
-                ['text' => '🖥 پنل‌ها', 'data' => BotApi::encodeData('admin.panels')],
-                ['text' => '📊 آمار', 'data' => BotApi::encodeData('admin.stats')],
-            ],
             [['text' => '🌐 تنظیمات Pasargad', 'data' => BotApi::encodeData('admin.settings.pasargad')]],
             [['text' => '🔙 بازگشت به پنل مدیریت 🛠', 'data' => BotApi::encodeData('admin.home')]],
         ]);
@@ -2135,11 +2130,13 @@ final class AdminController
 
             if ($name === 'card2card') {
                 $card = (new \Pasargad\Store\BotConfig())->cardNumber();
-                $lines[] = '   🏦 شماره کارت: ' . ($card !== '' ? '<code>' . Str::escape($card) . '</code> ✅' : '<i>⚠️ تنظیم نشده</i>');
+                // شمارهٔ کارت کامل نمایش داده نمی‌شود: صفحهٔ مدیریت هم ممکن است
+                // روی نمایشگر یا اسکرین‌شات دیده شود و شمارهٔ کامل لازم نیست.
+                $lines[] = '   🏦 شماره کارت: ' . ($card !== '' ? '<code>' . Str::escape(Str::maskCardNumber($card)) . '</code> ✅' : '<i>⚠️ تنظیم نشده</i>');
             } elseif ($name === 'autocard') {
                 $card = \Pasargad\Payment\AutoCardGateway::cardNumber();
                 $api  = trim((new \Pasargad\Store\BotConfig())->autocardApiUrl());
-                $lines[] = '   🏦 شماره کارت: ' . ($card !== '' ? '<code>' . Str::escape($card) . '</code> ✅' : '<i>⚠️ تنظیم نشده</i>');
+                $lines[] = '   🏦 شماره کارت: ' . ($card !== '' ? '<code>' . Str::escape(Str::maskCardNumber($card)) . '</code> ✅' : '<i>⚠️ تنظیم نشده</i>');
                 $lines[] = '   🔌 استعلام: ' . ($api !== '' ? '<code>' . Str::escape(Str::truncate($api, 40)) . '</code> ✅' : '<i>⚠️ api_url تنظیم نشده</i>');
                 $lines[] = '   💡 مبالغ یکتا + تأیید خودکار، بدون رسید دستی 🤖';
             } else {
@@ -2147,7 +2144,7 @@ final class AdminController
             }
 
             $lines[] = '   📊 وضعیت: ' . ($enabled ? 'فعال ✅' : 'غیرفعال 🔴')
-                . ($state['configured'] ? '' : ' — ⚠️ تا وقتی در config.php پیکربندی نشود کار نمی‌کند! 📝');
+                . ($state['configured'] ? '' : ' — ⚠️ تنظیماتش از «🌐 تنظیمات Pasargad» کامل شود! 📝');
 
             // ---- سنجهٔ واقعیِ سلامت ----
             //
@@ -3604,7 +3601,7 @@ final class AdminController
     }
 
     // ------------------------------------------------------------------
-    // سهمیه دیسک و ربات مرده
+    // سهمیه دیسک
     // ------------------------------------------------------------------
 
     private function showPanelDiskQuota(int $chatId, int $panelId): void
@@ -3617,13 +3614,11 @@ final class AdminController
         }
 
         $diskQuota = (int) ($panel['disk_quota'] ?? 0);
-        $isDead    = (int) ($panel['is_dead'] ?? 0);
 
         $lines = [
             '🖥✨ <b>' . Str::escape((string) $panel['panel_username']) . '</b>',
             '',
             '💾 سهمیه دیسک: ' . ($diskQuota > 0 ? Str::formatBytes($diskQuota) : 'نامحدود ♾️'),
-            '💀 وضعیت ربات: ' . ($isDead ? '🔴 مرده' : '🟢 زنده'),
         ];
 
         $keyboard = Keyboard::rows([
@@ -3664,57 +3659,6 @@ final class AdminController
 
         $this->bot->sendMessage($chatId, '✅ سهمیه دیسک به ' . Str::formatBytes(max(0, $quota)) . ' تنظیم شد.');
         $this->showPanel($chatId, $panelId);
-    }
-
-    private function showDeadBots(int $chatId): void
-    {
-        $db = Db::instance();
-        $rows = $db->all('SELECT * FROM panels WHERE is_dead = 1 ORDER BY id DESC LIMIT 20');
-
-        $lines = ['💀✨ <b>ربات‌های مرده 🖥️</b>', ''];
-
-        if ($rows === []) {
-            $lines[] = '🎉 ربات مرده‌ای وجود ندارد! ✅';
-        } else {
-            foreach ($rows as $panel) {
-                $lines[] = '• <code>' . Str::escape((string) $panel['panel_username']) . '</code>';
-                $lines[] = '  👤 کاربر: ' . (int) ($panel['telegram_id'] ?? 0);
-                $lines[] = '  📅 آخرین بازدید: ' . Str::date((int) ($panel['last_seen_at'] ?? 0));
-                $lines[] = '';
-            }
-        }
-
-        $this->bot->sendMessage($chatId, implode("\n", $lines), [
-            'reply_markup' => $this->bot->buildMarkup(Keyboard::rows([
-                Keyboard::back(BotApi::encodeData('admin.home'), '🛠 پنل مدیریت'),
-            ])),
-        ]);
-    }
-
-    // ------------------------------------------------------------------
-    // مانیتورینگ مرکزی
-    // ------------------------------------------------------------------
-
-    private function showMonitoring(int $chatId): void
-    {
-        $db = Db::instance();
-        $all = $db->count('SELECT COUNT(*) FROM panels');
-        $online = $db->count("SELECT COUNT(*) FROM panels WHERE monitor_status = 'online'");
-        $offline = $db->count("SELECT COUNT(*) FROM panels WHERE monitor_status = 'offline' OR monitor_status IS NULL");
-
-        $lines = [
-            '📡✨ <b>مانیتورینگ مرکزی ربات‌ها 🖥️</b>',
-            '',
-            '🔢 کل پنل‌ها: ' . Str::faNumber($all),
-            '🟢 آنلاین: ' . Str::faNumber($online),
-            '🔴 آفلاین: ' . Str::faNumber($offline),
-        ];
-
-        $this->bot->sendMessage($chatId, implode("\n", $lines), [
-            'reply_markup' => $this->bot->buildMarkup(Keyboard::rows([
-                Keyboard::back(BotApi::encodeData('admin.home'), '🛠 پنل مدیریت'),
-            ])),
-        ]);
     }
 
     // ------------------------------------------------------------------

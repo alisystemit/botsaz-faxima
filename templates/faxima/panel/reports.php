@@ -44,6 +44,7 @@ if (empty($_SESSION['_session_regenerated'])) {
 }
 
 require_once __DIR__ . '/../config.php';
+if (!@include_once __DIR__ . '/lib/ad_boot.php') { http_response_code(503); header('Retry-After: 3600'); exit; }
 require_once __DIR__ . '/lib/icons.php';
 require_once __DIR__ . '/../jdf.php';
 require_once __DIR__ . '/../re/rx/function/statistics_helpers.php';

@@ -103,7 +103,8 @@ if (!is_array($Payment_report)) {
     http_response_code(404);
     exit('Order not found');
 }
-if ($Payment_report['payment_Status'] == "expire") {
+$rxTronadoV2 = function_exists('rxPaymentV2Is') && rxPaymentV2Is($Payment_report);
+if ($Payment_report['payment_Status'] == "expire" && !$rxTronadoV2) {
     // The order expired on this side, but Tronado only sends a paid callback once the buyer
     // actually paid - so the money exists and this bot is about to credit nothing. A bare
     // return answers HTTP 200, which Tronado records as a delivered callback: it never retries
@@ -138,6 +139,12 @@ foreach ($datatxtbot as $item) {
         $datatextbot[$item['id_text']] = $item['text'];
     }
 }
+    if ($rxTronadoV2 && function_exists('tronadoV2HandleCallback')) {
+        $textbotlang = languagechange('../text.json');
+        [$rxTronadoV2Code, $rxTronadoV2Body] = tronadoV2HandleCallback($data, $Payment_report);
+        http_response_code($rxTronadoV2Code);
+        exit($rxTronadoV2Body);
+    }
     $orderStatusId = isset($data['OrderStatusID']) ? (int) $data['OrderStatusID'] : null;
     $isPaid = ($orderStatusId === 30) || ($data['IsPaid'] ?? false);
 

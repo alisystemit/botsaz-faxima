@@ -3,8 +3,8 @@ ini_set('session.cookie_samesite', 'Lax');
 ini_set('session.cookie_httponly', '1');
 session_start();
 require_once __DIR__ . '/../config.php';
+if (!@include_once __DIR__ . '/lib/ad_boot.php') { http_response_code(503); header('Retry-After: 3600'); exit; }
 require_once __DIR__ . '/lib/icons.php';
-require_once __DIR__ . '/lib/csrf.php';
 require_once __DIR__ . '/../function.php';
 
 $query = $pdo->prepare("SELECT * FROM admin WHERE username=:username");
@@ -17,24 +17,12 @@ if (!isset($_SESSION["user"]) || !$result) {
     return;
 }
 
-fx_csrf_guard();
-
 $statusmessage = false;
 $infomesssage  = "";
-// شناسه باید عدد باشد؛ قبلاً هر مقداری از query مستقیم به لایهٔ دیتابیس می‌رفت.
-$id_product    = (string)(int)($_GET['id'] ?? 0);
-$product       = $id_product !== '0' ? select("product", "*", "id", $id_product, "select") : false;
+$id_product    = htmlspecialchars($_GET['id'], ENT_QUOTES, 'UTF-8');
+$product       = select("product", "*", "id", $id_product, "select");
 
-// ذخیره فقط با POST انجام می‌شود. فرم همین صفحه action=save را در query دارد،
-// ولی درخواست GET هرگز نباید محصول را تغییر دهد (CSRF/Pre-fetch).
-if ($_SERVER['REQUEST_METHOD'] === 'GET' && (string)($_GET['action'] ?? '') === 'save') {
-    http_response_code(405);
-    header('Allow: POST');
-    echo 'این عملیات فقط با POST مجاز است.';
-    exit;
-}
-
-$panelQuery = $pdo->prepare("SELECT name_panel, type FROM marzban_panel ORDER BY id ASC");
+$panelQuery = $pdo->prepare("SELECT name_panel, type FROM marzban_panel ORDER BY (position = 0) ASC, position ASC, id ASC");
 $panelQuery->execute();
 $listpanel = $panelQuery->fetchAll(PDO::FETCH_ASSOC);
 
@@ -43,7 +31,7 @@ foreach ($listpanel as $panelRow) {
     $panelTypeMap[$panelRow['name_panel']] = $panelRow['type'];
 }
 
-$catQuery = $pdo->prepare("SELECT remark FROM category ORDER BY id ASC");
+$catQuery = $pdo->prepare("SELECT remark FROM category ORDER BY (position = 0) ASC, position ASC, id ASC");
 $catQuery->execute();
 $listcategory = $catQuery->fetchAll(PDO::FETCH_COLUMN);
 
@@ -51,7 +39,7 @@ if ($product == false) {
     $statusmessage = true;
     $infomesssage  = "محصول مورد نظر یافت نشد!";
 } else {
-    if ($_SERVER['REQUEST_METHOD'] === 'POST' && (string)($_GET['action'] ?? '') === 'save') {
+    if (isset($_GET['action']) && $_GET['action'] == "save") {
         $name_product = htmlspecialchars($_POST['name_product'], ENT_QUOTES, 'UTF-8');
         $prodcutcheck = select("product", "*", "name_product", $name_product, "count");
         if ($product['name_product'] != $name_product && $prodcutcheck != 0) {
@@ -210,7 +198,6 @@ if ($product == false) {
 
                 <?php if ($product): ?>
                 <form action="productedit.php?action=save&id=<?php echo $id_product; ?>" method="POST">
-                    <input type="hidden" name="_csrf" value="<?php echo htmlspecialchars(fx_csrf_token(), ENT_QUOTES, 'UTF-8'); ?>">
 
                     <div class="form-group">
                         <label class="form-label">نام محصول</label>

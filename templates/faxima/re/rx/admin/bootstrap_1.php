@@ -822,6 +822,7 @@ if (!empty($datain) && in_array($from_id, $admin_ids ?? [])) {
     $_rx_adm_cb_map = [
 
         'admin_status'      => $textbotlang['Admin']['Status']['btn'],
+        'admin_readiness'   => "🚦 آمادگی فروش",
         'admin_managepanel' => $textbotlang['Admin']['btnkeyboardadmin']['managementpanel'],
         'admin_addpanel'    => $textbotlang['Admin']['btnkeyboardadmin']['addpanel'],
         'admin_timeprice'   => "⏳ قیمت سریع زمان",
@@ -895,6 +896,7 @@ if (!empty($datain) && in_array($from_id, $admin_ids ?? [])) {
         'cart_group_num'   => "♻️ نمایش گروهی شماره کارت",
         'cart_export_num'  => "📄 خروجی شماره کارت فعال",
         'cart_autocheck'   => "🤖 تایید رسید بدون بررسی",
+        'cart_smsverify'   => "🔐 تأیید رسید با بررسی",
         'cart_except_user' => "⚙️ تنظیمات تایید خودکار",
         'cart_autotime'    => "⏳ زمان تایید خودکار",
         'cart_back'        => $textbotlang['Admin']['backadmin'],
@@ -916,6 +918,7 @@ if (!empty($datain) && in_array($from_id, $admin_ids ?? [])) {
 
         'tonpay_name'     => "🏷️ نام نمایشی درگاه تون‌پی",
         'tonpay_apikey'   => "🔑 ثبت API Key تون‌پی",
+        'tonpay_customkey' => "🔐 ثبت API Key کاستوم تون‌پی",
         'tonpay_paymode'  => "🔀 مقصد پرداخت تون‌پی",
         'tonpay_cashback' => "💰 کش بک تون‌پی",
         'tonpay_min'      => "⬇️ کف تون‌پی",
@@ -965,6 +968,7 @@ if (!empty($datain) && in_array($from_id, $admin_ids ?? [])) {
 
         'atlaspay_name'     => "🏷️ نام نمایشی درگاه اطلس‌پی",
         'atlaspay_apikey'   => "🔑 ثبت API Key اطلس‌پی",
+        'atlaspay_paymode'  => "🔀 مقصد پرداخت اطلس‌پی",
         'atlaspay_account'  => "📊 موجودی و اطلاعات حساب",
         'atlaspay_cashback' => "💰 کش بک اطلس‌پی",
         'atlaspay_min'      => "⬇️ کف اطلس‌پی",

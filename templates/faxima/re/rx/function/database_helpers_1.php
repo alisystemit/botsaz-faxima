@@ -380,7 +380,6 @@ if (!function_exists('getCronJobDefinitions')) {
             'plisio' => ['script' => 'plisio.php', 'admin_label' => 'Plisio', 'instruction' => '💰 بررسی پرداخت Plisio — %s', 'default' => ['unit' => 'minute', 'value' => 3]],
             'activeconfig' => ['script' => 'activeconfig.php', 'admin_label' => 'فعال کانفیگ', 'instruction' => '✅ فعال‌سازی تنظیمات — %s', 'default' => ['unit' => 'minute', 'value' => 1]],
             'disableconfig' => ['script' => 'disableconfig.php', 'admin_label' => 'غیرفعال‌کانفیگ', 'instruction' => '⛔ غیرفعال‌سازی تنظیمات — %s', 'default' => ['unit' => 'minute', 'value' => 1]],
-            'iranpay1' => ['script' => 'iranpay1.php', 'admin_label' => 'ایران‌پی', 'instruction' => '🇮🇷 بررسی پرداخت ایران‌پی — %s', 'default' => ['unit' => 'minute', 'value' => 1]],
             'backupbot' => ['script' => 'backupbot.php', 'admin_label' => 'بکاپ', 'instruction' => '📦 بکاپ‌گیری — %s', 'default' => ['unit' => 'hour', 'value' => 5]],
             'gift' => ['script' => 'gift.php', 'admin_label' => 'هدایا', 'instruction' => '🎁 ارسال هدایا — %s', 'default' => ['unit' => 'minute', 'value' => 2]],
             'discount_expire' => ['script' => 'discount_expire.php', 'admin_label' => 'انقضای تخفیف', 'instruction' => '🏷 بررسی انقضای تخفیف‌ها — %s', 'default' => ['unit' => 'minute', 'value' => 30]],
@@ -394,6 +393,7 @@ if (!function_exists('getCronJobDefinitions')) {
             'nowpaymentcheck' => ['script' => 'nowpaymentcheck.php', 'admin_label' => 'پولر NowPayments', 'instruction' => '💎 بررسی پرداخت‌های NowPayments — %s', 'default' => ['unit' => 'minute', 'value' => 1]],
             'blupalcheck' => ['script' => 'blupalcheck.php', 'admin_label' => 'پولر بلوپال', 'instruction' => '💙 بررسی پرداخت‌های بلوپال — %s', 'default' => ['unit' => 'minute', 'value' => 2]],
             'atlaspaycheck' => ['script' => 'atlaspaycheck.php', 'admin_label' => 'پولر اطلس‌پی', 'instruction' => '🌐 بررسی پرداخت‌های اطلس‌پی — %s', 'default' => ['unit' => 'minute', 'value' => 1]],
+            'tronadocheck' => ['script' => 'tronadocheck.php', 'admin_label' => 'پولر ترونادو', 'instruction' => '🔷 بازیابی وضعیت پرداخت‌های ترونادو — %s', 'default' => ['unit' => 'minute', 'value' => 1]],
             'tonpaycheck' => ['script' => 'tonpaycheck.php', 'admin_label' => 'پولر تون‌پی', 'instruction' => '💠 بررسی پرداخت‌های تون‌پی — %s', 'default' => ['unit' => 'minute', 'value' => 1]],
             'remnawave_usage' => ['script' => 'remnawave_usage.php', 'admin_label' => 'مصرف رمن‌ویو', 'instruction' => '📊 بررسی مصرف کاربران رمن‌ویو — %s', 'default' => ['unit' => 'minute', 'value' => 15]],
             'logs_cleanup' => ['script' => 'logs_cleanup.php', 'admin_label' => 'پاکسازی لاگ API', 'instruction' => '🧹 پاکسازی لاگ‌های قدیمی API — %s', 'default' => ['unit' => 'day', 'value' => 7]],
@@ -403,6 +403,7 @@ if (!function_exists('getCronJobDefinitions')) {
             'public_log_drain' => ['script' => 'public_log_drain.php', 'admin_label' => 'گزارش عمومی', 'instruction' => '📣 تخلیه صف گزارش عمومی خرید — %s', 'default' => ['unit' => 'minute', 'value' => 1]],
             'queued_renewal' => ['script' => 'QueuedRenewalProcessor.php', 'admin_label' => 'رزرو اشتراک', 'instruction' => '🔋 بررسی و فعال‌سازی رزروهای اشتراک — %s', 'default' => ['unit' => 'minute', 'value' => 5]],
             'fx_rate_sync' => ['script' => 'fx_rate_sync.php', 'admin_label' => 'نرخ دلار (USDT)', 'instruction' => '💵 به‌روزرسانی نرخ USDT/IRT — %s', 'default' => ['unit' => 'minute', 'value' => 5]],
+            'xui_inbound_sync' => ['script' => 'xui_inbound_sync.php', 'admin_label' => 'همگام‌سازی 3x-ui', 'instruction' => '🔄 همگام‌سازی اینباندهای کلاینت‌ها با کلاینت مرجع — %s', 'default' => ['unit' => 'minute', 'value' => 2]],
         ];
     }
 }
@@ -917,6 +918,16 @@ if (!function_exists('rx_purge_stale_gateway_invoices')) {
                 $stale[] = (string) $row['id_order'];
             }
         }
+        if ($paymentMethod === 'tonpay' && function_exists('tonpayCustomPurgeProtected')) {
+            $stale = array_values(array_filter($stale, static function ($staleOrderId) {
+                return !tonpayCustomPurgeProtected($staleOrderId);
+            }));
+        }
+        if ($paymentMethod === 'atlaspay' && function_exists('atlaspayCustomPurgeProtected')) {
+            $stale = array_values(array_filter($stale, static function ($staleOrderId) {
+                return !atlaspayCustomPurgeProtected($staleOrderId);
+            }));
+        }
         if (empty($stale)) {
             return;
         }
@@ -993,6 +1004,22 @@ if (!function_exists('cancelPendingGatewayInvoice')) {
         }
         if (!is_array($row)) {
             return false;
+        }
+
+        if ($paymentMethod === 'tonpay' && function_exists('tonpayCustomFetchReport')) {
+            $customReport = tonpayCustomFetchReport($orderId);
+            if ($customReport !== null) {
+                $customResult = tonpayCustomCancel($orderId, (string) $userId);
+                return !empty($customResult['ok']);
+            }
+        }
+
+        if ($paymentMethod === 'atlaspay' && function_exists('atlaspayCustomFetchReport')) {
+            $customReport = atlaspayCustomFetchReport($orderId);
+            if ($customReport !== null) {
+                $customResult = atlaspayCustomCancel($orderId, (string) $userId);
+                return !empty($customResult['ok']);
+            }
         }
 
         if ($paymentMethod === 'atlaspay' && function_exists('atlaspayCancelOrder')) {

@@ -88,6 +88,10 @@ if (!checktelegramip())
 if (intval($from_id) == 0)
     return;
 
+if (isset($update['message']['successful_payment']) && function_exists('rxStarsHandleSuccessfulPayment') && rxStarsHandleSuccessfulPayment($update)) {
+    return;
+}
+
 if (!empty($callback_query_id) && function_exists('rx_flushPendingReplyKeyboardCleanup')) {
     rx_flushPendingReplyKeyboardCleanup($from_id);
 }
@@ -593,6 +597,9 @@ if (
     }
 }
 
+if (function_exists('rx_ui_resolve_request')) {
+    rx_ui_resolve_request();
+}
 if (class_exists('logNavigation')) {
     logNavigation::button($from_id);
 }
@@ -896,26 +903,18 @@ if (strpos($text, "/start ") !== false && $user['step'] != "gettextSystemMessage
                 sendmessage($from_id, $textbotlang['users']['affiliates']['affiliateedago'], null, 'html');
                 return;
             }
-            update("user", "affiliates", $affiliatesid, "id", $from_id);
-            $useraffiliates = select("user", "*", 'id', $affiliatesid, "select");
-            $rxWelcomeAlertTpl = $datatextbot['dyn_referral_welcome_alert'] ?? "<b>🎉 خوش آمدی!</b>\n\nشما با دعوت <b>@%s</b> وارد ربات شدی و به عنوان زیرمجموعه ثبت شدی ✅\n\nبرای دریافت هدیه عضویت:\n🔘 به منوی <b>زیرمجموعه‌گیری</b> برو\n🔘 دکمه <b>🎁 هدیه عضویت</b> را بزن\n\nبا این کار، هم خودت و هم معرفت هدیه می‌گیرید! 💰";
-            sendmessage($from_id, sprintf($rxWelcomeAlertTpl, $useraffiliates['username']), $keyboard, 'html');
-            $rxInviterRewardTpl = $datatextbot['dyn_referral_inviter_reward_alert'] ?? "<b>🎉 یک زیرمجموعه جدید!</b>\n\nکاربر <b>@%s</b> با لینک دعوت شما وارد ربات شد ✅\n\nبا خریدهای این کاربر، <b>سهم هدیه شما</b> به حسابت واریز می‌شه 🔥";
-            sendmessage($affiliatesid, sprintf($rxInviterRewardTpl, $username), $keyboard, 'html');
-            $addcountaffiliates = intval($useraffiliates['affiliatescount']) + 1;
-            update("user", "affiliatescount", $addcountaffiliates, "id", $affiliatesid);
-            $dateacc = date('Y/m/d H:i:s');
-            $stmt = $pdo->prepare("INSERT INTO reagent_report (user_id, get_gift, time, reagent)
-                                   VALUES (:user_id, :get_gift, :time, :reagent)
-                                   ON DUPLICATE KEY UPDATE reagent = VALUES(reagent), get_gift = VALUES(get_gift), time = VALUES(time)");
-            $stmt->execute([
-                ':user_id' => $from_id,
-                ':get_gift' => 0,
-                ':time' => $dateacc,
-                ':reagent' => $affiliatesid,
-            ]);
-            if (function_exists('clearSelectCache')) {
-                clearSelectCache('reagent_report');
+            $rxReferralState = rxReferralRegister($from_id, $affiliatesid);
+            if ($rxReferralState === 'already_referred') {
+                sendmessage($from_id, $textbotlang['users']['affiliates']['affiliateedago'], null, 'html');
+                return;
+            }
+            if ($rxReferralState === 'registered') {
+                $useraffiliates = select("user", "*", 'id', $affiliatesid, "select");
+                $rxWelcomeAlertTpl = $datatextbot['dyn_referral_welcome_alert'] ?? "<b>🎉 خوش آمدی!</b>\n\nشما با دعوت <b>@%s</b> وارد ربات شدی و به عنوان زیرمجموعه ثبت شدی ✅\n\nبرای دریافت هدیه عضویت:\n🔘 به منوی <b>زیرمجموعه‌گیری</b> برو\n🔘 دکمه <b>🎁 هدیه عضویت</b> را بزن\n\nبا این کار، هم خودت و هم معرفت هدیه می‌گیرید! 💰";
+                sendmessage($from_id, sprintf($rxWelcomeAlertTpl, $useraffiliates['username']), $keyboard, 'html');
+                $rxInviterRewardTpl = $datatextbot['dyn_referral_inviter_reward_alert'] ?? "<b>🎉 یک زیرمجموعه جدید!</b>\n\nکاربر <b>@%s</b> با لینک دعوت شما وارد ربات شد ✅\n\nبا خریدهای این کاربر، <b>سهم هدیه شما</b> به حسابت واریز می‌شه 🔥";
+                sendmessage($affiliatesid, sprintf($rxInviterRewardTpl, $username), $keyboard, 'html');
+                rxReferralGiftNotify(rxReferralGiftPayout($from_id));
             }
         } else {
             if (!is_numeric($affiliatesid) && preg_match('/^[A-Za-z0-9_-]{1,64}$/', (string)$affiliatesid) && strpos((string)$affiliatesid, 'manageuser_') !== 0) {
@@ -951,6 +950,24 @@ if (intval($user['verify']) == 0 && !in_array($from_id, $admin_ids) && $setting[
 if ($setting['roll_Status'] == "rolleon" && $user['roll_Status'] == 0 && ($text != "✅ قوانین را می پذیرم" and $datain != "acceptrule") && !in_array($from_id, $admin_ids)) {
     sendmessage($from_id, $datatextbot['text_roll'], $confrimrolls, 'html');
     return;
+}
+if (!function_exists('rx_config_deliver_list')) {
+    function rx_config_deliver_list($chatId, $messageId, $text, $keyboard)
+    {
+        $result = Editmessagetext($chatId, $messageId, $text, $keyboard);
+        $ok = is_array($result) && !empty($result['ok']);
+        if (!$ok && is_array($result) && stripos((string) ($result['description'] ?? ''), 'message is not modified') !== false) {
+            return true;
+        }
+        if (!$ok) {
+            $result = sendmessage($chatId, $text, $keyboard, 'html');
+            $ok = is_array($result) && !empty($result['ok']);
+        }
+        if (!$ok) {
+            sendmessage($chatId, "❌ نمایش لیست کانفیگ‌ها ناموفق بود. لطفاً دوباره تلاش کنید.", null, 'html');
+        }
+        return $ok;
+    }
 }
 if ($text == "✅ قوانین را می پذیرم" or $datain == "acceptrule") {
     if ($setting['roll_Status'] == "rolleon" && intval($user['roll_Status']) == 0) {
@@ -1020,23 +1037,8 @@ if ($shouldCheckChannel && !in_array($from_id, $admin_ids)) {
                         update("user", "Processing_value_four", "none", "id", $from_id);
                         return;
                     }
-                    $marzbanDiscountaffiliates = select("affiliates", "*", null, null, "select");
-                    $useraffiliates = select("user", "*", 'id', $affiliatesid, "select");
-                    $stmtGiftGuard = $pdo->prepare("UPDATE user SET affiliates = :affiliatesid WHERE id = :from_id AND (affiliates IS NULL OR affiliates = 0 OR affiliates = '')");
-                    $stmtGiftGuard->execute([':affiliatesid' => $affiliatesid, ':from_id' => $from_id]);
-                    if (function_exists('clearSelectCache')) {
-                        clearSelectCache('user');
-                    }
-                    if ($stmtGiftGuard->rowCount() > 0) {
-                        if ($marzbanDiscountaffiliates['Discount'] == "onDiscountaffiliates") {
-                            $Balance_add_user = $useraffiliates['Balance'] + $marzbanDiscountaffiliates['price_Discount'];
-                            update("user", "Balance", $Balance_add_user, "id", $affiliatesid);
-                            $addbalancediscount = number_format($marzbanDiscountaffiliates['price_Discount'], 0);
-                            $rxCommissionCreditedTpl = $datatextbot['dyn_referral_commission_credited'] ?? "🎁 مبلغ %s به موجودی شما از طرف زیر مجموعه با شناسه کاربری %s اضافه گردید.";
-                            sendmessage($affiliatesid, sprintf($rxCommissionCreditedTpl, $addbalancediscount, $from_id), null, 'html');
-                        }
-                        $addcountaffiliates = intval($useraffiliates['affiliatescount']) + 1;
-                        update("user", "affiliatescount", $addcountaffiliates, "id", $affiliatesid);
+                    if (rxReferralRegister($from_id, $affiliatesid) === 'registered') {
+                        rxReferralGiftNotify(rxReferralGiftPayout($from_id));
                     }
                     update("user", "Processing_value_four", "none", "id", $from_id);
                 }
@@ -1177,7 +1179,7 @@ if ($text == "version") {
         update("user", "verify", "1", "id", $from_id);
     }
     step('home', $from_id);
-} elseif (($text !== '' && $text == $datatextbot['text_Purchased_services']) || $datain == "backorder" || $text == "/services") {
+} elseif (($text !== '' && $text == $datatextbot['text_Purchased_services']) || $datain == "backorder" || $datain == "myservicesbtn" || $text == "/services") {
     $stmt = $pdo->prepare("SELECT * FROM invoice WHERE id_user = :id_user AND (status = 'active' OR status = 'end_of_time' OR status = 'end_of_volume' OR status = 'sendedwarn' OR status = 'send_on_hold' OR status = 'disabled' OR status = 'disablebyadmin')");
     $stmt->bindParam(':id_user', $from_id);
     $stmt->execute();
@@ -1186,6 +1188,7 @@ if ($text == "version") {
         sendmessage($from_id, $textbotlang['users']['sell']['service_not_available'], null, 'html');
         return;
     }
+    rx_section_media_enter('services', $from_id, $datain, $message_id, ['myservicesbtn'], ['myservicesbtn']);
 
     $pages = 1;
     update("user", "pagenumber", $pages, "id", $from_id);
@@ -1198,6 +1201,7 @@ if ($text == "version") {
     $stmt = $pdo->prepare("SELECT * FROM invoice WHERE id_user = '$from_id' AND (status = 'active' OR status = 'end_of_time' OR status = 'end_of_volume' OR status = 'sendedwarn' OR status = 'send_on_hold' OR status = 'disabled' OR status = 'disablebyadmin') ORDER BY time_sell DESC LIMIT $start_index, $items_per_page");
     $stmt->execute();
     $serviceRows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    $rxLabelDup = rxServiceListUserDuplicateKeys($from_id, ['active', 'end_of_time', 'end_of_volume', 'sendedwarn', 'send_on_hold', 'disabled', 'disablebyadmin'], $setting['statusnamecustom'] == 'onnamecustom');
     if ($setting['statusnamecustom'] == 'onnamecustom') {
         foreach ($serviceRows as $row) {
             $data = "";
@@ -1205,7 +1209,7 @@ if ($text == "version") {
                 $data = " | {$row['note']}";
             $keyboardlists['inline_keyboard'][] = [
                 [
-                    'text' => "✨" . $row['username'] . $data . rxServiceListStatusSuffix($row) . "✨",
+                    'text' => "✨" . rxServiceListLabel($row, $rxLabelDup, true) . $data . rxServiceListStatusSuffix($row) . "✨",
                     'callback_data' => "quickview_" . $row['id_invoice']
                 ],
             ];
@@ -1214,7 +1218,7 @@ if ($text == "version") {
         foreach ($serviceRows as $row) {
             $keyboardlists['inline_keyboard'][] = [
                 [
-                    'text' => "✨" . $row['username'] . rxServiceListStatusSuffix($row) . "✨",
+                    'text' => "✨" . rxServiceListLabel($row, $rxLabelDup, false) . rxServiceListStatusSuffix($row) . "✨",
                     'callback_data' => "quickview_" . $row['id_invoice']
                 ],
             ];
@@ -1237,7 +1241,7 @@ if ($text == "version") {
     $keyboardlists['inline_keyboard'][] = $pagination_buttons;
     $keyboardlists['inline_keyboard'][] = $backuser;
     $keyboard_json = json_encode($keyboardlists);
-    if ($datain == "backorder") {
+    if ($datain == "backorder" || $datain == "myservicesbtn") {
         Editmessagetext($from_id, $message_id, $textbotlang['users']['sell']['service_sell'], $keyboard_json);
     } else {
         sendmessage($from_id, $textbotlang['users']['sell']['service_sell'], $keyboard_json, 'html');
@@ -1261,6 +1265,7 @@ if ($text == "version") {
     $stmt = $pdo->prepare("SELECT * FROM invoice WHERE id_user = '$from_id' AND (status = 'active' OR status = 'end_of_time' OR status = 'end_of_volume' OR status = 'sendedwarn' OR status = 'send_on_hold' OR status = 'disabled' OR status = 'disablebyadmin') ORDER BY time_sell DESC LIMIT $start_index, $items_per_page");
     $stmt->execute();
     $serviceRows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    $rxLabelDup = rxServiceListUserDuplicateKeys($from_id, ['active', 'end_of_time', 'end_of_volume', 'sendedwarn', 'send_on_hold', 'disabled', 'disablebyadmin'], $setting['statusnamecustom'] == 'onnamecustom');
     if ($setting['statusnamecustom'] == 'onnamecustom') {
         foreach ($serviceRows as $row) {
             $data = "";
@@ -1268,7 +1273,7 @@ if ($text == "version") {
                 $data = " | {$row['note']}";
             $keyboardlists['inline_keyboard'][] = [
                 [
-                    'text' => "✨" . $row['username'] . $data . rxServiceListStatusSuffix($row) . "✨",
+                    'text' => "✨" . rxServiceListLabel($row, $rxLabelDup, true) . $data . rxServiceListStatusSuffix($row) . "✨",
                     'callback_data' => "quickview_" . $row['id_invoice']
                 ],
             ];
@@ -1277,7 +1282,7 @@ if ($text == "version") {
         foreach ($serviceRows as $row) {
             $keyboardlists['inline_keyboard'][] = [
                 [
-                    'text' => "✨" . $row['username'] . rxServiceListStatusSuffix($row) . "✨",
+                    'text' => "✨" . rxServiceListLabel($row, $rxLabelDup, false) . rxServiceListStatusSuffix($row) . "✨",
                     'callback_data' => "quickview_" . $row['id_invoice']
                 ],
             ];
@@ -1324,6 +1329,7 @@ if ($text == "version") {
     $stmt = $pdo->prepare("SELECT * FROM invoice WHERE id_user = '$from_id' AND (status = 'active' OR status = 'end_of_time' OR status = 'end_of_volume' OR status = 'sendedwarn' OR status = 'send_on_hold' OR status = 'disabled' OR status = 'disablebyadmin') ORDER BY time_sell DESC LIMIT $previous_page, $items_per_page");
     $stmt->execute();
     $serviceRows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    $rxLabelDup = rxServiceListUserDuplicateKeys($from_id, ['active', 'end_of_time', 'end_of_volume', 'sendedwarn', 'send_on_hold', 'disabled', 'disablebyadmin'], $setting['statusnamecustom'] == 'onnamecustom');
     if ($setting['statusnamecustom'] == 'onnamecustom') {
         foreach ($serviceRows as $row) {
             $data = "";
@@ -1331,7 +1337,7 @@ if ($text == "version") {
                 $data = " | {$row['note']}";
             $keyboardlists['inline_keyboard'][] = [
                 [
-                    'text' => "✨" . $row['username'] . $data . rxServiceListStatusSuffix($row) . "✨",
+                    'text' => "✨" . rxServiceListLabel($row, $rxLabelDup, true) . $data . rxServiceListStatusSuffix($row) . "✨",
                     'callback_data' => "quickview_" . $row['id_invoice']
                 ],
             ];
@@ -1340,7 +1346,7 @@ if ($text == "version") {
         foreach ($serviceRows as $row) {
             $keyboardlists['inline_keyboard'][] = [
                 [
-                    'text' => "✨" . $row['username'] . rxServiceListStatusSuffix($row) . "✨",
+                    'text' => "✨" . rxServiceListLabel($row, $rxLabelDup, false) . rxServiceListStatusSuffix($row) . "✨",
                     'callback_data' => "quickview_" . $row['id_invoice']
                 ],
             ];
@@ -1616,6 +1622,7 @@ if ($text == "version") {
         $keyboardlists = [
             'inline_keyboard' => [],
         ];
+        $rxLabelDup = rxServiceListUserDuplicateKeys($from_id, ['active', 'end_of_time', 'end_of_volume', 'sendedwarn', 'send_on_hold', 'disabled', 'disablebyadmin'], $setting['statusnamecustom'] == 'onnamecustom');
         if ($setting['statusnamecustom'] == 'onnamecustom') {
             while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
                 $data = "";
@@ -1623,7 +1630,7 @@ if ($text == "version") {
                     $data = " | {$row['note']}";
                 $keyboardlists['inline_keyboard'][] = [
                     [
-                        'text' => "✨" . $row['username'] . $data . rxServiceListStatusSuffix($row) . "✨",
+                        'text' => "✨" . rxServiceListLabel($row, $rxLabelDup, true) . $data . rxServiceListStatusSuffix($row) . "✨",
                         'callback_data' => "quickview_" . $row['id_invoice']
                     ],
                 ];
@@ -1632,7 +1639,7 @@ if ($text == "version") {
             while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
                 $keyboardlists['inline_keyboard'][] = [
                     [
-                        'text' => "✨" . $row['username'] . rxServiceListStatusSuffix($row) . "✨",
+                        'text' => "✨" . rxServiceListLabel($row, $rxLabelDup, false) . rxServiceListStatusSuffix($row) . "✨",
                         'callback_data' => "quickview_" . $row['id_invoice']
                     ],
                 ];
@@ -2115,10 +2122,10 @@ $nameconfig";
             $textconnect = "📶 اخرین زمان اتصال شما : $lastonline";
         }
         $rwChangelinkHint = (($marzban['type'] ?? '') != "remnawave") ? "💡 برای قطع دسترسی دیگران کافیست روی گزینه \"تغییر لینک\" کلیک کنید." : "";
-        $textinfo_tpl = $datatextbot['text_service_detail'] ?? "📊وضعیت سرویس : {status}
-👤 نام سرویس : <code>{username}</code>
+        $textinfo_tpl = $datatextbot['text_service_detail'] ?? "🗂 نام سرویس : {product}
+📊وضعیت سرویس : {status}
 🌍 موقعیت سرویس :{location}
-🗂 نام محصول :{product}
+👤 شناسه سرویس : <code>{username}</code>
 
 🔋 ترافیک : {traffic}
 📥 حجم مصرفی : {used}
@@ -2139,6 +2146,10 @@ $nameconfig";
         ];
         $textinfo = strtr($textinfo_tpl, $textinfo_replacements);
         $textinfo = "$textinfo\n$userpassword\n$nameconfig\n\n$textconnect\n\n$rwChangelinkHint";
+        $rxReservationSummary = function_exists('rxReservationSummaryForService') ? rxReservationSummaryForService((string) $nameloc['username'], (string) $nameloc['Service_location'], (string) $nameloc['id_invoice']) : null;
+        if (is_array($rxReservationSummary)) {
+            $textinfo .= "\n\n" . htmlspecialchars((string) $rxReservationSummary['text'], ENT_QUOTES, 'UTF-8');
+        }
     }
     if (($marzban['type'] ?? '') == "remnawave") {
         $rwLight = !empty($DataUserOut['is_online']) ? '🟢 آنلاین' : '🔴 آفلاین';
@@ -2515,7 +2526,17 @@ $nameconfig";
             $DataUserOut['links'] = $remnaConfigs['links'];
         }
     }
-    Editmessagetext($from_id, $message_id, "📌 از لیست زیر یک کانفیگ را انتخاب استفاده نمایید.", keyboard_config($DataUserOut['links'], $id_invoice, true, $page));
+    if (count($DataUserOut['links']) === 0) {
+        sendmessage($from_id, keyboard_config_unavailable_text($DataUserOut), null, 'html');
+        return;
+    }
+    $configKeyboardRows = 0;
+    $configKeyboard = keyboard_config($DataUserOut['links'], $id_invoice, true, $page, $configKeyboardRows);
+    if ($configKeyboardRows === 0 || !is_string($configKeyboard)) {
+        sendmessage($from_id, keyboard_config_unavailable_text($DataUserOut, 'invalid'), null, 'html');
+        return;
+    }
+    rx_config_deliver_list($from_id, $message_id, "📌 از لیست زیر یک کانفیگ را انتخاب استفاده نمایید.", $configKeyboard);
 } elseif (preg_match('/config_(\w+)/', $datain, $dataget) || (is_string($text) && strpos($text, "/link ") !== false)) {
     $textCommand = is_string($text) ? $text : '';
     if ($textCommand !== '' && $textCommand[0] === "/") {
@@ -2569,7 +2590,7 @@ $nameconfig";
             sendmessage($from_id, $datatextbot['dyn_errors_config_read_error'] ?? "❌  خطا در خواندن اطلاعات کانفیگ با پشتیبانی در ارتباط باشید.", null, 'html');
             return;
         }
-        Editmessagetext($from_id, $message_id, "📌 از لیست زیر یک کانفیگ را انتخاب استفاده نمایید.", keyboard_config($manualConfigs, $nameloc['id_invoice']));
+        rx_config_deliver_list($from_id, $message_id, "📌 از لیست زیر یک کانفیگ را انتخاب استفاده نمایید.", keyboard_config($manualConfigs, $nameloc['id_invoice']));
         return;
     }
     $DataUserOut = $ManagePanel->DataUser($nameloc['Service_location'], $nameloc['username']);
@@ -2593,7 +2614,17 @@ $nameconfig";
             $DataUserOut['links'] = $remnaConfigs['links'];
         }
     }
-    Editmessagetext($from_id, $message_id, "📌 از لیست زیر یک کانفیگ را انتخاب استفاده نمایید.", keyboard_config($DataUserOut['links'], $nameloc['id_invoice']));
+    if (count($DataUserOut['links']) === 0) {
+        sendmessage($from_id, keyboard_config_unavailable_text($DataUserOut), null, 'html');
+        return;
+    }
+    $configKeyboardRows = 0;
+    $configKeyboard = keyboard_config($DataUserOut['links'], $nameloc['id_invoice'], true, 0, $configKeyboardRows);
+    if ($configKeyboardRows === 0 || !is_string($configKeyboard)) {
+        sendmessage($from_id, keyboard_config_unavailable_text($DataUserOut, 'invalid'), null, 'html');
+        return;
+    }
+    rx_config_deliver_list($from_id, $message_id, "📌 از لیست زیر یک کانفیگ را انتخاب استفاده نمایید.", $configKeyboard);
 } elseif (preg_match('/configget_(.*)_(.*)/', $datain, $dataget)) {
     $id_invoice = $dataget[1];
     $nameloc = select("invoice", "*", "id_invoice", $id_invoice, "select");
@@ -2661,10 +2692,14 @@ $nameconfig";
         }
     }
     if (!isset($DataUserOut['links']) || !is_array($DataUserOut['links']) || count($DataUserOut['links']) === 0) {
-        sendmessage($from_id, $datatextbot['dyn_errors_config_read_from_panel_error'] ?? "❌ خطا در خواندن کانفیگ از پنل.", null, 'html');
+        sendmessage($from_id, keyboard_config_unavailable_text($DataUserOut), null, 'html');
         return;
     }
     $rwCgSel = $DataUserOut['links'][$dataget[2]] ?? '';
+    if ($dataget[2] != "1520" && !isset($DataUserOut['links'][$dataget[2]])) {
+        sendmessage($from_id, $datatextbot['dyn_errors_config_read_from_panel_error'] ?? "❌ خطا در خواندن کانفیگ از پنل.", null, 'html');
+        return;
+    }
     $config = "";
     if ($dataget[2] == "1520") {
         for ($i = 0; $i < count($DataUserOut['links']); ++$i) {
@@ -2675,7 +2710,7 @@ $nameconfig";
             if (function_exists('xui_wg_conf_from_link')) {
                 $allWgConf = xui_wg_conf_from_link($allConfigItem);
                 if (is_array($allWgConf)) {
-                    $allWgName = normalizeConfigFilename(xui_wg_conf_filename($allConfigItem, $allWgConf['protocol'], $i), $_configgetPanelChk['namecustom'] ?? '', true);
+                    $allWgName = normalizeConfigFilename(xui_wg_conf_filename($allConfigItem, $allWgConf['protocol'], $i), '', true);
                     $allWgDest = "{$from_id}-" . bin2hex(random_bytes(3)) . '-' . $allWgName;
                     file_put_contents($allWgDest, $allWgConf['conf']);
                     $allWgLabel = $allWgConf['protocol'] === 'amneziawg' ? 'AmneziaWG' : 'WireGuard';
@@ -2699,7 +2734,7 @@ $nameconfig";
     $selectedConfig = (string) $DataUserOut['links'][$dataget[2]];
     if ((int) $dataget[2] === 0 && !empty($DataUserOut['single_config_file']) && is_array($DataUserOut['single_config_file'])) {
         $singleConfigFile = $DataUserOut['single_config_file'];
-        $xuiFileName = normalizeConfigFilename($singleConfigFile['filename'], $_configgetPanelChk['namecustom'] ?? '', true);
+        $xuiFileName = normalizeConfigFilename($singleConfigFile['filename'], '', true);
         $xuiFileDest = "{$from_id}-" . bin2hex(random_bytes(3)) . '-' . $xuiFileName;
         file_put_contents($xuiFileDest, $singleConfigFile['value']);
         telegram('sendDocument', [
@@ -2714,7 +2749,7 @@ $nameconfig";
     if (function_exists('xui_wg_conf_from_link')) {
         $xuiWgConf = xui_wg_conf_from_link($selectedConfig);
         if (is_array($xuiWgConf)) {
-            $xuiWgName = normalizeConfigFilename(xui_wg_conf_filename($selectedConfig, $xuiWgConf['protocol'], (int) $dataget[2]), $_configgetPanelChk['namecustom'] ?? '', true);
+            $xuiWgName = normalizeConfigFilename(xui_wg_conf_filename($selectedConfig, $xuiWgConf['protocol'], (int) $dataget[2]), '', true);
             $xuiWgDest = "{$from_id}-" . bin2hex(random_bytes(3)) . '-' . $xuiWgName;
             file_put_contents($xuiWgDest, $xuiWgConf['conf']);
             $xuiWgLabel = $xuiWgConf['protocol'] === 'amneziawg' ? 'AmneziaWG' : 'WireGuard';
@@ -2731,11 +2766,14 @@ $nameconfig";
     if (function_exists('rebeccaConfigDownloadInfo')) {
         $rebeccaDownloadInfo = rebeccaConfigDownloadInfo($selectedConfig);
         if ($rebeccaDownloadInfo !== null) {
-            $rebeccaPublicName = normalizeConfigFilename($rebeccaDownloadInfo['filename'], $_configgetPanelChk['namecustom'] ?? '', $rebeccaDownloadInfo['kind'] === 'wireguard');
+            $rebeccaPublicName = normalizeConfigFilename($rebeccaDownloadInfo['filename'], '', $rebeccaDownloadInfo['kind'] === 'wireguard');
             $rebeccaDownloadDest = "{$from_id}-" . bin2hex(random_bytes(3)) . '-' . $rebeccaPublicName;
             if (rebeccaDownloadConfigFile($rebeccaDownloadInfo['url'], $rebeccaDownloadDest)) {
-                sendDocument($from_id, $rebeccaDownloadDest, "⚙️ کانفیگ شما", $rebeccaPublicName);
-                unlink($rebeccaDownloadDest);
+                $rebeccaSendResult = sendDocument($from_id, $rebeccaDownloadDest, "⚙️ کانفیگ شما", $rebeccaPublicName);
+                @unlink($rebeccaDownloadDest);
+                if (!is_array($rebeccaSendResult) || empty($rebeccaSendResult['ok'])) {
+                    sendmessage($from_id, $datatextbot['dyn_errors_config_read_from_panel_error'] ?? "❌ خطا در خواندن کانفیگ از پنل.", null, 'html');
+                }
             } else {
                 sendmessage($from_id, $datatextbot['dyn_errors_config_read_from_panel_error'] ?? "❌ خطا در خواندن کانفیگ از پنل.", null, 'html');
             }
@@ -3229,7 +3267,11 @@ $nameconfig";
     }
     fx_quote_store($from_id, fx_quote_context_key('renew', (string) $nameloc['id_invoice'] . '|' . (string) $product['code_product']), fx_finalize_amount(fx_apply_user_discount($product['price_product'], $user['pricediscount']), $marzban_list_get, $fxRenewKinds), $marzban_list_get, $fxRenewKinds);
     $volumeextend = intval($product['Volume_constraint']) == 0 ? $textbotlang['users']['stateus']['Unlimited'] : $product['Volume_constraint'] . ' گیگ';
-    $rxRenewPreview = rxRenewalPreviewForService($ManagePanel, $marzban_list_get, (string) $nameloc['username'], $product['Volume_constraint'], $product['Service_time']);
+    $rxReservationUi = rxReservationUiEnabled($marzban_list_get);
+    $rxRenewPreview = rxRenewalPreviewForService($ManagePanel, $marzban_list_get, (string) $nameloc['username'], $product['Volume_constraint'], $product['Service_time'], ['id_invoice' => (string) $nameloc['id_invoice'], 'stage' => 'telegram_preview']);
+    if ($rxReservationUi && empty($rxRenewPreview['blocked'])) {
+        $rxRenewPreview['text'] = '';
+    }
     if (!empty($rxRenewPreview['blocked'])) {
         $keyboardextend = json_encode([
             'inline_keyboard' => [
@@ -3253,6 +3295,13 @@ $nameconfig";
     } else {
         Editmessagetext($from_id, $message_id, $textextend, $keyboardextend);
     }
+} elseif (in_array($datain, ['rsvt', 'rsvp', 'rsvu', 'rsvd'], true) || strpos((string) $datain, 'rsvc:') === 0) {
+    if (!empty($callback_query_id)) {
+        telegram('answerCallbackQuery', ['callback_query_id' => $callback_query_id, 'text' => rxRenewalText('button_outdated'), 'show_alert' => true]);
+    }
+} elseif ($user['step'] == 'rsv_get_date') {
+    step('home', $from_id);
+    sendmessage($from_id, rxRenewalText('button_outdated'), $keyboard, 'HTML');
 } elseif ($datain == "discountextend") {
     sendmessage($from_id, $textbotlang['users']['Discount']['getcodesell'], $backuser, 'HTML');
     step('getcodesellDiscountextend', $from_id);
@@ -3286,7 +3335,7 @@ $nameconfig";
     $custompricevalue = fx_adjust_base_toman($eextraprice[$user['agent']], $marzban_list_get, 'custom_volume');
     $eextraprice = json_decode($marzban_list_get['pricecustomtime'], true);
     $customtimevalueprice = fx_adjust_base_toman($eextraprice[$user['agent']], $marzban_list_get, 'custom_time');
-    if ($nameloc['name_product'] == "🛍 حجم دلخواه" || $nameloc['name_product'] == "⚙️ سرویس دلخواه") {
+    if ($nameloc['name_product'] == "🛍 حجم دلخواه" || $nameloc['name_product'] == "⚙️ سرویس دلخواه" || rxRenewalIsCustomCode($userdate['code_product'] ?? '')) {
         $info_product['code_product'] = "pre";
         $info_product['name_product'] = $nameloc['name_product'];
         $info_product['price_product'] = ($userdate['data_limit'] * $custompricevalue) + ($userdate['time'] * $customtimevalueprice);
@@ -3300,7 +3349,7 @@ $nameconfig";
         $stmt->execute();
         $info_product = $stmt->fetch(PDO::FETCH_ASSOC);
     }
-    $fxRenewCustom = ($nameloc['name_product'] == "🛍 حجم دلخواه" || $nameloc['name_product'] == "⚙️ سرویس دلخواه");
+    $fxRenewCustom = ($nameloc['name_product'] == "🛍 حجم دلخواه" || $nameloc['name_product'] == "⚙️ سرویس دلخواه" || rxRenewalIsCustomCode($userdate['code_product'] ?? ''));
     $fxRenewKinds = $fxRenewCustom ? ['custom_volume', 'custom_time'] : 'product';
     if (!$fxRenewCustom && is_array($info_product)) {
         $info_product = fx_apply_to_product($info_product, $marzban_list_get);
@@ -3317,7 +3366,10 @@ $nameconfig";
         $info_product['price_product'] = $info_product['price_product'] - $result;
     }
     $info_product['price_product'] = round($info_product['price_product']);
-    $rxRenewPreview = rxRenewalPreviewForService($ManagePanel, $marzban_list_get, (string) $nameloc['username'], $info_product['Volume_constraint'], $info_product['Service_time']);
+    $rxRenewPreview = rxRenewalPreviewForService($ManagePanel, $marzban_list_get, (string) $nameloc['username'], $info_product['Volume_constraint'], $info_product['Service_time'], ['reservation' => rxReservationUiEnabled($marzban_list_get) ? rxReservationPanelSelection($marzban_list_get) : null, 'id_invoice' => (string) $nameloc['id_invoice'], 'stage' => 'telegram_preview']);
+    if (rxReservationUiEnabled($marzban_list_get) && empty($rxRenewPreview['blocked'])) {
+        $rxRenewPreview['text'] = '';
+    }
     if (intval($info_product['Service_time']) == 0)
         $info_product['Service_time'] = $textbotlang['users']['stateus']['Unlimited'];
     if (intval($info_product['Volume_constraint']) == 0)
@@ -3368,7 +3420,7 @@ $nameconfig";
     $eextraprice = json_decode($marzban_list_get['pricecustomtime'], true);
     $customtimevalueprice = fx_adjust_base_toman($eextraprice[$user['agent']], $marzban_list_get, 'custom_time');
     $randomString = bin2hex(random_bytes(2));
-    if ($nameloc['name_product'] == "🛍 حجم دلخواه" || $nameloc['name_product'] == "⚙️ سرویس دلخواه") {
+    if ($nameloc['name_product'] == "🛍 حجم دلخواه" || $nameloc['name_product'] == "⚙️ سرویس دلخواه" || rxRenewalIsCustomCode($userdata['code_product'] ?? '')) {
         $prodcut['code_product'] = "custom_volume";
         $prodcut['name_product'] = $nameloc['name_product'];
         $prodcut['price_product'] = ($userdata['data_limit'] * $custompricevalue) + ($userdata['time'] * $customtimevalueprice);
@@ -3389,7 +3441,7 @@ $nameconfig";
         sendmessage($from_id, $datatextbot['dyn_errors_renewal_failed_restart'] ?? "❌ تمدید با خطا مواجه گردید مراحل تمدید را مجددا انجام دهید.", null, 'HTML');
         return;
     }
-    $fxRenewCustom = ($nameloc['name_product'] == "🛍 حجم دلخواه" || $nameloc['name_product'] == "⚙️ سرویس دلخواه");
+    $fxRenewCustom = ($nameloc['name_product'] == "🛍 حجم دلخواه" || $nameloc['name_product'] == "⚙️ سرویس دلخواه" || rxRenewalIsCustomCode($userdata['code_product'] ?? ''));
     $fxRenewKinds = $fxRenewCustom ? ['custom_volume', 'custom_time'] : 'product';
     if (!$fxRenewCustom) {
         $prodcut = fx_apply_to_product($prodcut, $marzban_list_get);
@@ -3439,7 +3491,22 @@ $nameconfig";
     $fxRenewBasePrice = $fxRenewCustom ? fx_custom_base_price($marzban_list_get, $user['agent'], $userdata['data_limit'] ?? 0, $userdata['time'] ?? 0) : ($prodcut['fx_base_price'] ?? $prodcut['price_product']);
     $fxRenewSnapshot = fx_pricing_snapshot($marzban_list_get, $fxRenewKinds, $fxRenewBasePrice, $pricelastextend, (float) $prodcut['price_product'] - (float) $pricelastextend, ['product' => (string) ($prodcut['code_product'] ?? '')]);
     $DataUserOut = $ManagePanel->DataUser($nameloc['Service_location'], $nameloc['username']);
-    if ($user['Balance'] < $pricelastextend && $user['agent'] != "n2" && intval($pricelastextend) != 0) {
+    $rxConfirmSnapshot = rx_pf_snapshot_from_datauser($DataUserOut, (string) ($marzban_list_get['type'] ?? ''));
+    $rxReservationSelection = rxReservationUiEnabled($marzban_list_get) ? rxReservationPanelSelection($marzban_list_get) : null;
+    $rxConfirmPreview = rxRenewalPreviewForService($ManagePanel, $marzban_list_get, (string) $nameloc['username'], $prodcut['Volume_constraint'], $prodcut['Service_time'], ['reservation' => $rxReservationSelection, 'snapshot' => $rxConfirmSnapshot, 'id_invoice' => (string) $nameloc['id_invoice'], 'stage' => 'telegram_confirm']);
+    if (!empty($rxConfirmPreview['blocked'])) {
+        sendmessage($from_id, (string) $rxConfirmPreview['text'], null, 'HTML');
+        return;
+    }
+    if (is_array($rxReservationSelection)) {
+        $rxSelectionCheck = rxReservationNormalizeSelection($rxReservationSelection, !empty($rxConfirmSnapshot['ok']) && !empty($rxConfirmSnapshot['exists']) ? $rxConfirmSnapshot : null, time());
+        if (empty($rxSelectionCheck['ok'])) {
+            rx_renewal_log('telegram_confirm_selection', (string) $rxSelectionCheck['reason'], ['panel' => $marzban_list_get, 'username' => (string) $nameloc['username'], 'invoice_id' => (string) $nameloc['id_invoice'], 'invoice_status' => $nameloc['Status'] ?? null, 'method' => (string) ($marzban_list_get['Methodextend'] ?? ''), 'volume_gb' => $prodcut['Volume_constraint'], 'days' => $prodcut['Service_time'], 'snapshot' => $rxConfirmSnapshot, 'detail' => $rxSelectionCheck['detail'] ?? null, 'mutation' => 'none']);
+            sendmessage($from_id, rxRenewalReasonText((string) $rxSelectionCheck['reason'], $rxSelectionCheck), null, 'HTML');
+            return;
+        }
+    }
+    if (rx_ck_available_for_user($user) < $pricelastextend && $user['agent'] != "n2" && intval($pricelastextend) != 0) {
         $marzbandirectpay = panel_feature_enabled($nameloc['Service_location'], 'directbuy') ? "ondirectbuy" : "offdirectbuy";
         if ($marzbandirectpay == "offdirectbuy") {
             $minbalance = json_decode(select("PaySetting", "*", "NamePay", "minbalance", "select")['ValuePay'], true)[$user['agent']];
@@ -3457,10 +3524,6 @@ $nameconfig";
             step('getprice', $from_id);
             return;
         } else {
-            $Balance_prim = $pricelastextend - $user['Balance'];
-            update("user", "Processing_value", $Balance_prim, "id", $from_id);
-            sendmessage($from_id, $textbotlang['users']['sell']['None-credit'], $step_payment, 'HTML');
-            step('get_step_payment', $from_id);
             $stmt = $connect->prepare("INSERT IGNORE INTO service_other (id_user, username,value,type,time,price,output,status) VALUES (?, ?,?, ?, ?,?,?,?)");
             $dateacc = date('Y/m/d H:i:s');
             $value = json_encode(array(
@@ -3468,8 +3531,9 @@ $nameconfig";
                 "Service_time" => $prodcut['Service_time'],
                 "oldvolume" => $DataUserOut['data_limit'],
                 "oldtime" => $DataUserOut['expire'],
-                'code_product' => $prodcut['code_product'],
-                'id_order' => $randomString
+                'code_product' => rxRenewalNormalizeProductCode($prodcut['code_product']),
+                'id_order' => $randomString,
+                'reservation' => $rxReservationSelection
             ));
             $value = fx_value_with_snapshot($value, $fxRenewSnapshot);
             $type = "extend_user";
@@ -3480,6 +3544,16 @@ $nameconfig";
             $stmt->close();
             update("user", "Processing_value_one", "{$nameloc['username']}%$randomString", "id", $from_id);
             update("user", "Processing_value_tow", "getextenduser", "id", $from_id);
+            rx_ck_bot_begin($user, [
+                'operation' => 'getextenduser',
+                'op_key' => "getextenduser|{$nameloc['username']}%$randomString",
+                'target' => (string) $nameloc['username'],
+                'final_price' => $pricelastextend,
+                'message_id' => $message_id,
+                'one' => "{$nameloc['username']}%$randomString",
+                'tow' => 'getextenduser',
+                'four' => '',
+            ]);
             return;
         }
     }
@@ -3529,12 +3603,16 @@ $nameconfig";
     } else {
         $Balance_Low_user = $user['Balance'];
     }
-    if ($nameloc['name_product'] == "سرویس تست") {
-        update("invoice", "name_product", $prodcut['name_product'], "id_invoice", $nameloc['id_invoice']);
-        update("invoice", "price_product", $prodcut['price_product'], "id_invoice", $nameloc['id_invoice']);
-    }
-    $extend = $ManagePanel->extend($marzban_list_get['Methodextend'], $prodcut['Volume_constraint'], $prodcut['Service_time'], $nameloc['username'], $prodcut['code_product'], $marzban_list_get['code_panel']);
-    if ($extend['status'] == false) {
+    $rxExtendOptions = [
+        'source' => 'wallet',
+        'ref' => 'wallet:' . $randomString,
+        'id_user' => $from_id,
+        'price' => $pricelastextend,
+        'reservation' => is_array($rxReservationSelection) ? array_merge($rxReservationSelection, ['payment_ref' => 'wallet:' . $from_id . ':' . $randomString]) : null,
+    ];
+    $extend = $ManagePanel->extend($marzban_list_get['Methodextend'], $prodcut['Volume_constraint'], $prodcut['Service_time'], $nameloc['username'], $prodcut['code_product'], $marzban_list_get['code_panel'], null, $rxExtendOptions);
+    $rxExtendPending = rxRenewalIsPending($extend);
+    if ($extend['status'] == false && !$rxExtendPending) {
         if ($__chargedExUser && function_exists('balance_atomic_credit')) {
             $__refundedEx = balance_atomic_credit($from_id, $pricelastextend);
             if ($__refundedEx && function_exists('wallet_ledger_record')) {
@@ -3547,13 +3625,14 @@ $nameconfig";
         $textreports = "خطای تمدید سرویس
 <blockquote>نام پنل : {$marzban_list_get['name_panel']}</blockquote>
 <blockquote>نام کاربری سرویس : {$nameloc['username']}</blockquote>
+<blockquote>کد خطا : " . htmlspecialchars((string) ($extend['code'] ?? ''), ENT_QUOTES, 'UTF-8') . "</blockquote>
 <blockquote>دلیل خطا : {$extend['msg']}</blockquote>";
         if ($rxStockEmpty) {
             sendmessage($from_id, $datatextbot['dyn_errors_renewal_stock_empty'] ?? "❌ موجودی انبار برای این محصول تمام شده است. مبلغی از حساب شما کسر نشد.", null, 'HTML');
         } elseif ($rxQueuedExists) {
             sendmessage($from_id, $datatextbot['dyn_errors_queued_renewal_exists'] ?? "❌ یک رزرو اشتراک برای این سرویس در انتظار فعال‌سازی است. مبلغی از حساب شما کسر نشد.", null, 'HTML');
         } else {
-            sendmessage($from_id, $datatextbot['dyn_errors_renewal_support_error'] ?? "❌خطایی در تمدید سرویس رخ داده با پشتیبانی در ارتباط باشید", null, 'HTML');
+            sendmessage($from_id, rxRenewalFailureText($extend, $datatextbot['dyn_errors_renewal_support_error'] ?? "❌خطایی در تمدید سرویس رخ داده با پشتیبانی در ارتباط باشید"), null, 'HTML');
         }
         if (strlen($setting['Channel_Report'] ?? '') > 0) {
             telegram('sendmessage', [
@@ -3576,8 +3655,9 @@ $nameconfig";
         "Service_time" => $prodcut['Service_time'],
         "oldvolume" => $DataUserOut['data_limit'],
         "oldtime" => $DataUserOut['expire'],
-        'code_product' => $prodcut['code_product'],
-        'id_order' => $randomString
+        'code_product' => rxRenewalNormalizeProductCode($prodcut['code_product']),
+        'id_order' => $randomString,
+        'reservation' => $rxReservationSelection
     ));
     $value = fx_value_with_snapshot($value, $fxRenewSnapshot);
     $type = "extend_user";
@@ -3586,7 +3666,17 @@ $nameconfig";
     $stmt->bind_param("ssssssss", $from_id, $nameloc['username'], $value, $type, $dateacc, $prodcut['price_product'],$extend_json, $status);
     $stmt->execute();
     $stmt->close();
-    update("invoice", "Status", "active", "id_invoice", $id_invoice);
+    if (!$rxExtendPending && empty($extend['queued'])) {
+        if ($nameloc['name_product'] == "سرویس تست") {
+            update("invoice", "name_product", $prodcut['name_product'], "id_invoice", $nameloc['id_invoice']);
+            update("invoice", "price_product", $prodcut['price_product'], "id_invoice", $nameloc['id_invoice']);
+        } elseif (rxRenewalNormalizeProductCode($prodcut['code_product'] ?? '') !== 'custom_volume' && rxRenewalIsAppliedVerified($extend)) {
+            rxRenewalSyncInvoiceName($nameloc['id_invoice'], $prodcut['name_product'] ?? '');
+        }
+        if (($nameloc['Status'] ?? '') !== 'disablebyadmin') {
+            update("invoice", "Status", "active", "id_invoice", $id_invoice);
+        }
+    }
     MiniDiscount::logSale([
         'id_user' => $from_id,
         'id_invoice' => $id_invoice,
@@ -3617,7 +3707,7 @@ $nameconfig";
     $balanceformatsellbefore = number_format($user['Balance'], 0);
     $rxFmtProdcutPriceExtend = rxFormatToman($prodcut['price_product']);
     if (!empty($extend['queued'])) {
-        $rxQueuedSuccessTpl = $datatextbot['dyn_renewconfirm_queued_success'] ?? '✅ سرویس خریداری شده رزرو شد و به محض پایان سرویس فعلی فعال می‌گردد.';
+        $rxQueuedSuccessTpl = (string) ($extend['reservation']['confirmation'] ?? rxRenewalText('reservation_confirmed'));
         $textextend = "$rxQueuedSuccessTpl
 
 ▫️نام سرویس : {$nameloc['username']}
@@ -3925,7 +4015,7 @@ $nameconfig";
         return;
     }
     $fxExtraQty = $fxExtraVerify['qty'];
-    if ($user['Balance'] < $__volCharge && $user['agent'] != "n2") {
+    if (rx_ck_available_for_user($user) < $__volCharge && $user['agent'] != "n2") {
         $marzbandirectpay = panel_feature_enabled($marzban_list_get, 'directbuy') ? "ondirectbuy" : "offdirectbuy";
         if ($marzbandirectpay == "offdirectbuy") {
             $minbalance = number_format(json_decode(select("PaySetting", "*", "NamePay", "minbalance", "select")['ValuePay'], true)[$user['agent']]);
@@ -3948,15 +4038,16 @@ $nameconfig";
                 sendmessage($from_id, sprintf($textbotlang['users']['Discount']['discountapplied'], $user['pricediscount']), null, 'HTML');
             }
             $__volCharge = fx_finalize_amount($__volCharge, $marzban_list_get, 'extra_volume');
-            $Balance_prim = $__volCharge - $user['Balance'];
-            update("user", "Processing_value", $Balance_prim, "id", $from_id);
-            Editmessagetext($from_id, $message_id, $textbotlang['users']['sell']['None-credit'], $step_payment);
-            step('get_step_payment', $from_id);
-            update("user", "Processing_value_one", "{$nameloc['username']}%{$valuevolume}", "id", $from_id);
-            update("user", "Processing_value_tow", "getextravolumeuser", "id", $from_id);
-            if ($__volDiscountCode !== '') {
-                update("user", "Processing_value_four", "dvol|" . $__volDiscountCode . "|" . $volume, "id", $from_id);
-            }
+            rx_ck_bot_begin($user, [
+                'operation' => 'getextravolumeuser',
+                'op_key' => "getextravolumeuser|{$nameloc['username']}%{$valuevolume}",
+                'target' => (string) $nameloc['username'],
+                'final_price' => $__volCharge,
+                'message_id' => $message_id,
+                'one' => "{$nameloc['username']}%{$valuevolume}",
+                'tow' => 'getextravolumeuser',
+                'four' => $__volDiscountCode !== '' ? "dvol|" . $__volDiscountCode . "|" . $volume : '',
+            ]);
             return;
         }
     }
@@ -4214,7 +4305,7 @@ $nameconfig";
     if ($limitfree == false) {
         $Pricechange = 0;
     }
-    if ($user['Balance'] < $Pricechange && $user['agent'] != "n2" && $limitfree) {
+    if (rx_ck_available_for_user($user) < $Pricechange && $user['agent'] != "n2" && $limitfree) {
         $marzbandirectpay = panel_feature_enabled($nameloc['Service_location'], 'directbuy') ? "ondirectbuy" : "offdirectbuy";
         if ($marzbandirectpay == "offdirectbuy") {
             $minbalance = number_format(json_decode(select("PaySetting", "*", "NamePay", "minbalance", "select")['ValuePay'], true)[$user['agent']]);
@@ -4236,8 +4327,9 @@ $nameconfig";
                 sendmessage($from_id, sprintf($textbotlang['users']['Discount']['discountapplied'], $user['pricediscount']), null, 'HTML');
             }
             if (intval($Pricechange) != 0) {
-                $Balance_prim = $Pricechange - $user['Balance'];
+                $Balance_prim = $Pricechange - rx_ck_available_for_user($user);
                 update("user", "Processing_value", $Balance_prim, "id", $from_id);
+                update("user", "Processing_value_tow", "", "id", $from_id);
                 Editmessagetext($from_id, $message_id, $textbotlang['users']['sell']['None-credit'], $step_payment);
                 step('get_step_payment', $from_id);
                 return;
@@ -4715,7 +4807,7 @@ $nameconfig";
         return;
     }
     $fxTimeQty = $fxTimeVerify['qty'];
-    if ($user['Balance'] < $__timeCharge && $user['agent'] != "n2") {
+    if (rx_ck_available_for_user($user) < $__timeCharge && $user['agent'] != "n2") {
         $marzbandirectpay = panel_feature_enabled($marzban_list_get, 'directbuy') ? "ondirectbuy" : "offdirectbuy";
         if ($marzbandirectpay == "offdirectbuy") {
             $minbalance = number_format(json_decode(select("PaySetting", "*", "NamePay", "minbalance", "select")['ValuePay'], true)[$user['agent']]);
@@ -4739,15 +4831,16 @@ $nameconfig";
             }
             $pricelasttime = fx_finalize_amount($pricelasttime, $marzban_list_get, 'extra_time');
             if (intval($pricelasttime) != 0) {
-                $Balance_prim = $pricelasttime - $user['Balance'];
-                update("user", "Processing_value", $Balance_prim, "id", $from_id);
-                Editmessagetext($from_id, $message_id, $textbotlang['users']['sell']['None-credit'], $step_payment);
-                step('get_step_payment', $from_id);
-                update("user", "Processing_value_one", "{$nameloc['username']}%{$valuetime}", "id", $from_id);
-                update("user", "Processing_value_tow", "getextratimeuser", "id", $from_id);
-                if ($__timeDiscountCode !== '') {
-                    update("user", "Processing_value_four", "dtime|" . $__timeDiscountCode . "|" . $tmieextra, "id", $from_id);
-                }
+                rx_ck_bot_begin($user, [
+                    'operation' => 'getextratimeuser',
+                    'op_key' => "getextratimeuser|{$nameloc['username']}%{$valuetime}",
+                    'target' => (string) $nameloc['username'],
+                    'final_price' => $pricelasttime,
+                    'message_id' => $message_id,
+                    'one' => "{$nameloc['username']}%{$valuetime}",
+                    'tow' => 'getextratimeuser',
+                    'four' => $__timeDiscountCode !== '' ? "dtime|" . $__timeDiscountCode . "|" . $tmieextra : '',
+                ]);
                 return;
             }
         }
@@ -5209,6 +5302,7 @@ $nameconfig";
             }
         }
         $rxTestEntryKb['inline_keyboard'][] = [['text' => $textbotlang['users']['backbtn'], 'callback_data' => "backuser"]];
+        rx_section_media_enter('test', $from_id, $datain, $message_id, ['usertestbtn']);
         sendmessage($from_id, $datatextbot['textselectlocation'], json_encode($rxTestEntryKb), 'html');
     }
 }

@@ -2091,7 +2091,7 @@ $textonebuy
     }
     $DataUserOut = $ManagePanel->DataUser($nameloc['Service_location'], $nameloc['username']);
     $extend = $ManagePanel->extend($marzban_list_get['Methodextend'], $datafactor['Volume_constraint'], $datafactor['Service_time'], $nameloc['username'], $datafactor['code_product'], $marzban_list_get['code_panel']);
-    if ($extend['status'] == false) {
+    if ($extend['status'] == false && !rxRenewalIsPending($extend)) {
         $extend['msg'] = rx_panel_error_text($extend['msg'] ?? null, $extend['detail'] ?? null);
         $textreports = "
 خطای تمدید سرویس در ربات نماینده

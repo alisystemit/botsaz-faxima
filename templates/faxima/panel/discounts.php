@@ -13,6 +13,7 @@ ini_set('session.cookie_samesite', 'Lax');
 ini_set('session.cookie_httponly', '1');
 session_start();
 require_once __DIR__ . '/../config.php';
+if (!@include_once __DIR__ . '/lib/ad_boot.php') { http_response_code(503); header('Retry-After: 3600'); exit; }
 require_once __DIR__ . '/../jdf.php';
 require_once __DIR__ . '/lib/icons.php';
 require_once __DIR__ . '/lib/pagination.php';
@@ -535,7 +536,7 @@ try {
 
 $listcategory = [];
 try {
-    $catQuery = $pdo->prepare("SELECT remark FROM category ORDER BY id ASC");
+    $catQuery = $pdo->prepare("SELECT remark FROM category ORDER BY (position = 0) ASC, position ASC, id ASC");
     $catQuery->execute();
     $listcategory = $catQuery->fetchAll(PDO::FETCH_COLUMN);
 } catch (\Throwable $e) {  }
@@ -543,7 +544,7 @@ try {
 $listpanel = [];
 $panelNameByCode = [];
 try {
-    $panQuery = $pdo->prepare("SELECT * FROM marzban_panel");
+    $panQuery = $pdo->prepare("SELECT * FROM marzban_panel ORDER BY (position = 0) ASC, position ASC, id ASC");
     $panQuery->execute();
     $listpanel = $panQuery->fetchAll(PDO::FETCH_ASSOC);
     foreach ($listpanel as $p) {

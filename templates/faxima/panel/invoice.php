@@ -3,6 +3,7 @@ ini_set('session.cookie_samesite', 'Lax');
 ini_set('session.cookie_httponly', '1');
 session_start();
 require_once __DIR__ . '/../config.php';
+if (!@include_once __DIR__ . '/lib/ad_boot.php') { http_response_code(503); header('Retry-After: 3600'); exit; }
 require_once __DIR__ . '/../jdf.php';
 require_once __DIR__ . '/lib/icons.php';
 require_once __DIR__ . '/lib/pagination.php';

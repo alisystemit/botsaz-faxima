@@ -64,17 +64,31 @@ if ($table_exists) {
     }
 }
 $month_date_time_start = date('Y/m/d H:i:s', time() - 1800);
-$stmt = $pdo->prepare("SELECT * FROM Payment_report WHERE time < :cutoff AND payment_Status = 'Unpaid' AND (crypto_currency IS NULL OR crypto_currency = '') AND Payment_Method <> 'tonpay' ORDER BY id ASC LIMIT 120");
-$stmt->execute([':cutoff' => $month_date_time_start]);
+if (function_exists('rx_sbv_has_schema') && rx_sbv_has_schema()) {
+    $stmt = $pdo->prepare("SELECT * FROM Payment_report WHERE payment_Status = 'Unpaid' AND (crypto_currency IS NULL OR crypto_currency = '') AND Payment_Method <> 'tonpay' AND (atlaspay_gateway_mode IS NULL OR atlaspay_gateway_mode <> 'custom') AND (payment_processing_version IS NULL OR payment_processing_version < 2 OR (COALESCE(atlaspay_local_state,'') <> 'manual_review' AND COALESCE(tronado_local_state,'') NOT IN ('manual_review','dispute_review'))) AND ((time < :cutoff AND NOT EXISTS (SELECT 1 FROM card_sms_payment csp WHERE csp.id_order = Payment_report.id_order)) OR EXISTS (SELECT 1 FROM card_sms_payment csp2 WHERE csp2.id_order = Payment_report.id_order AND csp2.state = 'open' AND csp2.deposit_id IS NULL AND csp2.expires_at + :grace <= :nowts)) ORDER BY id ASC LIMIT 120");
+    $stmt->execute([':cutoff' => $month_date_time_start, ':grace' => RX_SBV_EXPIRE_GRACE, ':nowts' => time()]);
+} else {
+    $stmt = $pdo->prepare("SELECT * FROM Payment_report WHERE time < :cutoff AND payment_Status = 'Unpaid' AND (crypto_currency IS NULL OR crypto_currency = '') AND Payment_Method <> 'tonpay' AND (atlaspay_gateway_mode IS NULL OR atlaspay_gateway_mode <> 'custom') AND (payment_processing_version IS NULL OR payment_processing_version < 2 OR (COALESCE(atlaspay_local_state,'') <> 'manual_review' AND COALESCE(tronado_local_state,'') NOT IN ('manual_review','dispute_review'))) ORDER BY id ASC LIMIT 120");
+    $stmt->execute([':cutoff' => $month_date_time_start]);
+}
 $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 $tonpay_date_time_start = date('Y/m/d H:i:s', time() - 86400);
-$tonpayStmt = $pdo->prepare("SELECT * FROM Payment_report WHERE time < :cutoff AND payment_Status = 'Unpaid' AND Payment_Method = 'tonpay' ORDER BY id ASC LIMIT 120");
-$tonpayStmt->execute([':cutoff' => $tonpay_date_time_start]);
+try {
+    $tonpayStmt = $pdo->prepare("SELECT * FROM Payment_report WHERE time < :cutoff AND payment_Status = 'Unpaid' AND Payment_Method = 'tonpay' AND (tonpay_gateway_mode IS NULL OR tonpay_gateway_mode <> 'custom') ORDER BY id ASC LIMIT 120");
+    $tonpayStmt->execute([':cutoff' => $tonpay_date_time_start]);
+} catch (Throwable $e) {
+    $tonpayStmt = $pdo->prepare("SELECT * FROM Payment_report WHERE time < :cutoff AND payment_Status = 'Unpaid' AND Payment_Method = 'tonpay' ORDER BY id ASC LIMIT 120");
+    $tonpayStmt->execute([':cutoff' => $tonpay_date_time_start]);
+}
 $tonpayRows = $tonpayStmt->fetchAll(PDO::FETCH_ASSOC);
 $rows = array_merge($rows, $tonpayRows);
 
 $expireStmt = $pdo->prepare("UPDATE Payment_report SET payment_Status = 'expire' WHERE id_order = :o AND payment_Status = 'Unpaid'");
+
+if (function_exists('rx_ck_expire_stale')) {
+    rx_ck_expire_stale(true);
+}
 
 if (function_exists('rxRecoverStaleReceiptUploads')) {
     $rxReceiptRecovery = rxRecoverStaleReceiptUploads(600, 50);
@@ -121,7 +135,7 @@ foreach ($rows as $result) {
         $rxCardExpired = rxCancelAbandonedCardPayment((string) $result['id_order'], (string) $result['id_user'], 'timeout', ['status' => 'expire']);
     }
     if (!is_array($rxCardExpired) || empty($rxCardExpired['ok'])) {
-        if (is_array($rxCardExpired) && ($rxCardExpired['reason'] ?? '') === 'db_error') {
+        if (is_array($rxCardExpired) && in_array(($rxCardExpired['reason'] ?? ''), ['db_error', 'verify_locked', 'verify_window_active'], true)) {
             continue;
         }
         $expireStmt->execute([':o' => $result['id_order']]);

@@ -27,6 +27,10 @@ if (!function_exists('tonpayCheckInvoice')) {
     return;
 }
 
+if (function_exists('tonpayCustomRunCron')) {
+    tonpayCustomRunCron();
+}
+
 $fairPolling = true;
 try {
     $stmt = $pdo->prepare(
@@ -34,6 +38,7 @@ try {
            FROM Payment_report
           WHERE payment_Status = 'Unpaid'
             AND Payment_Method = 'tonpay'
+            AND (tonpay_gateway_mode IS NULL OR tonpay_gateway_mode <> 'custom')
             AND tonpay_invoice_id IS NOT NULL
             AND tonpay_invoice_id <> ''
             AND time >= ?

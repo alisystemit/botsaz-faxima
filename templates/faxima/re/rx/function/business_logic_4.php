@@ -542,6 +542,7 @@ if (!function_exists('rx_normalizeAdminButtonText')) {
         if ($adminMap === null) {
             $targets = [
                 'admin_status'          => $textbotlang['Admin']['Status']['btn'] ?? "📊 وضعیت سرور",
+                'admin_readiness'       => "🚦 آمادگی فروش",
                 'admin_managepanel'     => $textbotlang['Admin']['btnkeyboardadmin']['managementpanel'] ?? "مدیریت پنل",
                 'admin_addpanel'        => $textbotlang['Admin']['btnkeyboardadmin']['addpanel'] ?? "افزودن پنل",
                 'admin_timeprice'       => "⏳ قیمت سریع زمان",

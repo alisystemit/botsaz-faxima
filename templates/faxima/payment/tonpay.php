@@ -39,9 +39,14 @@ function tonpay_process_webhook()
     }
 
     $providedApiKey = isset($_SERVER['HTTP_X_API_KEY']) ? trim((string) $_SERVER['HTTP_X_API_KEY']) : null;
+    $matchesStandardKey = false;
+    $matchesCustomKey = false;
     if ($providedApiKey !== null) {
         $configuredApiKey = function_exists('tonpayApiKey') ? tonpayApiKey() : '';
-        if ($configuredApiKey === '' || !hash_equals($configuredApiKey, $providedApiKey)) {
+        $configuredCustomKey = function_exists('tonpayCustomApiKey') ? tonpayCustomApiKey() : '';
+        $matchesStandardKey = $configuredApiKey !== '' && hash_equals($configuredApiKey, $providedApiKey);
+        $matchesCustomKey = $configuredCustomKey !== '' && hash_equals($configuredCustomKey, $providedApiKey);
+        if (!$matchesStandardKey && !$matchesCustomKey) {
             tonpay_log_event('TONPAY_BAD_API_KEY', 'Callback X-API-Key header did not match the configured key', [
                 'remote_ip' => $_SERVER['REMOTE_ADDR'] ?? 'unknown',
             ]);
@@ -91,8 +96,17 @@ function tonpay_process_webhook()
         http_response_code(404);
         exit('Order not found');
     }
-    if ($Payment_report['payment_Status'] == "expire" || $Payment_report['payment_Status'] == "cancelled") {
+    $isCustomInvoice = (string) ($Payment_report['tonpay_gateway_mode'] ?? '') === 'custom';
+    if (($Payment_report['payment_Status'] == "cancelled" && !$isCustomInvoice) || ($Payment_report['payment_Status'] == "expire" && !$isCustomInvoice)) {
         return;
+    }
+    if ($providedApiKey !== null && ($isCustomInvoice ? !$matchesCustomKey : !$matchesStandardKey)) {
+        tonpay_log_event('TONPAY_KEY_KIND_MISMATCH', 'Callback X-API-Key does not belong to the gateway mode of this invoice', [
+            'order_id' => $orderId,
+            'custom_invoice' => $isCustomInvoice,
+        ]);
+        http_response_code(401);
+        exit('Unauthorized');
     }
 
     $storedInvoiceId = trim((string) ($Payment_report['tonpay_invoice_id'] ?? ''));
@@ -110,7 +124,11 @@ function tonpay_process_webhook()
         exit('Already processed');
     }
 
-    $check = function_exists('tonpayCheckInvoice') ? tonpayCheckInvoice($invoiceId) : null;
+    if ($isCustomInvoice) {
+        $check = function_exists('tonpayCustomCheckInvoice') ? tonpayCustomCheckInvoice($invoiceId) : null;
+    } else {
+        $check = function_exists('tonpayCheckInvoice') ? tonpayCheckInvoice($invoiceId) : null;
+    }
     if (function_exists('tonpayIsRateLimited') && tonpayIsRateLimited($check)) {
         tonpay_log_event('TONPAY_CHECK_RATE_LIMITED', 'Server-side check deferred by rate limit; payment not confirmed', [
             'order_id' => $orderId,
@@ -128,13 +146,17 @@ function tonpay_process_webhook()
         http_response_code(409);
         exit('Verification failed');
     }
+    if ($isCustomInvoice) {
+        tonpayCustomApplyRemote($Payment_report, $check);
+    }
     if (empty($check['paid']) || (string) ($check['status'] ?? '') !== 'completed') {
         tonpay_log_event('TONPAY_NOT_PAID', 'Server-side check reports order not paid', [
             'order_id' => $orderId,
             'invoice_id' => $invoiceId,
             'status' => $check['status'] ?? null,
         ]);
-        if (function_exists('tonpaySyncTerminalStatus')) {
+        $keepReviewOpen = $isCustomInvoice && strtolower((string) ($check['status'] ?? '')) === 'rejected';
+        if (function_exists('tonpaySyncTerminalStatus') && !$keepReviewOpen) {
             tonpaySyncTerminalStatus($orderId, $check['status'] ?? '');
         }
         exit('Not paid');
@@ -157,6 +179,10 @@ function tonpay_process_webhook()
 
     $creditAmount = $finalAmount;
 
+    if ($isCustomInvoice && $Payment_report['payment_Status'] == "cancelled") {
+        tonpayCustomReopenCancelledForConfirmation($orderId);
+    }
+
     $atomic = $connect->prepare(
         "UPDATE Payment_report SET payment_Status = ? WHERE id_order = ? AND payment_Status NOT IN ('paid', 'cancelled')"
     );
@@ -170,6 +196,10 @@ function tonpay_process_webhook()
             'order_id' => $orderId,
         ]);
         exit('Already processed');
+    }
+
+    if ($isCustomInvoice) {
+        tonpayCustomUpdateColumns($orderId, ['tonpay_remote_status' => 'completed', 'tonpay_local_state' => 'completed'], false);
     }
 
     echo "پرداخت با موفقیت انجام شد";
@@ -231,11 +261,15 @@ function tonpay_process_webhook()
     $rlm = "\xE2\x80\x8F";
     $rxFmtPrice = rxFormatToman($price);
     $rxFmtCreditAmount = rxFormatToman($creditAmount);
+    $rxFeeLine = $isCustomInvoice
+        ? "
+<blockquote>- 🧾 کارمزد تون‌پی : " . rxFormatToman(max(0, $creditAmount - (float) $price)) . " تومان (به کیف پول اضافه نشد)</blockquote>"
+        : '';
     $text_reportpayment = "💵 پرداخت جدید
 <blockquote>- 👤 نام کاربری کاربر : @{$usernameEsc}</blockquote>
 <blockquote>- 👤 آیدی عددی کاربر : {$rlm}<code>{$userIdEsc}</code></blockquote>
 <blockquote>- 💰 مبلغ اعتباردهی : {$rxFmtPrice} تومان</blockquote>
-<blockquote>- 💸 مبلغ نهایی تأییدشده توسط تون‌پی : {$rxFmtCreditAmount} تومان</blockquote>
+<blockquote>- 💸 مبلغ نهایی تأییدشده توسط تون‌پی : {$rxFmtCreditAmount} تومان</blockquote>{$rxFeeLine}
 <blockquote>- 💳 روش پرداخت : تون‌پی</blockquote>";
     if (strlen($setting['Channel_Report']) > 0) {
         telegram('sendmessage', [

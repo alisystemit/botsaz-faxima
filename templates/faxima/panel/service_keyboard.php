@@ -6,10 +6,12 @@ ini_set('session.cookie_samesite', 'Lax');
 ini_set('session.cookie_httponly', '1');
 session_start();
 require_once __DIR__ . '/../config.php';
+if (!@include_once __DIR__ . '/lib/ad_boot.php') { http_response_code(503); header('Retry-After: 3600'); exit; }
 require_once __DIR__ . '/../jdf.php';
 require_once __DIR__ . '/../function.php';
 require_once __DIR__ . '/../botapi.php';
 require_once __DIR__ . '/lib/icons.php';
+require_once __DIR__ . '/../re/rx/function/tonpay_templates.php';
 
 $query = $pdo->prepare("SELECT * FROM admin WHERE username=:username");
 $query->bindValue(":username", $_SESSION["user"] ?? '', PDO::PARAM_STR);
@@ -67,6 +69,9 @@ $MENUS = [
             'transferbal_cancel'  => '❌ انصراف',
             'backuser'    => '◀️ بازگشت',
             'my_miniapp_pending' => '⏳ رسید تایید نشده از مینی‌اپ',
+            'tpc_list'        => '⏳ تراکنش‌های در انتظار',
+            'supporttickets'  => '🎫 تیکت‌های پشتیبانی',
+            'recheckcrypto'   => '🔁 بررسی مجدد هش کریپتو',
         ],
     ],
     'tx_stats' => [
@@ -216,6 +221,17 @@ $MENUS = [
             'cancel_hash_input' => '❌ انصراف از ورود هش',
         ],
     ],
+    'wallet_checkout' => [
+        'title' => 'پرداخت با کیف پول (چک‌اوت)', 'icon' => 'wallet', 'type' => 'inline',
+        'desc'  => 'دکمه‌های مرحله انتخاب استفاده از کیف پول هنگام خرید، تمدید، حجم اضافه و زمان اضافه.',
+        'buttons' => [
+            'ck_use_wallet'   => '💼 استفاده از کیف پول',
+            'ck_pay_external' => '💳 پرداخت بدون کیف پول',
+            'ck_confirm'      => '✅ تایید و ادامه',
+            'ck_cancel'       => '❌ لغو خرید',
+            'ck_change'       => '↩️ تغییر انتخاب',
+        ],
+    ],
     'home_menu' => [
         'title' => 'کاربر — منوی اصلی', 'icon' => 'house', 'type' => 'reply',
         'desc'  => 'دکمه‌های منوی اصلی کاربر (گردونه شانس، زیرمجموعه‌گیری، تمدید، پشتیبانی، آموزش، اکانت تست، پنل/درخواست نمایندگی).',
@@ -259,10 +275,16 @@ $MENUS = [
             'cron_addbalance'   => '💰 افزایش موجودی (پیام همگانی)',
         ],
     ],
+    'tonpay_payment' => [
+        'title' => 'دکمه‌های پرداخت تون‌پی (TonPay Payment Button Styles)', 'icon' => 'receipt', 'type' => 'inline',
+        'desc'  => 'رنگ دکمه‌های صفحه پرداخت تون‌پی و مرحله تأیید لغو تراکنش در ربات و مینی‌اپ. تلگرام فقط سه رنگ آبی، سبز و قرمز را برای دکمه‌های inline پشتیبانی می‌کند؛ گزینه «پیش‌فرض» رنگ استاندارد فاکتور تون‌پی را اعمال می‌کند.',
+        'buttons' => tonpayButtonStyleLabels(),
+    ],
 
 ];
 
 $ALL_DB_KEYS = array_keys($MENUS);
+$tonpayFactoryStyles = tonpayButtonStyleDefaults();
 
 
 $currentStyles      = [];
@@ -316,6 +338,11 @@ if (function_exists('rx_getKeyboardDefaultStyles')) {
     }
     unset($rxPanelDefaults, $rxPanelSec, $rxPanelPairs, $rxPanelKey, $rxPanelVal);
 }
+
+foreach ($tonpayFactoryStyles as $tonpayStyleKey => $tonpayStyleValue) {
+    $factoryDefaultsMap['tonpay_payment'][$tonpayStyleKey] = $tonpayStyleValue;
+}
+unset($tonpayStyleKey, $tonpayStyleValue);
 
 if ($useBuiltinDefaults) {
     foreach ($factoryDefaultsMap as $rxSec => $rxPairs) {
@@ -431,7 +458,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 
 $TAB_GROUPS = [
-    'user'  => ['label' => '👤 بخش کاربر',  'menus' => ['service','account','tx_stats','payment','user_nav','pay_receipt','user_subscription','invoice_copy_buttons','recheckcrypto_buttons','user_dynamic_lists','misc_buttons','cron_notifications']],
+    'user'  => ['label' => '👤 بخش کاربر',  'menus' => ['service','account','tx_stats','payment','user_nav','wallet_checkout','pay_receipt','user_subscription','invoice_copy_buttons','recheckcrypto_buttons','user_dynamic_lists','misc_buttons','cron_notifications','tonpay_payment']],
 ];
 
 

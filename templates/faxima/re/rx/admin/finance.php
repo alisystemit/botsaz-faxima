@@ -88,8 +88,13 @@ if (false) {
         $squadLine = $squadOk
             ? "🛡 Squad: ✅ " . count($configuredSquads) . " مورد انتخاب شده"
             : "🛡 Squad: ⚠️ تنظیم نشده یا نامعتبر";
+        if (!function_exists('rx_panel_capability_report')) {
+            require_once __DIR__ . '/../../../panel_capability.php';
+        }
         outtypepanel("remnawave", "✅ اتصال به پنل رمن‌ویو موفق بود.
-" . $squadLine);
+" . $squadLine . "
+
+" . rx_cap_render(rx_panel_capability_report($typepanel)));
     } else {
         outtypepanel("remnawave", "❌ اتصال ناموفق: " . ($testRes['message'] ?? '') . "
 
@@ -566,6 +571,10 @@ if (false) {
         }
         $detectedIds = array_map('intval', $sampleClient['inboundIds']);
         $text = implode(',', $detectedIds);
+        $xsyncRead = xsync_fetch_client($typepanelInbound, $inboundInputRaw);
+        if (!empty($xsyncRead['ok']) && !empty($xsyncRead['ids'])) {
+            xsync_enable_panel($typepanelInbound['name_panel'], $inboundInputRaw, $xsyncRead['ids'], $typepanelInbound['inboundid'] ?? '');
+        }
         nm_adminInstantReply($from_id, "✅ شناسه اینباند(های) [{$text}] از روی کلاینت «{$inboundInputRaw}» تشخیص داده و ذخیره شد", $optionX_ui_single, 'HTML');
         update("marzban_panel", "inboundid", $text, "name_panel", $user['Processing_value']);
         step('PanelMenu', $from_id);
@@ -685,6 +694,7 @@ if (false) {
     }
     update("marzban_panel", "username_panel", $newUsername, "name_panel", $typepanel['name_panel']);
     update("marzban_panel", "password_panel", $newPassword, "name_panel", $typepanel['name_panel']);
+    update("marzban_panel", "datelogin", null, "name_panel", $typepanel['name_panel']);
     outtypepanel("pasarguard", "🔑 نام کاربری و رمز عبور PasarGuard با موفقیت ذخیره شد.\n✅ اتصال برقرار است");
     step('PanelMenu', $from_id);
 } elseif ($user['step'] == "rebecca_edit_api_key") {
@@ -763,51 +773,16 @@ if (false) {
 } elseif ($text == "⁉️ اتصال به پنل" && $adminrulecheck['rule'] == "administrator") {
     $panelName = guardResolveUserPanelName($user);
     $typepanel = $panelName ? select("marzban_panel", "*", "name_panel", $panelName, "select") : null;
-    if (is_array($typepanel) && ($typepanel['type'] ?? null) == "pasarguard") {
-        $pasarguardApiKey = trim((string) ($typepanel['api_key'] ?? ''));
-        if ($pasarguardApiKey === '') {
-            outtypepanel("pasarguard", "❌ کلید API برای این پنل تنظیم نشده است.");
-            step('PanelMenu', $from_id);
-            return;
-        }
-        $testResult = pasarguardTestConnection($typepanel['url_panel'] ?? null, $pasarguardApiKey);
-        if ($testResult['status'] === false) {
-            outtypepanel("pasarguard", "❌ اتصال ناموفق: " . ($testResult['msg'] ?? ''));
-        } else {
-            outtypepanel("pasarguard", "✅ اتصال به PasarGuard موفق بود.");
-        }
-        step('PanelMenu', $from_id);
-        return;
-    }
-    if (is_array($typepanel) && ($typepanel['type'] ?? null) == "rebecca") {
-        $rebeccaApiKey = trim((string) ($typepanel['api_key'] ?? ''));
-        if ($rebeccaApiKey === '') {
-            outtypepanel("rebecca", "❌ کلید API برای این پنل تنظیم نشده است.");
-            step('PanelMenu', $from_id);
-            return;
-        }
-        $testResult = rebeccaTestConnection($typepanel['url_panel'] ?? null, $rebeccaApiKey);
-        if ($testResult['status'] === false) {
-            outtypepanel("rebecca", "❌ اتصال ناموفق: " . ($testResult['msg'] ?? ''));
-        } else {
-            outtypepanel("rebecca", "✅ اتصال به Rebecca موفق بود.");
-        }
-        step('PanelMenu', $from_id);
-        return;
-    }
-    if (!is_array($typepanel) || ($typepanel['type'] ?? null) != "guard") {
+    if (!is_array($typepanel) || empty($typepanel['type'])) {
         nm_adminInstantReply($from_id, $textbotlang['Admin']['managepanel']['errorstateuspanel'], $backadmin, 'HTML');
         return;
     }
-    $apiKey = !empty($typepanel['api_key']) ? $typepanel['api_key'] : ($typepanel['password_panel'] ?? '');
-    if (trim($apiKey) === '') {
-        outtypepanel("guard", $textbotlang['Admin']['managepanel']['guard']['connection_missing_key']);
-        step('PanelMenu', $from_id);
-        return;
+    if (!function_exists('rx_panel_capability_report')) {
+        require_once __DIR__ . '/../../../panel_capability.php';
     }
-    $testResult = guardTestConnection($typepanel['url_panel'] ?? null, $apiKey, $typepanel['guard_version'] ?? 'v1');
-    $statusText = guardFormatConnectionResult($testResult);
-    outtypepanel("guard", $statusText);
+    sendmessage($from_id, "⏳ در حال بررسی اتصال و دسترسی‌های پنل؛ ممکن است چند ثانیه طول بکشد...", null, 'HTML');
+    $capabilityReport = rx_panel_capability_report($typepanel);
+    outtypepanel($typepanel['type'], rx_cap_render($capabilityReport));
     step('PanelMenu', $from_id);
 } elseif ($text == "⚙️ سرویس پیش‌فرض" && $adminrulecheck['rule'] == "administrator") {
     $panelName = guardResolveUserPanelName($user);
@@ -823,24 +798,20 @@ if (false) {
         step('PanelMenu', $from_id);
         return;
     }
-    $services = $servicesResponse['services'];
     $currentServiceId = trim((string) ($panel['rebecca_service_id'] ?? ''));
-    $rebeccaServiceRows = [];
-    foreach ($services as $serviceRow) {
-        if (!isset($serviceRow['id'])) {
-            continue;
-        }
-        $serviceId = (string) intval($serviceRow['id']);
-        $isSelected = ($currentServiceId === $serviceId);
-        $checkIcon = $isSelected ? '✅' : '❌';
-        $rebeccaServiceRows[] = [[
-            'text' => rebeccaServiceLabel($serviceRow) . " {$checkIcon}",
-            'callback_data' => 'rebeccasetservice#' . $serviceId,
-        ]];
+    $rebeccaServiceView = rebeccaBuildServiceKeyboard($servicesResponse['services'], $currentServiceId, 1);
+    if ($rebeccaServiceView === null) {
+        outtypepanel("rebecca", "❌ دریافت سرویس‌ها از Rebecca ناموفق بود: لیست سرویس‌ها خالی است.");
+        step('PanelMenu', $from_id);
+        return;
     }
-    $rebeccaServiceKeyboard = json_encode(['inline_keyboard' => $rebeccaServiceRows], JSON_UNESCAPED_UNICODE);
-    nm_adminInstantReply($from_id, "⚙️ سرویس پیش‌فرض فعلی را انتخاب کنید. با هر بار ضربه زدن روی یک سرویس، همان سرویس به‌عنوان پیش‌فرض ذخیره می‌شود.", $rebeccaServiceKeyboard, 'HTML');
-} elseif (preg_match('/^rebeccasetservice#(\d+)$/', $datain, $rebeccaServiceMatch)) {
+    nm_adminInstantReply($from_id, "⚙️ سرویس پیش‌فرض فعلی را انتخاب کنید. با هر بار ضربه زدن روی یک سرویس، همان سرویس به‌عنوان پیش‌فرض ذخیره می‌شود.", $rebeccaServiceView['keyboard'], 'HTML');
+} elseif ($datain === 'rebeccaservicenoop') {
+    telegram('answerCallbackQuery', [
+        'callback_query_id' => $callback_query_id,
+        'cache_time' => 3,
+    ]);
+} elseif (preg_match('/^rebeccaservicepage#(\d+)$/', $datain, $rebeccaServiceMatch)) {
     $panelName = guardResolveUserPanelName($user);
     $panel = $panelName ? select("marzban_panel", "*", "name_panel", $panelName, "select") : null;
     if (!is_array($panel) || ($panel['type'] ?? null) != "rebecca") {
@@ -852,26 +823,69 @@ if (false) {
         ]);
         return;
     }
-    $chosenServiceId = $rebeccaServiceMatch[1];
-    update("marzban_panel", "rebecca_service_id", $chosenServiceId, "name_panel", $panel['name_panel']);
     $servicesResponse = rebeccaGetServices($panel['name_panel']);
-    $services = ($servicesResponse['status'] !== false) ? $servicesResponse['services'] : [];
-    $rebeccaServiceRows = [];
-    foreach ($services as $serviceRow) {
-        if (!isset($serviceRow['id'])) {
-            continue;
-        }
-        $serviceId = (string) intval($serviceRow['id']);
-        $isSelected = ($chosenServiceId === $serviceId);
-        $checkIcon = $isSelected ? '✅' : '❌';
-        $rebeccaServiceRows[] = [[
-            'text' => rebeccaServiceLabel($serviceRow) . " {$checkIcon}",
-            'callback_data' => 'rebeccasetservice#' . $serviceId,
-        ]];
+    $rebeccaServiceView = ($servicesResponse['status'] !== false && is_array($servicesResponse['services'] ?? null))
+        ? rebeccaBuildServiceKeyboard($servicesResponse['services'], $panel['rebecca_service_id'] ?? '', (int) $rebeccaServiceMatch[1])
+        : null;
+    if ($rebeccaServiceView === null) {
+        telegram('answerCallbackQuery', [
+            'callback_query_id' => $callback_query_id,
+            'text' => 'دریافت لیست سرویس‌ها ناموفق بود. دوباره تلاش کنید.',
+            'show_alert' => true,
+            'cache_time' => 0,
+        ]);
+        return;
     }
-    $rebeccaServiceKeyboard = json_encode(['inline_keyboard' => $rebeccaServiceRows], JSON_UNESCAPED_UNICODE);
     if (!empty($message_id)) {
-        Editmessagetext($from_id, $message_id, "⚙️ سرویس پیش‌فرض فعلی را انتخاب کنید. با هر بار ضربه زدن روی یک سرویس، همان سرویس به‌عنوان پیش‌فرض ذخیره می‌شود.", $rebeccaServiceKeyboard, 'HTML');
+        Editmessagetext($from_id, $message_id, "⚙️ سرویس پیش‌فرض فعلی را انتخاب کنید. با هر بار ضربه زدن روی یک سرویس، همان سرویس به‌عنوان پیش‌فرض ذخیره می‌شود.", $rebeccaServiceView['keyboard'], 'HTML');
+    }
+    telegram('answerCallbackQuery', [
+        'callback_query_id' => $callback_query_id,
+        'cache_time' => 0,
+    ]);
+} elseif (preg_match('/^rebeccasetservice#(\d+)(?:#(\d+))?$/', $datain, $rebeccaServiceMatch)) {
+    $panelName = guardResolveUserPanelName($user);
+    $panel = $panelName ? select("marzban_panel", "*", "name_panel", $panelName, "select") : null;
+    if (!is_array($panel) || ($panel['type'] ?? null) != "rebecca") {
+        telegram('answerCallbackQuery', [
+            'callback_query_id' => $callback_query_id,
+            'text' => 'اطلاعات پنل در دسترس نیست.',
+            'show_alert' => true,
+            'cache_time' => 3,
+        ]);
+        return;
+    }
+    $chosenServiceId = (string) intval($rebeccaServiceMatch[1]);
+    $rebeccaServicePage = isset($rebeccaServiceMatch[2]) ? (int) $rebeccaServiceMatch[2] : 1;
+    $servicesResponse = rebeccaGetServices($panel['name_panel']);
+    $rebeccaServiceView = ($servicesResponse['status'] !== false && is_array($servicesResponse['services'] ?? null))
+        ? rebeccaBuildServiceKeyboard($servicesResponse['services'], $chosenServiceId, $rebeccaServicePage)
+        : null;
+    if ($rebeccaServiceView === null) {
+        telegram('answerCallbackQuery', [
+            'callback_query_id' => $callback_query_id,
+            'text' => 'دریافت لیست سرویس‌ها ناموفق بود؛ سرویس پیش‌فرض تغییر نکرد.',
+            'show_alert' => true,
+            'cache_time' => 0,
+        ]);
+        return;
+    }
+    if (!in_array($chosenServiceId, $rebeccaServiceView['ids'], true)) {
+        $rebeccaServiceView = rebeccaBuildServiceKeyboard($servicesResponse['services'], $panel['rebecca_service_id'] ?? '', $rebeccaServicePage);
+        if (!empty($message_id)) {
+            Editmessagetext($from_id, $message_id, "⚙️ سرویس پیش‌فرض فعلی را انتخاب کنید. با هر بار ضربه زدن روی یک سرویس، همان سرویس به‌عنوان پیش‌فرض ذخیره می‌شود.", $rebeccaServiceView['keyboard'], 'HTML');
+        }
+        telegram('answerCallbackQuery', [
+            'callback_query_id' => $callback_query_id,
+            'text' => 'این سرویس دیگر وجود ندارد؛ فهرست به‌روزرسانی شد.',
+            'show_alert' => true,
+            'cache_time' => 0,
+        ]);
+        return;
+    }
+    update("marzban_panel", "rebecca_service_id", $chosenServiceId, "name_panel", $panel['name_panel']);
+    if (!empty($message_id)) {
+        Editmessagetext($from_id, $message_id, "⚙️ سرویس پیش‌فرض فعلی را انتخاب کنید. با هر بار ضربه زدن روی یک سرویس، همان سرویس به‌عنوان پیش‌فرض ذخیره می‌شود.", $rebeccaServiceView['keyboard'], 'HTML');
     }
     telegram('answerCallbackQuery', [
         'callback_query_id' => $callback_query_id,
@@ -2593,6 +2607,7 @@ $iduser  در ربات  رفع مسدود گردید
     nm_adminInstantReply($from_id, $textbotlang['Admin']['order']['vieworderusername'], $backadmin, 'HTML');
     step('GetusernameconfigAndOrdedrs', $from_id);
 } elseif ($user['step'] == "GetusernameconfigAndOrdedrs" || strpos($text, "/config ") !== false || preg_match('/manageinvoice_(\w+)/', $datain, $datagetr)) {
+    rxArDraftResetIfAny($from_id, $user);
     if ($user['step'] == "GetusernameconfigAndOrdedrs") {
         if (!isset($update['message']) && empty($text)) { return; }
         $usernameconfig = $text;
@@ -4021,8 +4036,8 @@ $iduser  در ربات  رفع مسدود گردید
     step("home", $from_id);
     update("setting", "on_hold_day", $text);
 } elseif ($datain == "set_panel_timeout" && $adminrulecheck['rule'] == "administrator") {
-    $curTimeout = (int)($setting['panel_curl_timeout'] ?? 20);
-    nm_adminInstantReply($from_id, "⏱ <b>تایم‌اوت اتصال به پنل</b>\n\nمقدار فعلی: <b>{$curTimeout} ثانیه</b>\n\nمقدار جدید را (عدد بین 5 تا 120) ارسال کنید:", $backadmin, 'HTML');
+    $curTimeout = function_exists('faoxima_panel_timeout') ? faoxima_panel_timeout() : (int)($setting['panel_curl_timeout'] ?? 20);
+    nm_adminInstantReply($from_id, "⏱ <b>تایم‌اوت پنل</b>\n\nحداکثر انتظار برای هر درخواست پنل و دریافت محتوای ساب\n\nمقدار فعلی: <b>{$curTimeout} ثانیه</b>\n\nℹ️ این مقدار برای هر تلاش جداگانه اعمال می‌شود. تلاش مجدد و چند درخواست پشت‌سرهم (ورود به پنل، خواندن کاربر، دریافت ساب) ممکن است کل عملیات را طولانی‌تر از این مقدار کند.\n\nمقدار جدید را (عدد بین 5 تا 120) ارسال کنید:", $backadmin, 'HTML');
     step("get_panel_timeout", $from_id);
 } elseif ($user['step'] == "get_panel_timeout") {
     if (!isset($update['message']) && empty($text)) { return; }
@@ -4031,6 +4046,6 @@ $iduser  در ربات  رفع مسدود گردید
         return;
     }
     update("setting", "panel_curl_timeout", $text);
-    nm_adminInstantReply($from_id, "✅ تایم‌اوت پنل به <b>{$text} ثانیه</b> تغییر یافت.", $setting_panel, 'HTML');
+    nm_adminInstantReply($from_id, "✅ حداکثر انتظار برای هر درخواست پنل و دریافت محتوای ساب به <b>{$text} ثانیه</b> تغییر یافت.", $setting_panel, 'HTML');
     step("home", $from_id);
 }

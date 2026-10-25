@@ -100,6 +100,9 @@ if ($user['step'] == "createusertest" || preg_match('/locationtest_(.*)/', $data
         sendmessage($from_id, $rxTestQuota['reason'] === 'audience_restricted' ? rx_test_audience_denied_text() : $textbotlang['users']['usertest']['limitwarning'], $keyboard_buy, 'html');
         return;
     }
+    if ($user['step'] != "createusertest" && strpos((string) $datain, 'locationtest_') !== 0) {
+        rx_section_media_enter('test', $from_id, $datain, $message_id, ['usertestbtn']);
+    }
     $location = $marzban_list_get['code_panel'];
     $_rx_usernameKb = ($marzban_list_get['MethodUsername'] == "نام کاربری دلخواه + عدد رندوم" || $marzban_list_get['MethodUsername'] == "متن دلخواه کاربر + رندوم") ? $usernamePromptKb : $backuser;
     if ($marzban_list_get['MethodUsername'] == $textbotlang['users']['customusername'] || $marzban_list_get['MethodUsername'] == "نام کاربری دلخواه + عدد رندوم" || $marzban_list_get['MethodUsername'] == "متن دلخواه کاربر + رندوم") {
@@ -267,14 +270,135 @@ if ($user['step'] == "createusertest" || preg_match('/locationtest_(.*)/', $data
             'reply_markup' => $Response
         ]);
     }
-} elseif (($text !== '' && $text == $datatextbot['text_help']) || $datain == "helpbtn" || $datain == "helpbtns" || $text == "/help" || $text == "help") {
+} elseif ($datain === 'tpc_list') {
+    if ($user['step'] == "tpc_receipt") {
+        step('home', $from_id);
+    }
+    $tpcListView = tonpayCustomBotListView($from_id);
+    if (function_exists('atlaspayCustomBotListMerge')) {
+        $tpcListView = atlaspayCustomBotListMerge($from_id, $tpcListView);
+    }
+    Editmessagetext($from_id, $message_id, $tpcListView['text'], $tpcListView['keyboard'], 'HTML');
+    tonpayCustomBotAnswer($callback_query_id);
+} elseif (preg_match('/^apc_(chk|can|cny|view)_(\w+)$/', (string) $datain, $apcMatch)) {
+    $apcAction = $apcMatch[1];
+    $apcOrder = $apcMatch[2];
+    $apcReport = atlaspayCustomFetchReport($apcOrder);
+    if ($apcReport === null || (string) $apcReport['id_user'] !== (string) $from_id) {
+        atlaspayCustomBotAnswer($callback_query_id, '❌ این فاکتور پیدا نشد.', true);
+        return;
+    }
+    if ($apcAction == 'view') {
+        atlaspayCustomPollThrottled($apcOrder, $from_id);
+        atlaspayCustomBotRender($from_id, $message_id, $apcOrder);
+        updatePaymentMessageId(['ok' => true, 'result' => ['message_id' => $message_id]], $apcOrder);
+        atlaspayCustomBotAnswer($callback_query_id);
+    } elseif ($apcAction == 'chk') {
+        atlaspayCustomPollThrottled($apcOrder, $from_id);
+        atlaspayCustomBotRefreshOriginal($from_id, $apcOrder, $message_id);
+        atlaspayCustomBotAnswer($callback_query_id, '🔄 وضعیت به‌روزرسانی شد');
+    } elseif ($apcAction == 'can') {
+        $apcCancelState = atlaspayCustomBuildState($apcReport);
+        if (!$apcCancelState['can_cancel']) {
+            atlaspayCustomBotAnswer($callback_query_id, atlaspayCustomCancelBlockedMessage($apcCancelState), true);
+            return;
+        }
+        $apcConfirmView = atlaspayCustomBotCancelConfirmView($apcOrder, 'apc_view_' . $apcOrder);
+        Editmessagetext($from_id, $message_id, $apcConfirmView['text'], $apcConfirmView['keyboard'], 'HTML');
+        atlaspayCustomBotAnswer($callback_query_id);
+    } else {
+        $apcResult = atlaspayCustomCancel($apcOrder, $from_id);
+        if (empty($apcResult['ok'])) {
+            atlaspayCustomBotAnswer($callback_query_id, (string) ($apcResult['message'] ?? 'لغو فاکتور انجام نشد.'), true);
+            atlaspayCustomBotRender($from_id, $message_id, $apcOrder);
+            return;
+        }
+        atlaspayCustomBotRender($from_id, $message_id, $apcOrder);
+        updatePaymentMessageId(['ok' => true, 'result' => ['message_id' => $message_id]], $apcOrder);
+        atlaspayCustomBotAnswer($callback_query_id, '✅ تراکنش لغو شد');
+    }
+} elseif (preg_match('/^tpc_(chk|chg|rcp|can|cny|view)_(\w+)$/', (string) $datain, $tpcMatch)) {
+    $tpcAction = $tpcMatch[1];
+    $tpcOrder = $tpcMatch[2];
+    $tpcReport = tonpayCustomFetchReport($tpcOrder);
+    if ($tpcReport === null || (string) $tpcReport['id_user'] !== (string) $from_id) {
+        tonpayCustomBotAnswer($callback_query_id, '❌ این فاکتور پیدا نشد.', true);
+        return;
+    }
+    if ($user['step'] == "tpc_receipt") {
+        step('home', $from_id);
+    }
+    if ($tpcAction == 'view') {
+        tonpayCustomPollThrottled($tpcOrder, $from_id);
+        tonpayCustomBotRender($from_id, $message_id, $tpcOrder);
+        updatePaymentMessageId(['ok' => true, 'result' => ['message_id' => $message_id]], $tpcOrder);
+        tonpayCustomBotAnswer($callback_query_id);
+    } elseif ($tpcAction == 'cny') {
+        $tpcResult = tonpayCustomCancel($tpcOrder, $from_id);
+        if (empty($tpcResult['ok'])) {
+            tonpayCustomBotAnswer($callback_query_id, (string) ($tpcResult['message'] ?? 'لغو فاکتور انجام نشد.'), true);
+            tonpayCustomBotRender($from_id, $message_id, $tpcOrder);
+            return;
+        }
+        tonpayCustomBotRender($from_id, $message_id, $tpcOrder);
+        updatePaymentMessageId(['ok' => true, 'result' => ['message_id' => $message_id]], $tpcOrder);
+        tonpayCustomBotAnswer($callback_query_id, '✅ تراکنش لغو شد');
+    } elseif ($tpcAction == 'chk') {
+        tonpayCustomPollThrottled($tpcOrder, $from_id);
+        tonpayCustomBotRefreshOriginal($from_id, $tpcOrder, $message_id);
+        tonpayCustomBotAnswer($callback_query_id, '🔄 وضعیت به‌روزرسانی شد');
+    } elseif ($tpcAction == 'chg') {
+        $tpcResult = tonpayCustomChangeCard($tpcOrder, $from_id);
+        if (empty($tpcResult['ok'])) {
+            tonpayCustomBotAnswer($callback_query_id, (string) ($tpcResult['message'] ?? 'تعویض کارت انجام نشد.'), true);
+            return;
+        }
+        tonpayCustomBotRender($from_id, $message_id, $tpcOrder, $tpcResult['report']);
+        tonpayCustomBotAnswer($callback_query_id, '✅ کارت تعویض شد');
+    } elseif ($tpcAction == 'can') {
+        $tpcCancelState = tonpayCustomBuildState($tpcReport);
+        if (!$tpcCancelState['can_cancel']) {
+            tonpayCustomBotAnswer($callback_query_id, tonpayCustomCancelBlockedMessage($tpcCancelState), true);
+            return;
+        }
+        $tpcConfirmView = tonpayCustomBotCancelConfirmView($tpcOrder, 'tpc_view_' . $tpcOrder);
+        Editmessagetext($from_id, $message_id, $tpcConfirmView['text'], $tpcConfirmView['keyboard'], 'HTML');
+        tonpayCustomBotAnswer($callback_query_id);
+    } else {
+        $tpcReport = tonpayCustomPollThrottled($tpcOrder, $from_id) ?? $tpcReport;
+        $tpcGate = tonpayCustomReceiptGate(tonpayCustomBuildState($tpcReport));
+        if (!$tpcGate['ok']) {
+            tonpayCustomBotAnswer($callback_query_id, $tpcGate['message'], true);
+            return;
+        }
+        step('tpc_receipt', $from_id);
+        update("user", "Processing_value", $tpcOrder, "id", $from_id);
+        tonpayCustomBotAnswer($callback_query_id);
+        sendmessage($from_id, tonpayCustomReceiptPromptText(), json_encode(['inline_keyboard' => [[['text' => '🔙 بازگشت به وضعیت پرداخت', 'callback_data' => 'tpc_chk_' . $tpcOrder]]]], JSON_UNESCAPED_UNICODE), 'HTML');
+    }
+} elseif ($user['step'] == "tpc_receipt" && $datain === '' && isset($update['message'])) {
+    global $update;
+    $tpcOrder = (string) $user['Processing_value'];
+    $tpcBackKb = json_encode(['inline_keyboard' => [[['text' => '🔙 بازگشت به وضعیت پرداخت', 'callback_data' => 'tpc_chk_' . $tpcOrder]]]], JSON_UNESCAPED_UNICODE);
+    $tpcResult = tonpayCustomBotHandleReceiptUpload($from_id, $tpcOrder, $update['message']);
+    if (empty($tpcResult['ok'])) {
+        sendmessage($from_id, '❌ ' . ($tpcResult['message'] ?? 'ارسال رسید ناموفق بود.'), $tpcBackKb, 'HTML');
+        return;
+    }
+    step('home', $from_id);
+    sendmessage($from_id, tonpayCustomReceiptSubmittedText(), null, 'HTML');
+    tonpayCustomBotRefreshOriginal($from_id, $tpcOrder, 0);
+} elseif (preg_match('/^ckw_(pick|ok|menu|cancel)_/', (string) $datain)) {
+    rx_ck_bot_callback($user, (string) $datain, $message_id, $callback_query_id ?? null);
+} elseif (($text !== '' && $text == $datatextbot['text_help']) || $datain == "helpbtn" || $datain == "helpbtns" || $datain == "helpmenubtn" || $text == "/help" || $text == "help") {
     if (!check_active_btn($setting['keyboardmain'], "text_help")) {
         sendmessage($from_id, $textbotlang['users']['help']['disablehelp'], null, 'HTML');
         return;
     }
+    rx_section_media_enter('help', $from_id, $datain, $message_id, ['helpmenubtn'], ['helpmenubtn']);
     if ($setting['categoryhelp'] == "1") {
         $rxSelectCategoryTxt = $datatextbot['dyn_tickets_select_category'] ?? "📌 یک دسته را انتخاب نمایید";
-        if ($datain == "helpbtns") {
+        if ($datain == "helpbtns" || $datain == "helpmenubtn") {
             Editmessagetext($from_id, $message_id, $rxSelectCategoryTxt, $json_list_helpـcategory, 'HTML');
         } else {
             sendmessage($from_id, $rxSelectCategoryTxt, $json_list_helpـcategory, 'HTML');
@@ -292,7 +416,7 @@ if ($user['step'] == "createusertest" || preg_match('/locationtest_(.*)/', $data
             rx_kb_style(['text' => $textbotlang['users']['backmenu'], 'callback_data' => "backuser"], 'backuser', $_rx_nav_s),
         ];
         $json_list_help = json_encode($helpidos);
-        if ($datain == "helpbtns") {
+        if ($datain == "helpbtns" || $datain == "helpmenubtn") {
             Editmessagetext($from_id, $message_id, $textbotlang['users']['selectoption'], $json_list_help, 'HTML');
         } else {
             sendmessage($from_id, $textbotlang['users']['selectoption'], $json_list_help, 'HTML');
@@ -392,6 +516,7 @@ if ($user['step'] == "createusertest" || preg_match('/locationtest_(.*)/', $data
         sendmessage($from_id, $datatextbot['dyn_errors_button_disabled'] ?? "❌ این دکمه غیرفعال می باشد", null, 'HTML');
         return;
     }
+    rx_section_media_enter('support', $from_id, $datain, $message_id, ['supportbtns'], ['supportbtns']);
     if ($datain == "supportbtns") {
         Editmessagetext($from_id, $message_id, $textbotlang['users']['support']['btnsupport'], $supportoption);
     } else {
@@ -719,7 +844,8 @@ if ($user['step'] == "createusertest" || preg_match('/locationtest_(.*)/', $data
     Editmessagetext($from_id, $message_id, $mpText, $mpKb);
 } elseif ($datain == "fqQuestions") {
     sendmessage($from_id, $datatextbot['text_dec_fq'], null, 'HTML');
-} elseif (($text !== '' && $text == $datatextbot['accountwallet']) || $datain == "account" || $text == "/wallet") {
+} elseif (($text !== '' && $text == $datatextbot['accountwallet']) || $datain == "account" || $datain == "accountbtn" || $text == "/wallet") {
+    rx_section_media_enter('wallet', $from_id, $datain, $message_id, ['accountbtn'], ['accountbtn']);
     $dateacc = jdate('Y/m/d');
     $current_time = time();
     $timeacc = jdate('H:i:s', $current_time);
@@ -797,26 +923,8 @@ https://t.me/$usernamebot?start={$user['codeInvitation']}";
         '{time_now}' => $timeacc,
     ];
     $text_account = strtr($text_account_tpl, $text_account_replacements) . "\n$textscore\n$textinvite";
-    $stmtPendingMa = $pdo->prepare(
-        "SELECT id_order, price FROM Payment_report
-          WHERE id_user = :uid
-            AND payment_Status = 'waiting'
-            AND Payment_Method = 'cart to cart'
-            AND source = 'miniapp'
-            AND dec_not_confirmed = 'receipt-submitted'
-          LIMIT 1"
-    );
-    $stmtPendingMa->execute([':uid' => $from_id]);
-    $hasPendingMa = $stmtPendingMa->rowCount() > 0;
-    $kbData = json_decode($keyboardPanel, true);
-    if ($hasPendingMa) {
-        $_rx_acc_s = (isset($_rx_acc_styles) && is_array($_rx_acc_styles)) ? $_rx_acc_styles : [];
-        array_unshift($kbData['inline_keyboard'], [
-            rx_kb_style(['text' => '⏳ رسید تایید نشده از مینی‌اپ', 'callback_data' => 'my_miniapp_pending'], 'my_miniapp_pending', $_rx_acc_s)
-        ]);
-    }
-    $activeKeyboard = json_encode($kbData, JSON_UNESCAPED_UNICODE);
-    if ($datain == "account") {
+    $activeKeyboard = rx_account_keyboard_json($from_id);
+    if ($datain == "account" || $datain == "accountbtn") {
         Editmessagetext($from_id, $message_id, $text_account, $activeKeyboard);
     } else {
         sendmessage($from_id, $text_account, $activeKeyboard, 'HTML');
@@ -1081,6 +1189,9 @@ https://t.me/$usernamebot?start={$user['codeInvitation']}";
         sendmessage($from_id, $datatextbot['dyn_errors_button_disabled'] ?? "❌ این دکمه غیرفعال می باشد", null, 'HTML');
         return;
     }
+    if ($datain != "buyback") {
+        rx_section_media_enter('buy', $from_id, $datain, $message_id, ['buy'], ['buy']);
+    }
     if ($datain == "buy") {
         Editmessagetext($from_id, $message_id, $textbotlang['users']['sell']['notestep'], $backuser);
     } elseif ($datain == "buyback") {
@@ -1096,7 +1207,7 @@ https://t.me/$usernamebot?start={$user['codeInvitation']}";
         sendmessage($from_id, $datatextbot['dyn_errors_button_disabled'] ?? "❌ این دکمه غیرفعال می باشد", null, 'HTML');
         return;
     }
-    $locationproduct = mysqli_query($connect, "SELECT * FROM marzban_panel  WHERE status = 'active'");
+    $locationproduct = mysqli_query($connect, "SELECT * FROM marzban_panel  WHERE status = 'active' ORDER BY (position = 0) ASC, position ASC, id ASC");
     if (mysqli_num_rows($locationproduct) == 0) {
         sendmessage($from_id, $textbotlang['Admin']['managepanel']['nullpanel'], null, 'HTML');
         return;
@@ -1107,6 +1218,9 @@ https://t.me/$usernamebot?start={$user['codeInvitation']}";
     }
     if ($user['number'] == "none" && (($setting['get_number'] == "onAuthenticationphone") || ($setting['iran_number'] == "onAuthenticationiran")) && !rx_auth_skip_user($user))
         return;
+    if ($user['step'] != "statusnamecustom" && $datain != "buybacktow" && $datain != "buyback") {
+        rx_section_media_enter('buy', $from_id, $datain, $message_id, ['buy'], ['buy']);
+    }
 
     if (!isset($datatextbot['textselectlocation']) || trim((string)$datatextbot['textselectlocation']) === '') {
         $datatextbot['textselectlocation'] = '📍 لطفاً لوکیشن (سرور) مورد نظر را انتخاب کنید:';
@@ -1201,9 +1315,9 @@ https://t.me/$usernamebot?start={$user['codeInvitation']}";
                     'panel' => $marzban_list_get['name_panel'],
                 ]);
                 if ($datain == "buy") {
-                    Editmessagetext($from_id, $message_id, $textproduct, KeyboardProduct($marzban_list_get['name_panel'], $query, $user['pricediscount'], $datakeyboard, $statuscustom, "backuser", null, "customsellvolume", $user['agent'], $queryParams));
+                    Editmessagetext($from_id, $message_id, $textproduct, KeyboardProduct($marzban_list_get['name_panel'], $query, $user['pricediscount'], $datakeyboard, $statuscustom, "backuser", null, "customsellvolume", $user['agent'], $queryParams, true));
                 } else {
-                    sendmessage($from_id, $textproduct, KeyboardProduct($marzban_list_get['name_panel'], $query, $user['pricediscount'], $datakeyboard, $statuscustom, "backuser", null, "customsellvolume", $user['agent'], $queryParams), 'HTML');
+                    sendmessage($from_id, $textproduct, KeyboardProduct($marzban_list_get['name_panel'], $query, $user['pricediscount'], $datakeyboard, $statuscustom, "backuser", null, "customsellvolume", $user['agent'], $queryParams, true), 'HTML');
                 }
             }
         } else {
@@ -1243,7 +1357,7 @@ https://t.me/$usernamebot?start={$user['codeInvitation']}";
         step("home", $from_id);
     }
     $rx_loc_kb = ['inline_keyboard' => []];
-    $rx_loc_q = $pdo->prepare("SELECT * FROM marzban_panel WHERE status = 'active'");
+    $rx_loc_q = $pdo->prepare("SELECT * FROM marzban_panel WHERE status = 'active' ORDER BY (position = 0) ASC, position ASC, id ASC");
     $rx_loc_q->execute();
     while ($rx_p = $rx_loc_q->fetch(PDO::FETCH_ASSOC)) {
         $rx_hide = json_decode((string)($rx_p['hide_user'] ?? ''), true);
@@ -1333,7 +1447,7 @@ https://t.me/$usernamebot?start={$user['codeInvitation']}";
             $textproduct = faoxima_render_text($textbotlang['users']['sell']['Service-select-no-category'], [
                 'panel' => $marzban_list_get['name_panel'],
             ]);
-            Editmessagetext($from_id, $message_id, $textproduct, KeyboardProduct($marzban_list_get['name_panel'], $query, $user['pricediscount'], $datakeyboard, $statuscustom, $back, null, "customsellvolume", $user['agent'], $queryParams));
+            Editmessagetext($from_id, $message_id, $textproduct, KeyboardProduct($marzban_list_get['name_panel'], $query, $user['pricediscount'], $datakeyboard, $statuscustom, $back, null, "customsellvolume", $user['agent'], $queryParams, true));
         }
     } else {
         $productCountStmt = $pdo->prepare("SELECT COUNT(*) FROM product WHERE (FIND_IN_SET(:location, Location) > 0 OR Location = '/all') AND (FIND_IN_SET(:agent, REPLACE(agent, ' ', '')) > 0 OR agent IN ('all', 'allusers'))");
@@ -1394,7 +1508,7 @@ https://t.me/$usernamebot?start={$user['codeInvitation']}";
         'category' => $categorynames,
         'panel' => $marzban_list_get['name_panel'],
     ]);
-    Editmessagetext($from_id, $message_id, $textproduct, KeyboardProduct($marzban_list_get['name_panel'], $query, $user['pricediscount'], $datakeyboard, $statuscustom, "backuser", null, "customsellvolume", $user['agent'], $queryParams));
+    Editmessagetext($from_id, $message_id, $textproduct, KeyboardProduct($marzban_list_get['name_panel'], $query, $user['pricediscount'], $datakeyboard, $statuscustom, "backuser", null, "customsellvolume", $user['agent'], $queryParams, true));
 } elseif (preg_match('/^productmonth_(\w+)/', $datain, $dataget)) {
     $monthenumber = $dataget[1];
     $userdate = json_decode($user['Processing_value'], true);
@@ -1433,7 +1547,7 @@ https://t.me/$usernamebot?start={$user['codeInvitation']}";
         $textproduct = faoxima_render_text($textbotlang['users']['sell']['Service-select-first-no-category'], [
             'panel' => $marzban_list_get['name_panel'],
         ]);
-        Editmessagetext($from_id, $message_id, $textproduct, KeyboardProduct($marzban_list_get['name_panel'], $query, $user['pricediscount'], $datakeyboard, $statuscustom, "backuser", null, "customsellvolume", $user['agent'], $queryParams));
+        Editmessagetext($from_id, $message_id, $textproduct, KeyboardProduct($marzban_list_get['name_panel'], $query, $user['pricediscount'], $datakeyboard, $statuscustom, "backuser", null, "customsellvolume", $user['agent'], $queryParams, true));
     }
 } elseif ($datain == "customsellvolume") {
     $userdate = json_decode($user['Processing_value'], true);
@@ -1815,11 +1929,8 @@ https://t.me/$usernamebot?start={$user['codeInvitation']}";
     $stmt->close();
     $fxBuyBasePrice = $parts[0] == "customvolume" ? fx_custom_base_price($marzban_list_get, $user['agent'], $parts[2], $parts[1]) : ($info_product['fx_base_price'] ?? $fxBuyListPrice);
     fx_store_invoice_snapshot($randomString, fx_pricing_snapshot($marzban_list_get, $fxBuyKinds, $fxBuyBasePrice, $priceproduct, (float) $fxBuyListPrice - (float) $priceproduct, ['product' => (string)($info_product['code_product'] ?? '')]));
-    if ($priceproduct > $user['Balance'] && $user['agent'] != "n2" && intval($priceproduct) != 0) {
+    if ($priceproduct > rx_ck_available_for_user($user) && $user['agent'] != "n2" && intval($priceproduct) != 0) {
         $marzbandirectpay = panel_feature_enabled($marzban_list_get, 'directbuy') ? "ondirectbuy" : "offdirectbuy";
-        $Balance_prim = $priceproduct - $user['Balance'];
-        if ($Balance_prim <= 1)
-            $Balance_prim = 0;
         if ($marzbandirectpay == "offdirectbuy") {
             $minbalance = number_format(json_decode(select("PaySetting", "*", "NamePay", "minbalance", "select")['ValuePay'], true)[$user['agent']]);
             $maxbalance = number_format(json_decode(select("PaySetting", "*", "NamePay", "maxbalance", "select")['ValuePay'], true)[$user['agent']]);
@@ -1833,13 +1944,16 @@ https://t.me/$usernamebot?start={$user['codeInvitation']}";
             Editmessagetext($from_id, $message_id, sprintf($textbotlang['users']['Balance']['insufficientbalance'], $minbalance, $maxbalance), $bakinfos, 'HTML');
             step('getprice', $from_id);
         } else {
-            update("user", "Processing_value", $Balance_prim, "id", $from_id);
-            sendmessage($from_id, $textbotlang['users']['sell']['None-credit'], $step_payment, 'HTML');
-            step('get_step_payment', $from_id);
-            update("user", "Processing_value_one", $username_ac, "id", $from_id);
-            update("user", "Processing_value_tow", "getconfigafterpay", "id", $from_id);
-            if ($datain == "confirmandgetserviceDiscount")
-                update("user", "Processing_value_four", "dis_{$partsdic[0]}", "id", $from_id);
+            rx_ck_bot_begin($user, [
+                'operation' => 'getconfigafterpay',
+                'op_key' => "getconfigafterpay|{$username_ac}",
+                'target' => $username_ac,
+                'final_price' => $priceproduct,
+                'message_id' => $message_id,
+                'one' => $username_ac,
+                'tow' => 'getconfigafterpay',
+                'four' => $datain == "confirmandgetserviceDiscount" ? "dis_{$partsdic[0]}" : '',
+            ]);
         }
         return;
     }
@@ -1945,16 +2059,18 @@ https://t.me/$usernamebot?start={$user['codeInvitation']}";
     sendmessage($from_id, $textbotlang['users']['selectoption'], $keyboard, 'HTML');
     if (intval($priceproduct) != 0) {
 
+        $rxBuyDeductRows = 0;
         if (($user['agent'] ?? '') === 'n2') {
             $stmtBuyDeduct = $pdo->prepare("UPDATE user SET Balance = Balance - :delta WHERE id = :uid");
+            $stmtBuyDeduct->bindValue(':delta', (int) $priceproduct, PDO::PARAM_INT);
+            $stmtBuyDeduct->bindValue(':uid', $from_id, PDO::PARAM_STR);
+            $stmtBuyDeduct->execute();
+            $rxBuyDeductRows = $stmtBuyDeduct->rowCount();
         } else {
-            $stmtBuyDeduct = $pdo->prepare("UPDATE user SET Balance = Balance - :delta WHERE id = :uid AND Balance >= :check_delta");
-            $stmtBuyDeduct->bindValue(':check_delta', (int) $priceproduct, PDO::PARAM_INT);
+            $rxBuyDeductCharge = balance_atomic_charge($from_id, (float) (int) $priceproduct, 0);
+            $rxBuyDeductRows = !empty($rxBuyDeductCharge['ok']) ? 1 : 0;
         }
-        $stmtBuyDeduct->bindValue(':delta', (int) $priceproduct, PDO::PARAM_INT);
-        $stmtBuyDeduct->bindValue(':uid', $from_id, PDO::PARAM_STR);
-        $stmtBuyDeduct->execute();
-        if ($stmtBuyDeduct->rowCount() === 0 && function_exists('rx_log_event')) {
+        if ($rxBuyDeductRows === 0 && function_exists('rx_log_event')) {
             rx_log_event('PURCHASE_DOUBLE_SPEND_OR_INSUFFICIENT', 'Atomic buy-deduct affected 0 rows after panel account already created', [
                 'from_id'   => $from_id,
                 'invoice'   => $randomString ?? null,
@@ -2246,7 +2362,7 @@ $textonebuy
         sendmessage($from_id, sprintf($rxMinBulkTpl, $PaySetting), null, 'HTML');
         return;
     }
-    $locationproduct = mysqli_query($connect, "SELECT * FROM marzban_panel");
+    $locationproduct = mysqli_query($connect, "SELECT * FROM marzban_panel ORDER BY (position = 0) ASC, position ASC, id ASC");
     if (mysqli_num_rows($locationproduct) == 0) {
         sendmessage($from_id, $textbotlang['Admin']['managepanel']['nullpanel'], null, 'HTML');
         return;
@@ -2303,7 +2419,7 @@ $textonebuy
     $textproduct = faoxima_render_text($textbotlang['users']['sell']['Service-select-no-category'], [
         'panel' => $marzban_list_get['name_panel'],
     ]);
-    Editmessagetext($from_id, $message_id, $textproduct, KeyboardProduct($marzban_list_get['name_panel'], $query, $user['pricediscount'], $datakeyboard, $statuscustom, "backuser", null, "customsellvolumeom", $user['agent'], $productCountParams));
+    Editmessagetext($from_id, $message_id, $textproduct, KeyboardProduct($marzban_list_get['name_panel'], $query, $user['pricediscount'], $datakeyboard, $statuscustom, "backuser", null, "customsellvolumeom", $user['agent'], $productCountParams, true));
 } elseif ($datain == "customsellvolumeom") {
     $marzban_list_get = select("marzban_panel", "*", "name_panel", $user['Processing_value'], "select");
     $eextraprice = json_decode($marzban_list_get['pricecustomvolume'], true);
@@ -3304,30 +3420,41 @@ $textonebuy
     step('get_step_payment', $from_id);
 } elseif ($user['step'] == "get_step_payment") {
     if (isset($update['message']) && empty($datain)) { return; }
+    if (!preg_match('/^sbv(resume|cancel)_\w+$/', (string) $datain) && !rx_ck_bot_payment_guard($user, $message_id)) { return; }
     $__chargeBonus = function_exists('nm_pending_charge_bonus') ? nm_pending_charge_bonus($user) : 0;
     if ($datain == "cart_to_offline") {
         $from_id_sql = (string) $from_id;
 
         $_cc_keep_invoice = "{$user['Processing_value_tow']}|{$user['Processing_value_one']}";
-        $stale_cutoff = date('Y/m/d H:i:s', time() - 15 * 60);
-        rxCancelAbandonedCardPaymentsForUser($from_id_sql, 'stale_unpaid', [
-            'methods' => ['cart to cart'],
-            'created_before' => $stale_cutoff,
-            'preserve_invoice_key' => $_cc_keep_invoice,
-        ]);
-        rxCancelAbandonedCardPaymentsForUser($from_id_sql, 'superseded', [
-            'methods' => ['cart to cart'],
-            'preserve_invoice_key' => $_cc_keep_invoice,
-        ]);
+        $_sbv_reuse = function_exists('rx_sbv_find_reusable') ? rx_sbv_find_reusable($from_id_sql, $_cc_keep_invoice, $user['Processing_value']) : null;
+        if ($_sbv_reuse === null && function_exists('rx_sbv_active_payment')) {
+            $_sbv_active = rx_sbv_active_payment($from_id_sql);
+            if ($_sbv_active !== null) {
+                rx_sbv_bot_pending_notice($from_id, $message_id, $_sbv_active);
+                return;
+            }
+        }
+        if ($_sbv_reuse === null) {
+            $stale_cutoff = date('Y/m/d H:i:s', time() - 15 * 60);
+            rxCancelAbandonedCardPaymentsForUser($from_id_sql, 'stale_unpaid', [
+                'methods' => ['cart to cart'],
+                'created_before' => $stale_cutoff,
+                'preserve_invoice_key' => $_cc_keep_invoice,
+            ]);
+            rxCancelAbandonedCardPaymentsForUser($from_id_sql, 'superseded', [
+                'methods' => ['cart to cart'],
+                'preserve_invoice_key' => $_cc_keep_invoice,
+            ]);
 
-        $_stmt = $connect->prepare("SELECT id FROM Payment_report WHERE id_user = ? AND (payment_Status = 'Unpaid' OR payment_Status = 'waiting' OR payment_Status = 'pending') AND Payment_Method = 'cart to cart' LIMIT 1");
-        $_stmt->bind_param("s", $from_id_sql);
-        $_stmt->execute();
-        $checkpay = $_stmt->get_result();
-        $_stmt->close();
-        if (mysqli_num_rows($checkpay) != 0) {
-            sendmessage($from_id, $textbotlang['Admin']['SettingPayment']['issetpay'], null, 'HTML');
-            return;
+            $_stmt = $connect->prepare("SELECT id FROM Payment_report WHERE id_user = ? AND (payment_Status = 'Unpaid' OR payment_Status = 'waiting' OR payment_Status = 'pending') AND Payment_Method = 'cart to cart' LIMIT 1");
+            $_stmt->bind_param("s", $from_id_sql);
+            $_stmt->execute();
+            $checkpay = $_stmt->get_result();
+            $_stmt->close();
+            if (mysqli_num_rows($checkpay) != 0) {
+                sendmessage($from_id, $textbotlang['Admin']['SettingPayment']['issetpay'], null, 'HTML');
+                return;
+            }
         }
         $mainbalance = select("PaySetting", "ValuePay", "NamePay", "minbalancecart", "select")['ValuePay'];
         $maxbalance = select("PaySetting", "ValuePay", "NamePay", "maxbalancecart", "select")['ValuePay'];
@@ -3387,8 +3514,30 @@ $textonebuy
 
         $card_number = $card_info['cardnumber'];
         $PaySettingname = $card_info['namecard'];
-        $valueprice = number_format($user['Processing_value']);
-        $price_copy = intval($user['Processing_value'] . "0");
+        $_sbv_new = false;
+        if ($_sbv_reuse !== null) {
+            $randomString = (string) $_sbv_reuse['id_order'];
+        } else {
+            $randomString = bin2hex(random_bytes(5));
+            if (function_exists('rx_sbv_enabled') && rx_sbv_enabled()) {
+                $_sbv_prep = rx_sbv_prepare($randomString, $from_id_sql, $user['Processing_value']);
+                if (empty($_sbv_prep['ok']) && ($_sbv_prep['reason'] ?? '') === 'active_exists') {
+                    rx_sbv_bot_pending_notice($from_id, 0, $_sbv_prep['active']);
+                    return;
+                }
+                if (empty($_sbv_prep['ok'])) {
+                    $_sbv_err =($_sbv_prep['reason'] ?? '') === 'exhausted'
+                        ? "❌ در حال حاضر امکان ساخت مبلغ یکتا برای این مبلغ وجود ندارد. لطفاً چند دقیقه دیگر دوباره تلاش کنید یا روش پرداخت دیگری انتخاب کنید."
+                        : faoxima_textbot_get('dyn_errors_purchase_or_payment_restart', '❌ خطایی رخ داده است لطفا مراحل خرید یا پرداخت  را مجدد انجام دهید');
+                    sendmessage($from_id, $_sbv_err, $keyboard, 'HTML');
+                    return;
+                }
+                $_sbv_new = true;
+            }
+        }
+        $_sbv_bot = (function_exists('rx_sbv_bot_payment_view') && ($_sbv_new || $_sbv_reuse !== null)) ? rx_sbv_bot_payment_view($randomString) : null;
+        $valueprice = $_sbv_bot !== null ? $_sbv_bot['valueprice'] : number_format($user['Processing_value']);
+        $price_copy = $_sbv_bot !== null ? $_sbv_bot['price_copy'] : intval($user['Processing_value'] . "0");
 
         if ($_cmode == 'direct' && $_card2) {
             $textcart = "💳 <b>کارت اول</b>\n🔢 <code>{$card_number}</code>\n👤 {$PaySettingname}\n\n💳 <b>کارت دوم</b>\n🔢 <code>{$_card2['cardnumber']}</code>\n👤 {$_card2['namecard']}\n\n💰 مبلغ: {$valueprice} تومان";
@@ -3396,25 +3545,34 @@ $textonebuy
             $replacements = ['{price}' => $valueprice, '{card_number}' => $card_number, '{name_card}' => $PaySettingname];
             $textcart = strtr($datatextbot['text_cart'], $replacements);
         }
+        if ($_sbv_bot !== null) {
+            $textcart .= $_sbv_bot['block'];
+        }
         $invoice = "{$user['Processing_value_tow']}|{$user['Processing_value_one']}";
         $dateacc = date('Y/m/d H:i:s');
-        $randomString = bin2hex(random_bytes(5));
         $payment_Status = "Unpaid";
         $Payment_Method = "cart to cart";
         $_cc_insert_ok = false;
-        try {
-            $stmt = $connect->prepare("INSERT INTO Payment_report (id_user,id_order,time,price,payment_Status,Payment_Method,id_invoice) VALUES (?,?,?,?,?,?,?)");
-            if ($stmt) {
-                $stmt->bind_param("sssssss", $from_id, $randomString, $dateacc, $user['Processing_value'], $payment_Status, $Payment_Method, $invoice);
-                $_cc_insert_ok = $stmt->execute() && $stmt->affected_rows === 1;
-                $_cc_insert_err = $stmt->error;
-                $stmt->close();
-            } else {
-                $_cc_insert_err = $connect->error;
+        if ($_sbv_reuse !== null) {
+            $_cc_insert_ok = true;
+        } else {
+            try {
+                $stmt = $connect->prepare("INSERT INTO Payment_report (id_user,id_order,time,price,payment_Status,Payment_Method,id_invoice) VALUES (?,?,?,?,?,?,?)");
+                if ($stmt) {
+                    $stmt->bind_param("sssssss", $from_id, $randomString, $dateacc, $user['Processing_value'], $payment_Status, $Payment_Method, $invoice);
+                    $_cc_insert_ok = $stmt->execute() && $stmt->affected_rows === 1;
+                    $_cc_insert_err = $stmt->error;
+                    $stmt->close();
+                } else {
+                    $_cc_insert_err = $connect->error;
+                }
+            } catch (Throwable $_cc_insert_e) {
+                $_cc_insert_ok = false;
+                $_cc_insert_err = $_cc_insert_e->getMessage();
             }
-        } catch (Throwable $_cc_insert_e) {
-            $_cc_insert_ok = false;
-            $_cc_insert_err = $_cc_insert_e->getMessage();
+        }
+        if (!$_cc_insert_ok && $_sbv_new) {
+            rx_sbv_abandon($randomString);
         }
         if (!$_cc_insert_ok) {
             if (function_exists('rx_log_event')) {
@@ -3462,33 +3620,43 @@ $textonebuy
                     $_vc_keyboard_rows[] = [rx_kb_style(['text' => "💳 **** **** **** {$_vc_last4}", 'callback_data' => "cv_use_{$_vc_last4}"], 'cv_use', $_prcpt_s)];
                 }
                 $_vc_keyboard_rows[] = [rx_kb_style(['text' => "📷 پرداخت با کارت جدید", 'callback_data' => "cv_new"], 'cv_new', $_prcpt_s)];
+                $_sbv_cancel_row = ($_sbv_bot !== null && function_exists('rx_sbv_cancel_row')) ? rx_sbv_cancel_row((string) $randomString) : null;
+                if ($_sbv_cancel_row !== null) {
+                    $_vc_keyboard_rows[] = $_sbv_cancel_row;
+                }
                 $_vc_kb = json_encode(['inline_keyboard' => $_vc_keyboard_rows]);
                 step('card_select_step', $from_id);
                 sendmessage($from_id, $datatextbot['dyn_wallet_select_verified_card'] ?? "💳 کارت‌های تاییدشده شما:\n\nیکی از کارت‌های زیر را انتخاب کنید یا با کارت جدید پرداخت کنید:", $_vc_kb, 'HTML');
             } else {
                 step('card_photo_step', $from_id);
-                sendmessage($from_id, $datatextbot['dyn_wallet_card_auth_active_notice'] ?? "⚠️ احراز هویت کارت به کارت فعال است\n\n📸 لطفا تصویر کارت فیزیکی خود را که قصد واریز با آن را دارید، ارسال کنید.\n\n🔘 نکته مهم: برای تایید تراکنش، الزامی است که ۴ رقم آخر شماره کارت و نام شما در تصویر کاملاً واضح و خوانا باشد. (سایر اطلاعات را می‌توانید بپوشانید).", $backuser, 'HTML');
+                sendmessage($from_id, $datatextbot['dyn_wallet_card_auth_active_notice'] ?? "⚠️ احراز هویت کارت به کارت فعال است\n\n📸 لطفا تصویر کارت فیزیکی خود را که قصد واریز با آن را دارید، ارسال کنید.\n\n🔘 نکته مهم: برای تایید تراکنش، الزامی است که ۴ رقم آخر شماره کارت و نام شما در تصویر کاملاً واضح و خوانا باشد. (سایر اطلاعات را می‌توانید بپوشانید).", ($_sbv_bot !== null && function_exists('rx_sbv_cancel_keyboard') && rx_sbv_cancel_keyboard((string) $randomString) !== null) ? rx_sbv_cancel_keyboard((string) $randomString) : $backuser, 'HTML');
             }
             return;
         }
 
         deletemessage($from_id, $message_id);
         $_prcpt_s = (isset($_rx_payrcpt_styles) && is_array($_rx_payrcpt_styles)) ? $_rx_payrcpt_styles : [];
-        if ($setting['statuscopycart'] == "1") {
-            $_kb_rows = [[
-                ['text' => "کپی کارت اول", 'copy_text' => ["text" => $card_number], '_rxck' => 'card_num'],
-                ['text' => "کپی مبلغ", 'copy_text' => ["text" => $price_copy], '_rxck' => 'card_amount']
-            ]];
-            if (isset($_cmode) && $_cmode == 'direct' && !empty($_card2['cardnumber'])) {
+        $_sbv_receipt_label = $_sbv_bot !== null ? $_sbv_bot['receipt_label'] : "✅ پرداخت کردم | ارسال رسید.";
+        if ($setting['statuscopycart'] == "1" || $_sbv_bot !== null) {
+            $_kb_rows = [[]];
+            if ($setting['statuscopycart'] == "1") {
+                $_kb_rows[0][] = ['text' => "کپی کارت اول", 'copy_text' => ["text" => $card_number], '_rxck' => 'card_num'];
+            }
+            $_kb_rows[0][] = ['text' => $_sbv_bot !== null ? $_sbv_bot['copy_label'] : "کپی مبلغ", 'copy_text' => ["text" => (string) $price_copy], '_rxck' => 'card_amount'];
+            if ($setting['statuscopycart'] == "1" && isset($_cmode) && $_cmode == 'direct' && !empty($_card2['cardnumber'])) {
                 $_kb_rows[] = [['text' => "کپی کارت دوم", 'copy_text' => ["text" => $_card2['cardnumber']], '_rxck' => 'card_num_2']];
             }
-            $_kb_rows[] = [rx_kb_style(['text' => "✅ پرداخت کردم | ارسال رسید.", 'callback_data' => "sendresidcart-" . $randomString], 'pay_sendreceipt', $_prcpt_s)];
+            $_kb_rows[] = [rx_kb_style(['text' => $_sbv_receipt_label, 'callback_data' => "sendresidcart-" . $randomString], 'pay_sendreceipt', $_prcpt_s)];
+            $_sbv_cancel_row = ($_sbv_bot !== null && function_exists('rx_sbv_cancel_row')) ? rx_sbv_cancel_row((string) $randomString) : null;
+            if ($_sbv_cancel_row !== null) {
+                $_kb_rows[] = $_sbv_cancel_row;
+            }
             $sendresidcart = json_encode(['inline_keyboard' => $_kb_rows]);
         } else {
             $sendresidcart = json_encode([
                 'inline_keyboard' => [
                     [
-                        rx_kb_style(['text' => "✅ پرداخت کردم | ارسال رسید.", 'callback_data' => "sendresidcart-" . $randomString], 'pay_sendreceipt', $_prcpt_s)
+                        rx_kb_style(['text' => $_sbv_receipt_label, 'callback_data' => "sendresidcart-" . $randomString], 'pay_sendreceipt', $_prcpt_s)
                     ]
                 ]
             ]);
@@ -3924,6 +4092,9 @@ $textonebuy
             return;
         }
         update("Payment_report", "dec_not_confirmed", $paymentToken, "id_order", $randomString);
+        if (function_exists('tronadoV2Store')) {
+            tronadoV2Store($randomString, $payment);
+        }
         $paymentFullUrl = trim((string) ($payment['FullPaymentUrl'] ?? ''));
         if ($paymentFullUrl === '') {
             $paymentFullUrl = "https://t.me/tronado_robot/customerpayment?startapp={$paymentToken}";
@@ -3971,6 +4142,10 @@ $textonebuy
         }
         $rxPendingGw = findPendingGatewayInvoice($from_id, 'tonpay');
         if ($rxPendingGw !== null) {
+            if (tonpayCustomFetchReport($rxPendingGw['id_order']) !== null) {
+                tonpayCustomBotSend($from_id, $rxPendingGw['id_order']);
+                return;
+            }
             rx_send_pending_gateway_invoice_notice($from_id, $message_id, $rxPendingGw, 'tonpay');
             return;
         }
@@ -3984,7 +4159,10 @@ $textonebuy
         $Payment_Method = "tonpay";
         $stmt->bind_param("sssssss", $from_id, $randomString, $dateacc, $user['Processing_value'], $payment_Status, $Payment_Method, $invoice);
         $stmt->execute();
-        $payment = tonpayCreateInvoice($randomString, (int) $user['Processing_value'], (int) $from_id);
+        $tonpayCustomMode = tonpayPaymentMode() === 'custom';
+        $payment = $tonpayCustomMode
+            ? tonpayCustomCreateInvoice($randomString, (int) $user['Processing_value'], (int) $from_id)
+            : tonpayCreateInvoice($randomString, (int) $user['Processing_value'], (int) $from_id);
 
         $paymentErrorData = null;
         if (!is_array($payment)) {
@@ -4026,6 +4204,16 @@ $textonebuy
             return;
         }
 
+        if ($tonpayCustomMode) {
+            if (!tonpayCustomStoreInvoice($randomString, $payment)) {
+                update("Payment_report", "payment_Status", "reject", "id_order", $randomString);
+                sendmessage($from_id, $textbotlang['users']['Balance']['errorLinkPayment'], $keyboard, 'HTML');
+                step('home', $from_id);
+                return;
+            }
+            tonpayCustomBotSend($from_id, $randomString);
+            return;
+        }
         $invoiceId = trim((string) ($payment['invoice_id'] ?? ''));
         $invoiceUrl = trim((string) ($payment['invoice_url'] ?? ''));
         if ($invoiceId === '' || $invoiceUrl === '') {
@@ -4223,6 +4411,10 @@ $textonebuy
         }
         $rxPendingGw = findPendingGatewayInvoice($from_id, 'atlaspay');
         if ($rxPendingGw !== null) {
+            if (atlaspayCustomFetchReport($rxPendingGw['id_order']) !== null) {
+                atlaspayCustomBotSend($from_id, $rxPendingGw['id_order']);
+                return;
+            }
             rx_send_pending_gateway_invoice_notice($from_id, $message_id, $rxPendingGw, 'atlaspay');
             return;
         }
@@ -4236,7 +4428,10 @@ $textonebuy
         $Payment_Method = "atlaspay";
         $stmt->bind_param("sssssss", $from_id, $randomString, $dateacc, $user['Processing_value'], $payment_Status, $Payment_Method, $invoice);
         $stmt->execute();
-        $payment = atlaspayCreateOrder($randomString, (int) $user['Processing_value']);
+        $atlaspayCustomMode = atlaspayPaymentMode() === 'custom';
+        $payment = $atlaspayCustomMode
+            ? atlaspayCustomCreateOrder($randomString, (int) $user['Processing_value'], (int) $from_id)
+            : atlaspayCreateOrder($randomString, (int) $user['Processing_value']);
 
         $paymentErrorData = null;
         if (!is_array($payment)) {
@@ -4305,11 +4500,23 @@ $textonebuy
             }
             return;
         }
+        if ($atlaspayCustomMode) {
+            if (!atlaspayCustomStoreOrder($randomString, $payment)) {
+                atlaspayCancelOrder($atlaspayOrderId);
+                update("Payment_report", "payment_Status", "reject", "id_order", $randomString);
+                sendmessage($from_id, $textbotlang['users']['Balance']['errorLinkPayment'], $keyboard, 'HTML');
+                step('home', $from_id);
+                return;
+            }
+            atlaspayCustomBotSend($from_id, $randomString);
+            return;
+        }
         $totalAmountToman = isset($payment['totalAmountToman']) ? (int) $payment['totalAmountToman'] : (int) $user['Processing_value'];
         update("Payment_report", "atlaspay_order_id", $atlaspayOrderId, "id_order", $randomString);
         update("Payment_report", "atlaspay_tracking_code", $trackingCode, "id_order", $randomString);
         update("Payment_report", "atlaspay_payment_url", $paymentUrl, "id_order", $randomString);
-        update("Payment_report", "price", $totalAmountToman, "id_order", $randomString);
+        update("Payment_report", "atlaspay_total_amount", $totalAmountToman, "id_order", $randomString);
+        rxPaymentV2Mark($randomString, ['atlaspay_created_at' => time()]);
         $paymentkeyboard = json_encode([
             'inline_keyboard' => [
                 [
@@ -5021,6 +5228,9 @@ $textonebuy
         $Payment_Method = "Star Telegram";
         $stmt->bind_param("sssssss", $from_id, $randomString, $dateacc, $user['Processing_value'], $payment_Status, $Payment_Method, $invoice);
         $stmt->execute();
+        if (function_exists('rxPaymentV2Mark')) {
+            rxPaymentV2Mark($randomString, ['stars_amount' => $starAmount]);
+        }
         $affilnecurrency = select("PaySetting", "*", "NamePay", "walletaddress", "select")['ValuePay'];
         $invoiceParams = [
             'title' => "Buy for Price {$user['Processing_value']}",

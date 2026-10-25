@@ -33,7 +33,7 @@ function nmSellableCategoryRows($location, $agent)
     if (!$prodSet) return $out;
     // 2) Keep the category rows whose remark/id/name/title matches a product token.
     try {
-        $stmt = $pdo->query("SELECT * FROM category ORDER BY id ASC");
+        $stmt = $pdo->query("SELECT * FROM category ORDER BY (position = 0) ASC, position ASC, id ASC");
         while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
             foreach (['remark', 'id', 'name', 'title'] as $k) {
                 if (!isset($row[$k]) || trim((string)$row[$k]) === '') continue;

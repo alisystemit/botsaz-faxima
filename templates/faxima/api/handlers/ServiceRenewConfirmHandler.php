@@ -67,6 +67,30 @@ final class ServiceRenewConfirmHandler extends BaseHandler
             $product = $row;
         }
 
+        $reservation = null;
+        if (!$nationalPanel) {
+            $managePanelCheck = new ManagePanel();
+            $snapshotCheck = rx_pf_panel_snapshot($managePanelCheck, (string)$panel['name_panel'], (string)$invoice['username'], (string)($panel['type'] ?? ''));
+            if (rxReservationUiEnabled($panel)) {
+                $usableSnapshot = !empty($snapshotCheck['ok']) && !empty($snapshotCheck['exists']) ? $snapshotCheck : null;
+                $reservation = rxReservationPanelSelection($panel);
+                $selectionCheck = rxReservationNormalizeSelection($reservation, $usableSnapshot, time());
+                if (empty($selectionCheck['ok'])) {
+                    rx_renewal_log('api_confirm_selection', (string)$selectionCheck['reason'], ['panel' => $panel, 'username' => (string)$invoice['username'], 'invoice_id' => (string)$invoice['id_invoice'], 'invoice_status' => $invoice['Status'] ?? null, 'method' => (string)($panel['Methodextend'] ?? ''), 'volume_gb' => $product['Volume_constraint'] ?? null, 'days' => $product['Service_time'] ?? null, 'snapshot' => $snapshotCheck, 'detail' => $selectionCheck['detail'] ?? null, 'mutation' => 'none']);
+                    FaoximaResponse::fail(422, rxRenewalReasonText((string)$selectionCheck['reason'], $selectionCheck));
+                }
+            }
+            $previewCheck = rxRenewalPreviewForService($managePanelCheck, $panel, (string)$invoice['username'], $product['Volume_constraint'] ?? 0, $product['Service_time'] ?? 0, [
+                'reservation' => $reservation,
+                'snapshot' => $snapshotCheck,
+                'id_invoice' => (string)$invoice['id_invoice'],
+                'stage' => 'api_confirm',
+            ]);
+            if (!empty($previewCheck['blocked'])) {
+                FaoximaResponse::fail(409, (string)($previewCheck['text'] ?? rxRenewalText('reason_generic')));
+            }
+        }
+
         $fxKinds = !empty($custom) ? ['custom_volume', 'custom_time'] : 'product';
         $fxBasePrice = !empty($custom)
             ? fx_custom_base_price($panel, $agent, $product['Volume_constraint'] ?? 0, $product['Service_time'] ?? 0)
@@ -133,7 +157,8 @@ final class ServiceRenewConfirmHandler extends BaseHandler
         }
 
 
-        $shortfall = $finalPrice - $balance;
+        $walletState = function_exists('rx_wallet_available') ? rx_wallet_available($this->user['id']) : ['balance' => (int) $balance, 'available' => (int) $balance];
+        $shortfall = $finalPrice - (float) $walletState['available'];
         if ($shortfall > 0 && $agent !== 'n2') {
             $directBuyEnabled = panel_feature_enabled($panel, 'directbuy');
             if (!$directBuyEnabled) {
@@ -142,11 +167,9 @@ final class ServiceRenewConfirmHandler extends BaseHandler
 
 
             $orderId = bin2hex(random_bytes(4));
-            $amountDue = (int) ceil($shortfall);
-            if ($amountDue <= 1) $amountDue = 0;
 
             $idOrder = bin2hex(random_bytes(2));
-            $soCode = ((string)$product['code_product'] === 'customvolume') ? 'custom_volume' : (string)$product['code_product'];
+            $soCode = rxRenewalNormalizeProductCode((string)$product['code_product']);
 
             $oldDataLimit = '';
             $oldExpire = '';
@@ -167,6 +190,7 @@ final class ServiceRenewConfirmHandler extends BaseHandler
                 'oldtime'      => $oldExpire,
                 'code_product' => $soCode,
                 'id_order'     => $idOrder,
+                'reservation'  => $reservation,
             ], JSON_UNESCAPED_UNICODE);
             $soValue = fx_value_with_snapshot($soValue, $fxSnapshot);
 
@@ -188,13 +212,16 @@ final class ServiceRenewConfirmHandler extends BaseHandler
                 FaoximaResponse::fail(500, faoxima_textbot_get('dyn_renewconfirm_request_save_failed', '❌ خطا در ثبت درخواست تمدید. لطفاً دوباره تلاش کنید.'));
             }
 
+            $opened = $this->openCheckout('getextenduser', 'getextenduser|' . $invoice['username'] . '%' . $idOrder, (string) $invoice['username'], (int) $finalPrice, ['id_order' => $idOrder]);
+            $amountDue = (int) $opened['checkout']['external_amount'];
+
             update('user', 'Processing_value',      $amountDue,                                'id', $this->user['id']);
             update('user', 'Processing_value_one',  $invoice['username'] . '%' . $idOrder,     'id', $this->user['id']);
             update('user', 'Processing_value_tow',  'getextenduser',                           'id', $this->user['id']);
             update('user', 'Processing_value_four', '',                                        'id', $this->user['id']);
 
 
-            FaoximaResponse::ok([
+            FaoximaResponse::ok(array_merge($this->checkoutResponseFields($opened), [
                 'kind'        => 'requires_payment',
                 'amount_due'  => $amountDue,
                 'balance'     => $balance,
@@ -209,7 +236,7 @@ final class ServiceRenewConfirmHandler extends BaseHandler
                     'price'       => $finalPrice,
                 ],
                 'message'     => faoxima_textbot_get('dyn_renewconfirm_insufficient_balance_pay_shortfall', 'موجودی کیف پول کافی نیست. لطفاً مبلغ کسری را پرداخت کنید.'),
-            ]);
+            ]));
             return;
         }
 
@@ -352,6 +379,7 @@ final class ServiceRenewConfirmHandler extends BaseHandler
 
 
         $managePanel = new ManagePanel();
+        $renewRef = 'miniapp:' . $this->user['id'] . ':' . bin2hex(random_bytes(4));
 
 
         try {
@@ -361,7 +389,15 @@ final class ServiceRenewConfirmHandler extends BaseHandler
                 (int)$product['Service_time'],
                 (string)$invoice['username'],
                 (string)$product['code_product'],
-                (string)$panel['code_panel']
+                (string)$panel['code_panel'],
+                null,
+                [
+                    'source'      => 'miniapp',
+                    'ref'         => $renewRef,
+                    'id_user'     => $this->user['id'],
+                    'price'       => $finalPrice,
+                    'reservation' => array_merge(is_array($reservation) ? $reservation : [], ['payment_ref' => $renewRef]),
+                ]
             );
         } catch (Throwable $e) {
             FaoximaLogger::exception($e, 'ManagePanel->extend threw at renew', [
@@ -381,7 +417,8 @@ final class ServiceRenewConfirmHandler extends BaseHandler
         }
 
 
-        if (!is_array($extend) || ($extend['status'] ?? null) === false) {
+        $renewPending = rxRenewalIsPending($extend);
+        if (!is_array($extend) || (($extend['status'] ?? null) === false && !$renewPending)) {
             $reason = is_array($extend) ? rx_panel_error_text($extend['msg'] ?? $extend, $extend['detail'] ?? null) : htmlspecialchars((string)$extend, ENT_QUOTES, 'UTF-8');
             FaoximaLogger::error('ManagePanel->extend failed', [
                 'user_id'  => $this->user['id'],
@@ -415,6 +452,10 @@ final class ServiceRenewConfirmHandler extends BaseHandler
                 FaoximaResponse::fail(409, faoxima_textbot_get('dyn_renewconfirm_queued_renewal_exists', '❌ یک رزرو اشتراک برای این سرویس در انتظار فعال‌سازی است. مبلغی از حساب شما کسر نشد.'));
             }
 
+            if (rxRenewalFailureKnown($extend)) {
+                FaoximaResponse::fail(409, rxRenewalFailureText($extend));
+            }
+
             FaoximaResponse::fail(502, faoxima_textbot_get('dyn_renewconfirm_extend_error', '❌ خطایی در تمدید سرویس رخ داده با پشتیبانی در ارتباط باشید'));
         }
 
@@ -427,21 +468,22 @@ final class ServiceRenewConfirmHandler extends BaseHandler
             $orderRand = bin2hex(random_bytes(2));
             $oldDataLimit = '';
             $oldExpire = '';
-            try {
-                $remote = $managePanel->DataUser($invoice['Service_location'], $invoice['username']);
-                if (is_array($remote)) {
-                    $oldDataLimit = (string)($remote['data_limit'] ?? '');
-                    $oldExpire    = (string)($remote['expire'] ?? '');
-                }
-            } catch (Throwable $e) {  }
+            if (is_array($extend['rx_renewal']['before'] ?? null)) {
+                $oldDataLimit = (string)($extend['rx_renewal']['before']['data_limit'] ?? '');
+                $oldExpire    = (string)($extend['rx_renewal']['before']['expire'] ?? '');
+            } elseif (is_array($snapshotCheck ?? null) && !empty($snapshotCheck['ok']) && !empty($snapshotCheck['exists'])) {
+                $oldDataLimit = (string)($snapshotCheck['data_limit'] ?? '');
+                $oldExpire    = (string)($snapshotCheck['expire'] ?? '');
+            }
 
             $value = json_encode([
                 'volumebuy'    => (int)$product['Volume_constraint'],
                 'Service_time' => (int)$product['Service_time'],
                 'oldvolume'    => $oldDataLimit,
                 'oldtime'      => $oldExpire,
-                'code_product' => (string)$product['code_product'],
+                'code_product' => rxRenewalNormalizeProductCode((string)$product['code_product']),
                 'id_order'     => $orderRand,
+                'reservation'  => $reservation,
             ], JSON_UNESCAPED_UNICODE);
             $value = fx_value_with_snapshot($value, $fxSnapshot);
 
@@ -464,7 +506,10 @@ final class ServiceRenewConfirmHandler extends BaseHandler
         }
 
 
-        update('invoice', 'Status', 'active', 'id_invoice', $invoice['id_invoice']);
+        $renewApplied = !$renewPending && empty($extend['queued']);
+        if ($renewApplied && (string)($invoice['Status'] ?? '') !== 'disablebyadmin') {
+            update('invoice', 'Status', 'active', 'id_invoice', $invoice['id_invoice']);
+        }
 
         MiniDiscount::logSale([
             'id_user' => $this->user['id'],
@@ -482,7 +527,7 @@ final class ServiceRenewConfirmHandler extends BaseHandler
             update('invoice', 'price_before_discount', (string)$discPriceBefore, 'id_invoice', $invoice['id_invoice']);
         }
 
-        if (($panel['type'] ?? '') === 'Manualsale') {
+        if ($renewApplied && ($panel['type'] ?? '') === 'Manualsale') {
             update('invoice', 'name_product',  $product['name_product'],      'id_invoice', $invoice['id_invoice']);
             update('invoice', 'price_product', $product['price_product'],     'id_invoice', $invoice['id_invoice']);
             update('invoice', 'Volume',        $product['Volume_constraint'], 'id_invoice', $invoice['id_invoice']);
@@ -491,9 +536,11 @@ final class ServiceRenewConfirmHandler extends BaseHandler
         }
 
 
-        if (($invoice['name_product'] ?? '') === 'سرویس تست') {
+        if ($renewApplied && ($invoice['name_product'] ?? '') === 'سرویس تست') {
             update('invoice', 'name_product',  $product['name_product'],  'id_invoice', $invoice['id_invoice']);
             update('invoice', 'price_product', $product['price_product'], 'id_invoice', $invoice['id_invoice']);
+        } elseif ($renewApplied && rxRenewalNormalizeProductCode((string)($product['code_product'] ?? '')) !== 'custom_volume' && rxRenewalIsAppliedVerified($extend)) {
+            rxRenewalSyncInvoiceName($invoice['id_invoice'] ?? '', $product['name_product'] ?? '');
         }
 
 
@@ -530,12 +577,17 @@ final class ServiceRenewConfirmHandler extends BaseHandler
         ]);
 
 
-        $renewMessage = !empty($extend['queued'])
-            ? faoxima_textbot_get('dyn_renewconfirm_queued_success', '✅ سرویس خریداری شده رزرو شد و به محض پایان سرویس فعلی فعال می‌گردد.')
-            : rxRenewalDecorateSuccess(faoxima_textbot_get('dyn_renewconfirm_success', '✅ سرویس شما با موفقیت تمدید شد.'), $extend, (string)$invoice['username'], (string)($panel['name_panel'] ?? ''));
+        if (!empty($extend['queued'])) {
+            $renewMessage = (string)($extend['reservation']['confirmation'] ?? rxRenewalText('reservation_confirmed'));
+        } else {
+            $renewMessage = rxRenewalDecorateSuccess(faoxima_textbot_get('dyn_renewconfirm_success', '✅ سرویس شما با موفقیت تمدید شد.'), $extend, (string)$invoice['username'], (string)($panel['name_panel'] ?? ''));
+        }
 
         FaoximaResponse::ok([
             'kind'          => 'done',
+            'state'         => $renewPending ? 'pending_verification' : (!empty($extend['queued']) ? 'reserved' : 'applied'),
+            'operation_id'  => $extend['operation_id'] ?? null,
+            'reservation'   => $extend['reservation'] ?? null,
             'message'       => $renewMessage,
             'cashback'      => $cashback,
             'balance_after' => $newBalance,

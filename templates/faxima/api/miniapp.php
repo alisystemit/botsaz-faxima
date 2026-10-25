@@ -110,6 +110,12 @@ try {
         'payment_init'           => 'PaymentInitHandler',
         'payment_receipt'        => 'PaymentReceiptHandler',
         'payment_status'         => 'PaymentStatusHandler',
+        'tonpay_custom_view'     => ['class' => 'TonpayCustomHandler', 'mode' => 'view'],
+        'tonpay_custom_change_card' => ['class' => 'TonpayCustomHandler', 'mode' => 'change_card'],
+        'tonpay_custom_cancel'   => ['class' => 'TonpayCustomHandler', 'mode' => 'cancel'],
+        'tonpay_custom_receipt'  => ['class' => 'TonpayCustomHandler', 'mode' => 'receipt'],
+        'atlaspay_custom_view'   => ['class' => 'AtlaspayCustomHandler', 'mode' => 'view'],
+        'atlaspay_custom_cancel' => ['class' => 'AtlaspayCustomHandler', 'mode' => 'cancel'],
         'payment_reset'          => 'PaymentResetHandler',
         'crypto_currencies'      => 'CryptoCurrenciesHandler',
         'crypto_invoice_init'    => 'CryptoInvoiceInitHandler',
@@ -154,6 +160,9 @@ try {
         'test_account_info'      => ['class' => 'TestAccountHandler', 'mode' => 'info'],
         'test_account_create'    => ['class' => 'TestAccountHandler', 'mode' => 'create'],
         'service_locations'      => 'ServiceLocationsHandler',
+        'checkout_confirm'       => ['class' => 'CheckoutHandler', 'mode' => 'confirm'],
+        'checkout_cancel'        => ['class' => 'CheckoutHandler', 'mode' => 'cancel'],
+        'checkout_preview'       => ['class' => 'CheckoutHandler', 'mode' => 'preview'],
     ];
 
     $payload = FaoximaInput::payload();

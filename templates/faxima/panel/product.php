@@ -3,12 +3,15 @@ ini_set('session.cookie_samesite', 'Lax');
 ini_set('session.cookie_httponly', '1');
 session_start();
 require_once __DIR__ . '/../config.php';
+if (!@include_once __DIR__ . '/lib/ad_boot.php') { http_response_code(503); header('Retry-After: 3600'); exit; }
 require_once __DIR__ . '/lib/icons.php';
 require_once __DIR__ . '/lib/pagination.php';
 require_once __DIR__ . '/lib/bulk_delete.php';
 require_once __DIR__ . '/lib/search_filter.php';
 require_once __DIR__ . '/lib/compact_badges.php';
 require_once __DIR__ . '/lib/csrf.php';
+require_once __DIR__ . '/lib/ordering.php';
+require_once __DIR__ . '/lib/bulk_price.php';
 require_once __DIR__ . '/../function.php';
 if (!function_exists('xui_fail2ban_status') && is_file(__DIR__ . '/../x-ui_single.php')) {
     require_once __DIR__ . '/../x-ui_single.php';
@@ -55,7 +58,6 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'fail2ban_check') {
 
 if (!empty($_POST['action']) && $_POST['action'] === 'bulk_delete') {
     $requestedIds = $_POST['ids'] ?? [];
-    if (!is_array($requestedIds)) $requestedIds = [];
     $deletedCount = fx_bulk_delete_ids($pdo, 'product', 'id', $requestedIds);
     fx_bulk_delete_redirect('product.php', count($requestedIds), $deletedCount);
 }
@@ -80,7 +82,9 @@ $query->bindValue(':offset', $pg['offset'], PDO::PARAM_INT);
 $query->execute();
 $listinvoice = $query->fetchAll();
 
-$query = $pdo->prepare("SELECT * FROM marzban_panel");
+fx_order_ensure_schema($pdo, 'panel');
+fx_order_ensure_schema($pdo, 'category');
+$query = $pdo->prepare("SELECT * FROM marzban_panel ORDER BY (position = 0) ASC, position ASC, id ASC");
 $query->execute();
 $listpanel = $query->fetchAll();
 
@@ -89,7 +93,7 @@ foreach ($listpanel as $panelRow) {
     $panelTypeMap[$panelRow['name_panel']] = $panelRow['type'];
 }
 
-$catQuery = $pdo->prepare("SELECT remark FROM category ORDER BY id ASC");
+$catQuery = $pdo->prepare("SELECT remark FROM category ORDER BY (position = 0) ASC, position ASC, id ASC");
 $catQuery->execute();
 $listcategory = $catQuery->fetchAll(PDO::FETCH_COLUMN);
 
@@ -186,51 +190,12 @@ alert('محصول از قبل وجود دارد'); window.location.href='product
 }
 
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST'
-    && isset($_POST['oneproduct'], $_POST['toweproduct'])
-    && $_POST['oneproduct'] !== '' && $_POST['toweproduct'] !== '') {
-    $id1 = intval($_POST['oneproduct']);
-    $id2 = intval($_POST['toweproduct']);
-    if ($id1 > 0 && $id2 > 0 && $id1 !== $id2) {
-        try {
-            $pdo->beginTransaction();
-            $rows = $pdo->query("SELECT id FROM product ORDER BY (position = 0) ASC, position ASC, id ASC")->fetchAll(PDO::FETCH_COLUMN);
-            $setPos = $pdo->prepare("UPDATE product SET position = ? WHERE id = ?");
-            $posOf = [];
-            $pos = 1;
-            foreach ($rows as $rid) {
-                $setPos->execute([$pos, $rid]);
-                $posOf[(int)$rid] = $pos;
-                $pos++;
-            }
-            if (isset($posOf[$id1], $posOf[$id2])) {
-                $setPos->execute([$posOf[$id2], $id1]);
-                $setPos->execute([$posOf[$id1], $id2]);
-            }
-            $pdo->commit();
-        } catch (\Throwable $e) {
-            if ($pdo->inTransaction()) $pdo->rollBack();
-        }
-    }
+if (isset($_GET['removeid']) && $_GET['removeid'] !== '') {
+    $stmt = $pdo->prepare("DELETE FROM product WHERE id = :id");
+    $stmt->bindParam(':id', $_GET['removeid']);
+    $stmt->execute();
     header("Location: product.php");
     exit;
-}
-
-
-if ($_SERVER['REQUEST_METHOD'] === 'POST'
-    && (string)($_POST['_action'] ?? $_GET['_action'] ?? '') === 'product_delete') {
-    $delId = (int)($_POST['id'] ?? $_GET['id'] ?? 0);
-    if ($delId > 0) {
-        $stmt = $pdo->prepare("DELETE FROM product WHERE id = :id");
-        $stmt->execute([':id' => $delId]);
-    }
-    header("Location: product.php");
-    exit;
-}
-// حذف با GET ممنوع است (CSRF): لینک/تصویر می‌توانست محصول را حذف کند.
-if (isset($_GET['removeid'])) {
-    http_response_code(405);
-    exit('این عملیات فقط با POST مجاز است.');
 }
 ?>
 <!DOCTYPE html>
@@ -240,6 +205,8 @@ if (isset($_GET['removeid'])) {
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>مدیریت محصولات | ربات فاکسیما</title>
     <link rel="stylesheet" href="css/theme.css?v=flat50">
+    <link rel="stylesheet" href="css/order_modal.css?v=ord1">
+    <link rel="stylesheet" href="css/bulk_price.css?v=bp5">
 <script src="js/money-input.js?v=fx1" defer></script>
 <script src="js/theme.js?v=flat50" defer>
 
@@ -268,6 +235,12 @@ if (isset($_GET['removeid'])) {
                     <button onclick="openModal('modal-move-product')" class="btn btn-soft-purple btn-sm">
                         <?php echo icon('arrow-right-arrow-left', 'svg-icon'); ?> جابجایی ردیف
                     </button>
+                    <button onclick="openModal('modal-move-panel')" class="btn btn-soft-purple btn-sm">
+                        <?php echo icon('arrow-right-arrow-left', 'svg-icon'); ?> جابجایی پنل‌ها
+                    </button>
+                    <button type="button" data-bp-open="modal-bulk-price" class="btn btn-soft-purple btn-sm">
+                        <?php echo icon('coins', 'svg-icon'); ?> قیمت گروهی
+                    </button>
                 </div>
             </div>
 
@@ -278,6 +251,7 @@ if (isset($_GET['removeid'])) {
             <div class="card">
                 <form method="POST" action="product.php" id="bulk-form">
                     <?php echo fx_csrf_field(); ?>
+                    <input type="hidden" name="action" value="bulk_delete">
                     <div class="table-wrap">
                     <table id="productsTable" class="display app-table app-table--summary" style="width:100%">
                         <thead>
@@ -348,14 +322,10 @@ if (isset($_GET['removeid'])) {
                                             ], JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS), ENT_QUOTES, 'UTF-8'); ?>)">
                                             <?php echo icon('copy', 'svg-icon'); ?>
                                         </button>
-                                        <?php /* بدون فرم تودرتو: HTML فرم داخل فرم را نادیده می‌گیرد و دکمهٔ حذف
-                                                   به‌جای action خودش، فرم گروهی را می‌فرستاد. */ ?>
-                                        <button type="submit"
-                                                formaction="product.php?_action=product_delete&amp;id=<?php echo (int)$list['id']; ?>"
-                                                class="btn btn-sm btn-soft-danger" title="حذف"
-                                               onclick="return confirm('آیا از حذف این محصول مطمئن هستید؟')">
-                                                <?php echo icon('trash', 'svg-icon'); ?>
-                                        </button>
+                                        <a href="product.php?removeid=<?php echo $list['id']; ?>" class="btn btn-sm btn-soft-danger" title="حذف"
+                                           onclick="return confirm('آیا از حذف این محصول مطمئن هستید؟')">
+                                            <?php echo icon('trash', 'svg-icon'); ?>
+                                        </a>
                                     </div>
                                 </td>
                             </tr>
@@ -365,7 +335,7 @@ if (isset($_GET['removeid'])) {
                     <?php echo fx_pager_html($pg['page'], $pg['pages'], $pg['total'], count($listinvoice), 'product.php', ['q' => $prodQ !== '' ? $prodQ : null]); ?>
                     </div>
                     <div style="padding:12px 0;">
-                        <button type="submit" name="action" value="bulk_delete" class="btn btn-soft-danger btn-sm js-bulk-delete-btn" style="display:none;" onclick="return confirm('آیا از حذف محصولات انتخاب‌شده مطمئن هستید؟')">
+                        <button type="submit" class="btn btn-soft-danger btn-sm js-bulk-delete-btn" style="display:none;" onclick="return confirm('آیا از حذف محصولات انتخاب‌شده مطمئن هستید؟')">
                             <?php echo icon('trash', 'svg-icon'); ?> حذف انتخاب‌شده‌ها
                         </button>
                     </div>
@@ -472,26 +442,9 @@ if (isset($_GET['removeid'])) {
 </div>
 
 
-<div id="modal-move-product" class="modal-overlay">
-    <div class="modal-box">
-        <div class="modal-head">
-            <span class="modal-head__title">جابجایی ردیف محصولات</span>
-            <button class="modal-close" onclick="closeModal('modal-move-product')">&times;</button>
-        </div>
-        <form action="product.php" method="POST">
-            <?php echo fx_csrf_field(); ?>
-            <div class="form-group">
-                <label class="form-label">شناسه محصول اول</label>
-                <input type="number" name="oneproduct" class="form-control" required>
-            </div>
-            <div class="form-group">
-                <label class="form-label">شناسه محصول دوم</label>
-                <input type="number" name="toweproduct" class="form-control" required>
-            </div>
-            <button type="submit" class="btn btn-soft-purple btn-block">جابجایی</button>
-        </form>
-    </div>
-</div>
+<?php echo fx_order_modal_html('product', 'modal-move-product'); ?>
+<?php echo fx_order_modal_html('panel', 'modal-move-panel'); ?>
+<?php echo fx_bp_modal_html('modal-bulk-price'); ?>
 
 
 <div id="modal-clone-product" class="modal-overlay">
@@ -588,6 +541,8 @@ if (isset($_GET['removeid'])) {
 </div>
 <script src="js/bulk-select.js?v=fx2"></script>
 <script src="js/compact-badges.js?v=fx1"></script>
+<script src="js/order_modal.js?v=ord1"></script>
+<script src="js/bulk_price.js?v=bp4"></script>
 <script>
   var faoximaPanelTypeMap = <?php echo json_encode($panelTypeMap, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP); ?>;
   function faoximaToggleAll(master, formId) {

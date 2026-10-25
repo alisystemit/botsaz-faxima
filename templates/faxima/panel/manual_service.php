@@ -10,10 +10,10 @@ if (session_status() === PHP_SESSION_NONE) {
 }
 
 require_once __DIR__ . '/../config.php';
+if (!@include_once __DIR__ . '/lib/ad_boot.php') { http_response_code(503); header('Retry-After: 3600'); exit; }
 require_once __DIR__ . '/lib/icons.php';
 require_once __DIR__ . '/lib/remaining.php';
 require_once __DIR__ . '/lib/item_parser.php';
-require_once __DIR__ . '/lib/csrf.php';
 
 $query = $pdo->prepare("SELECT * FROM admin WHERE username=:username");
 $query->bindValue(":username", $_SESSION["user"] ?? '', PDO::PARAM_STR);
@@ -23,8 +23,6 @@ if (!isset($_SESSION["user"]) || !$adminRow) {
     header('Location: login.php');
     exit;
 }
-
-fx_csrf_guard();
 
 $tableMissing = true;
 try {

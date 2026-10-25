@@ -42,6 +42,15 @@ foreach ($datatxtbot as $item) {
         $user = select("user","*","id",$result['id_user'],"select");
         $get_username_Check = $ManagePanel->DataUser($result['Service_location'],$result['username']);
     if (!in_array($get_username_Check['status'],['active','on_hold',"Unsuccessful","disabled"])) {
+        try {
+            $rxReservationHeld = $pdo->prepare("SELECT id FROM queued_renewal WHERE username = :username AND status IN ('pending', 'processing', 'retry', 'reconciling') LIMIT 1");
+            $rxReservationHeld->execute([':username' => $resultt]);
+            if ($rxReservationHeld->fetch(PDO::FETCH_ASSOC) !== false) {
+                continue;
+            }
+        } catch (Throwable $e) {
+            continue;
+        }
         $removeRes = $ManagePanel->RemoveUser($result['Service_location'],$resultt);
         if (!empty($removeRes['status']) && $removeRes['status'] === 'successful') {
             update("invoice","status","disabled","username",$resultt);

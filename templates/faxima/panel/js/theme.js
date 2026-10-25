@@ -215,7 +215,8 @@
             if (path === href ||
                 (path.indexOf('useredit') !== -1 && href.indexOf('users.php') !== -1) ||
                 (path === 'user.php' && href === 'users.php') ||
-                (path === 'productedit.php' && href === 'product.php')) {
+                (path === 'productedit.php' && href === 'product.php') ||
+                (path === 'logviewer.php' && href === 'miscsettings.php')) {
                 links[j].classList.add('active');
             }
         }

@@ -1,6 +1,8 @@
 <?php
 
-if (isset($update['pre_checkout_query'])) {
+if (isset($update['pre_checkout_query']) && function_exists('rxStarsPreCheckoutV2') && rxStarsPreCheckoutV2($update['pre_checkout_query'])) {
+    return;
+} elseif (isset($update['pre_checkout_query'])) {
     $userid = $update['pre_checkout_query']['from']['id'];
     $id_order = $update['pre_checkout_query']['invoice_payload'];
     $Payment_report = select("Payment_report", "*", "id_order", $id_order, "select");
@@ -146,7 +148,7 @@ if (isset($update['pre_checkout_query'])) {
         ]
     ]);
     $prodcutVolumeLabel = intval($prodcut['Volume_constraint']) == 0 ? $textbotlang['users']['stateus']['Unlimited'] : $prodcut['Volume_constraint'];
-    $rxRenewPreview = rxRenewalPreviewForService($ManagePanel, select("marzban_panel", "*", "name_panel", $user['Processing_value'], "select"), (string) $username, $prodcut['Volume_constraint'], $prodcut['Service_time']);
+    $rxRenewPreview = rxRenewalPreviewForService($ManagePanel, select("marzban_panel", "*", "name_panel", $user['Processing_value'], "select"), (string) $username, $prodcut['Volume_constraint'], $prodcut['Service_time'], ['stage' => 'telegram_preview']);
     if (!empty($rxRenewPreview['blocked'])) {
         $keyboardextend = null;
     }
@@ -198,7 +200,7 @@ if (isset($update['pre_checkout_query'])) {
         $stmtInvoice->execute([':username' => $usernamePanelExtends, ':id_user' => $from_id]);
         $nameloc = $stmtInvoice->fetch(PDO::FETCH_ASSOC);
     }
-    if ($user['Balance'] < $prodcut['price_product'] && $user['agent'] != "n2") {
+    if (rx_ck_available_for_user($user) < $prodcut['price_product'] && $user['agent'] != "n2") {
         $marzbandirectpay = panel_feature_enabled($nameloc['Service_location'], 'directbuy') ? "ondirectbuy" : "offdirectbuy";
         if ($marzbandirectpay == "offdirectbuy") {
             $minbalance = number_format(json_decode(select("PaySetting", "*", "NamePay", "minbalance", "select")['ValuePay'], true)[$user['agent']]);
@@ -220,8 +222,9 @@ if (isset($update['pre_checkout_query'])) {
                 sendmessage($from_id, sprintf($textbotlang['users']['Discount']['discountapplied'], $user['pricediscount']), null, 'HTML');
             }
             $prodcut['price_product'] = fx_finalize_amount($prodcut['price_product'], $marzban_list_get, 'product');
-            $Balance_prim = $prodcut['price_product'] - $user['Balance'];
+            $Balance_prim = $prodcut['price_product'] - rx_ck_available_for_user($user);
             update("user", "Processing_value", $Balance_prim, "id", $from_id);
+            update("user", "Processing_value_tow", "", "id", $from_id);
             sendmessage($from_id, $textbotlang['users']['sell']['None-credit'], $step_payment, 'HTML');
             step('get_step_payment', $from_id);
             return;
@@ -288,6 +291,11 @@ if (isset($update['pre_checkout_query'])) {
         sendmessage($from_id, $textbotlang['users']['extend']['renewalerror'], $keyboard, 'HTML');
         return;
     }
+    $rxFinalizePreview = rxRenewalPreviewForService($ManagePanel, $marzban_list_get, (string) $usernamePanelExtends, $prodcut['Volume_constraint'], $prodcut['Service_time'], ['snapshot' => rx_pf_snapshot_from_datauser($DataUserOut, (string) ($marzban_list_get['type'] ?? '')), 'id_invoice' => is_array($nameloc) ? (string) $nameloc['id_invoice'] : '', 'stage' => 'telegram_confirm']);
+    if (!empty($rxFinalizePreview['blocked'])) {
+        sendmessage($from_id, (string) $rxFinalizePreview['text'], $keyboard, 'HTML');
+        return;
+    }
     $__pp2 = (float)$prodcut['price_product'];
     $__allowNeg2 = ($user['agent'] === 'n2') ? (int)($user['maxbuyagent'] ?? 0) : 0;
     $__charge2 = function_exists('balance_atomic_charge') ? balance_atomic_charge($from_id, $__pp2, $__allowNeg2) : ['ok' => false, 'reason' => 'helper-missing'];
@@ -299,28 +307,37 @@ if (isset($update['pre_checkout_query'])) {
     if (function_exists('wallet_ledger_record')) {
         wallet_ledger_record($from_id, 'debit', $__pp2, 'service_action', 'تمدید سرویس', null, 'invoice', (string)($nameloc['id_invoice'] ?? ''));
     }
-    $extend = $ManagePanel->extend($marzban_list_get['Methodextend'], $prodcut['Volume_constraint'], $prodcut['Service_time'], $usernamePanelExtends, $prodcut['code_product'], $marzban_list_get['code_panel']);
-    if (empty($extend['status']) && function_exists('balance_atomic_credit')) {
+    $rxFinalizeRef = 'wallet:' . $from_id . ':' . bin2hex(random_bytes(4));
+    $extend = $ManagePanel->extend($marzban_list_get['Methodextend'], $prodcut['Volume_constraint'], $prodcut['Service_time'], $usernamePanelExtends, $prodcut['code_product'], $marzban_list_get['code_panel'], null, [
+        'source' => 'wallet',
+        'ref' => $rxFinalizeRef,
+        'id_user' => $from_id,
+        'price' => $__pp2,
+        'reservation' => ['payment_ref' => $rxFinalizeRef],
+    ]);
+    $rxFinalizePending = rxRenewalIsPending($extend);
+    if (empty($extend['status']) && !$rxFinalizePending && function_exists('balance_atomic_credit')) {
         $__refundedFin = balance_atomic_credit($from_id, $__pp2);
         $Balance_Low_user = $user['Balance'];
         if ($__refundedFin && function_exists('wallet_ledger_record')) {
             wallet_ledger_record($from_id, 'credit', $__pp2, 'refund', 'بازگشت وجه تمدید سرویس', null, 'invoice', (string)($nameloc['id_invoice'] ?? ''));
         }
     }
-    if ($extend['status'] == false) {
+    if ($extend['status'] == false && !$rxFinalizePending) {
         $rxStockEmpty = ($extend['code'] ?? '') === 'manual_stock_empty';
         $rxQueuedExists = ($extend['code'] ?? '') === 'queued_renewal_exists';
         $extend['msg'] = rx_panel_error_text($extend['msg'] ?? null, $extend['detail'] ?? null);
         $textreports = "خطای تمدید سرویس
         <blockquote>نام پنل : {$marzban_list_get['name_panel']}</blockquote>
         <blockquote>نام کاربری سرویس : $usernamePanelExtends</blockquote>
+        <blockquote>کد خطا : " . htmlspecialchars((string) ($extend['code'] ?? ''), ENT_QUOTES, 'UTF-8') . "</blockquote>
         <blockquote>دلیل خطا : {$extend['msg']}</blockquote>";
         if ($rxStockEmpty) {
             sendmessage($from_id, $datatextbot['dyn_errors_renewal_stock_empty'] ?? "❌ موجودی انبار برای این محصول تمام شده است. مبلغی از حساب شما کسر نشد.", null, 'HTML');
         } elseif ($rxQueuedExists) {
             sendmessage($from_id, $datatextbot['dyn_errors_queued_renewal_exists'] ?? "❌ یک رزرو اشتراک برای این سرویس در انتظار فعال‌سازی است. مبلغی از حساب شما کسر نشد.", null, 'HTML');
         } else {
-            sendmessage($from_id, $datatextbot['dyn_errors_renewal_support_error'] ?? "❌خطایی در تمدید سرویس رخ داده با پشتیبانی در ارتباط باشید", null, 'HTML');
+            sendmessage($from_id, rxRenewalFailureText($extend, $datatextbot['dyn_errors_renewal_support_error'] ?? "❌خطایی در تمدید سرویس رخ داده با پشتیبانی در ارتباط باشید"), null, 'HTML');
         }
         if (strlen($setting['Channel_Report'] ?? '') > 0) {
             telegram('sendmessage', [
@@ -332,7 +349,7 @@ if (isset($update['pre_checkout_query'])) {
         }
         return;
     }
-    if (is_array($nameloc)) {
+    if (is_array($nameloc) && !$rxFinalizePending && empty($extend['queued'])) {
         update("invoice", "name_product", $prodcut['name_product'], "id_invoice", $nameloc['id_invoice']);
         update("invoice", "price_product", $prodcut['price_product'], "id_invoice", $nameloc['id_invoice']);
         update("invoice", "Volume", $prodcut['Volume_constraint'], "id_invoice", $nameloc['id_invoice']);
@@ -365,7 +382,7 @@ if (isset($update['pre_checkout_query'])) {
     $prodcut['price_product'] = number_format($prodcut['price_product']);
     $balanceformatsell = number_format(select("user", "Balance", "id", $from_id, "select")['Balance'], 0);
     if (!empty($extend['queued'])) {
-        $rxQueuedSuccessTpl = $datatextbot['dyn_renewconfirm_queued_success'] ?? '✅ سرویس خریداری شده رزرو شد و به محض پایان سرویس فعلی فعال می‌گردد.';
+        $rxQueuedSuccessTpl = (string) ($extend['reservation']['confirmation'] ?? rxRenewalText('reservation_confirmed'));
         $textextend = "$rxQueuedSuccessTpl
 
 ▫️نام سرویس : $usernamePanelExtends
@@ -397,8 +414,10 @@ if (isset($update['pre_checkout_query'])) {
         ]);
     }
 }
-if (in_array($from_id, $admin_ids))
+if (in_array($from_id, $admin_ids)) {
+    $GLOBALS['rx_admin_scope'] = true;
     require_once 'admin.php';
+}
 
 $pdo = null;
 $connect->close();

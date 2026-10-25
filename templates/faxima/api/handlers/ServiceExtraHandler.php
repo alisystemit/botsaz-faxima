@@ -140,7 +140,8 @@ final class ServiceExtraHandler extends BaseHandler
         }
 
 
-        $shortfall = $finalPrice - $balance;
+        $walletState = function_exists('rx_wallet_available') ? rx_wallet_available($this->user['id']) : ['balance' => (int) $balance, 'available' => (int) $balance];
+        $shortfall = $finalPrice - (float) $walletState['available'];
         if ($shortfall > 0 && $agent !== 'n2') {
             $directBuy = panel_feature_enabled($invoice['Service_location'], 'directbuy') ? 'ondirectbuy' : 'offdirectbuy';
             if ($directBuy !== 'ondirectbuy') {
@@ -148,16 +149,15 @@ final class ServiceExtraHandler extends BaseHandler
             }
 
             $orderId = bin2hex(random_bytes(4));
-            $amountDue = (int) ceil($shortfall);
-            if ($amountDue <= 1) $amountDue = 0;
-
 
             $extendStateTow = $kind === 'time' ? 'getextratimeuser' : 'getextravolumeuser';
+            $opened = $this->openCheckout($extendStateTow, $extendStateTow . '|' . $invoice['username'] . '%' . $amount, (string) $invoice['username'], (int) $finalPrice, ['extra_kind' => $kind, 'extra_amount' => $amount]);
+            $amountDue = (int) $opened['checkout']['external_amount'];
             update('user', 'Processing_value',     $amountDue,                              'id', $this->user['id']);
             update('user', 'Processing_value_one', $invoice['username'] . '%' . $amount, 'id', $this->user['id']);
             update('user', 'Processing_value_tow', $extendStateTow,                       'id', $this->user['id']);
 
-            FaoximaResponse::ok([
+            FaoximaResponse::ok(array_merge($this->checkoutResponseFields($opened), [
                 'kind'        => 'requires_payment',
                 'amount_due'  => $amountDue,
                 'balance'     => $balance,
@@ -167,7 +167,7 @@ final class ServiceExtraHandler extends BaseHandler
                 'extra_kind'  => $kind,
                 'extra_amount'=> $amount,
                 'message'     => faoxima_textbot_get('dyn_renewconfirm_insufficient_balance_pay_shortfall', 'موجودی کیف پول کافی نیست. لطفاً مبلغ کسری را پرداخت کنید.'),
-            ]);
+            ]));
             return;
         }
 

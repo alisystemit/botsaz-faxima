@@ -38,7 +38,13 @@ if (!function_exists('rx_log_event')) {
         $rxUriTpl = preg_replace('/(username=|order_id=|hash=|user_id=)[^&]+/', '$1*', $rxUriRaw);
         $rxBodyRaw = isset($context['body']) ? (string)$context['body'] : '';
         $rxBodyClean = preg_replace('/"(username|order_id|hash|user_id|custom_username)"\s*:\s*"[^"]*"/', '"$1":"*"', $rxBodyRaw);
-        $rxKey = 'rx|' . $type . '|' . $rxStatus . '|' . $rxUriTpl . '|' . md5(substr($rxBodyClean, 0, 200));
+        $rxScope = '';
+        foreach (['username', 'panel', 'service_key', 'id_invoice', 'id_order', 'reservation_id', 'op_id', 'operation_id', 'reason'] as $rxScopeField) {
+            if (isset($context[$rxScopeField]) && is_scalar($context[$rxScopeField])) {
+                $rxScope .= '|' . $rxScopeField . '=' . $context[$rxScopeField];
+            }
+        }
+        $rxKey = 'rx|' . REFACTORED_LOG_DIR . '|' . $type . '|' . $rxStatus . '|' . $rxUriTpl . '|' . md5(substr($rxBodyClean, 0, 200)) . $rxScope;
         $rxCacheDir = sys_get_temp_dir() . '/faoxima_log_dedup';
         if (!is_dir($rxCacheDir)) {
             @mkdir($rxCacheDir, 0700, true);

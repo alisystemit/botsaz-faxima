@@ -758,3 +758,74 @@ function guardRevokeSubscriptions($namePanel, array $usernames)
     return guardDecodeResponse($response);
 }
 
+
+function guardCapabilityReport(array $panel, array &$report)
+{
+    $apiKey = trim((string) (!empty($panel['api_key']) ? $panel['api_key'] : ($panel['password_panel'] ?? '')));
+    $version = strtolower(trim((string) ($panel['guard_version'] ?? 'v1'))) === 'v2' ? 'v2' : 'v1';
+    rx_cap_info($report, 'نسخه Guard', $version);
+    if ($apiKey === '') {
+        rx_cap_set($report, 'connection', 'failed', 'کلید API برای این پنل تنظیم نشده است.');
+        rx_cap_mark_untested_after_connection_failure($report);
+        return;
+    }
+    $test = guardTestConnection($panel['url_panel'] ?? null, $apiKey, $version);
+    if (empty($test['status'])) {
+        $response = is_array($test['response'] ?? null) ? $test['response'] : ['status' => 0, 'error' => (string) ($test['msg'] ?? '')];
+        $read = rx_cap_http_read($response);
+        rx_cap_set($report, 'connection', 'failed', (int) ($response['status'] ?? 0) === 403 ? 'HTTP 403؛ کلید API پذیرفته نشد.' : $read[1]);
+        rx_cap_mark_untested_after_connection_failure($report);
+        return;
+    }
+    rx_cap_set($report, 'connection', 'verified', 'GET /api/admins/current موفق بود.');
+    $admin = is_array($test['data'] ?? null) ? $test['data'] : [];
+    rx_cap_info($report, 'ادمین متصل', guardExtractAdminName($admin));
+    $role = is_string($admin['role'] ?? null) ? strtolower($admin['role']) : null;
+    rx_cap_info($report, 'نقش ادمین', $role);
+    $flags = ['create' => 'create_access', 'update' => 'update_access', 'delete' => 'remove_access'];
+    foreach ($flags as $key => $field) {
+        if ($role === 'owner') {
+            rx_cap_set($report, $key, 'allowed', 'نقش owner.');
+        } elseif (array_key_exists($field, $admin) && is_bool($admin[$field])) {
+            rx_cap_set($report, $key, $admin[$field] ? 'allowed' : 'denied', 'بر اساس ' . $field . '.');
+        } else {
+            rx_cap_set($report, $key, 'unknown', 'فیلد ' . $field . ' در پاسخ پنل نیست.');
+        }
+    }
+    foreach (['reset', 'revoke'] as $key) {
+        rx_cap_set($report, $key, $role === 'owner' ? 'allowed' : 'unknown', $role === 'owner' ? 'نقش owner.' : 'Guard برای این عملیات مجوز جداگانه‌ای اعلام نمی‌کند.');
+    }
+    if (isset($admin['count_limit']) && $admin['count_limit'] !== null) {
+        rx_cap_info($report, 'سقف تعداد کاربر', (int) $admin['count_limit']);
+        if (isset($admin['left_count']) && (int) $admin['left_count'] <= 0 && $report['checks']['create']['status'] === 'allowed') {
+            rx_cap_set($report, 'create', 'unknown', 'مجوز ساخت اعلام شده، اما سهمیه تعداد کاربر این ادمین تمام شده است.');
+        }
+    }
+    $config = $test['panel_config'];
+    $listResponse = guardApiRequest($config, 'GET', '/api/subscriptions?limit=1');
+    $list = rx_cap_http_read($listResponse);
+    if ($list[0] === 'verified') {
+        $list[1] = 'GET /api/subscriptions موفق بود.';
+    }
+    rx_cap_set($report, 'list_users', $list[0], $list[1]);
+
+    rx_cap_probe_sample_user_via_manager($panel, $report);
+    if ($version === 'v1' && $report['checks']['configs']['status'] === 'unknown') {
+        rx_cap_set($report, 'configs', 'unsupported', 'Guard v1 لینک تک‌تک کانفیگ‌ها را ارائه نمی‌دهد؛ فقط لینک اشتراک در دسترس است.');
+    }
+
+    $services = guardGetServices($config);
+    if (($services['status'] ?? false) === false) {
+        $httpCode = (int) ($services['http_code'] ?? 0);
+        rx_cap_set($report, 'resources', $httpCode === 403 ? 'denied' : 'failed', 'GET /api/services: ' . rx_cap_clean_text((string) ($services['msg'] ?? ''), 120));
+    } else {
+        $available = guardExtractServiceIdsFromList((array) ($services['services'] ?? []));
+        $stored = guardParseServiceIds($panel['guard_service_ids'] ?? null);
+        $missing = [];
+        if (!in_array('all', $stored, true) && !in_array(0, $stored, true)) {
+            $missing = array_values(array_diff(array_map('intval', $stored), $available));
+        }
+        $note = count($available) . ' سرویس قابل مشاهده.' . (empty($missing) ? '' : ' سرویس‌های تنظیم‌شده ناموجود: ' . implode(', ', $missing));
+        rx_cap_set($report, 'resources', empty($missing) ? 'verified' : 'failed', $note);
+    }
+}

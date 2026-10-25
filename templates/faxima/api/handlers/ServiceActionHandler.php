@@ -383,6 +383,9 @@ final class ServiceActionHandler extends BaseHandler
         }
 
         $balance = (float)($this->user['Balance'] ?? 0);
+        if (function_exists('rx_wallet_available')) {
+            $balance = (float) rx_wallet_available($this->user['id'])['available'];
+        }
         $maxBuyAgent = (int)($this->user['maxbuyagent'] ?? 0);
 
         if ($priceChange > $balance) {

@@ -57,7 +57,7 @@ final class InvoicesHandler extends BaseHandler
                 $queuedParams[$ph] = $uname;
             }
             $queuedRows = FaoximaDb::fetchAll(
-                "SELECT DISTINCT username FROM queued_renewal WHERE status = 'pending' AND username IN (" . implode(',', $placeholders) . ")",
+                "SELECT DISTINCT username FROM queued_renewal WHERE status IN (" . rx_rn_unresolved_sql() . ") AND username IN (" . implode(',', $placeholders) . ")",
                 $queuedParams
             );
             foreach ($queuedRows as $qr) {

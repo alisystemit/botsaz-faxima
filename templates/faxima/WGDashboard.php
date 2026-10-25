@@ -450,3 +450,36 @@ function restrictPeers($location,$username){
     return $response;
 }
 
+
+function wgCapabilityReport(array $panel, array &$report)
+{
+    $panelResult = getWGPanelConfig($panel['name_panel'] ?? '');
+    if (empty($panelResult['status'])) {
+        rx_cap_set($report, 'connection', 'failed', rx_cap_clean_text((string) ($panelResult['msg'] ?? ''), 160));
+        rx_cap_mark_untested_after_connection_failure($report);
+        return;
+    }
+    $config = $panelResult['config'];
+    $query = http_build_query(['configurationName' => $config['inboundid']]);
+    $req = new CurlRequest(rtrim((string) $config['url_panel'], '/') . "/api/getWireguardConfigurationInfo?{$query}");
+    $req->setHeaders(['Accept: application/json', 'wg-dashboard-apikey: ' . $config['password_panel']]);
+    $response = $req->get();
+    $data = rx_cap_json($response);
+    $status = (int) ($response['status'] ?? 0);
+    if (!empty($response['error']) || $status < 200 || $status >= 300 || !is_array($data) || ($data['status'] ?? null) === false) {
+        $note = is_array($data) && isset($data['message']) ? rx_cap_clean_text((string) $data['message'], 160) : rx_cap_http_read($response)[1];
+        rx_cap_set($report, 'connection', 'failed', $note);
+        rx_cap_mark_untested_after_connection_failure($report);
+        return;
+    }
+    rx_cap_set($report, 'connection', 'verified', 'GET /api/getWireguardConfigurationInfo موفق بود.');
+    foreach (['create', 'update', 'delete', 'reset'] as $key) {
+        rx_cap_set($report, $key, 'allowed', 'WGDashboard مدل نقش ندارد و کلید API به همه API های مدیریتی دسترسی دارد.');
+    }
+    rx_cap_set($report, 'revoke', 'unsupported', 'ربات برای WGDashboard عملیات بازسازی لینک اشتراک ندارد.');
+    $peers = is_array($data['data']['configurationPeers'] ?? null) ? count($data['data']['configurationPeers']) : 0;
+    $restricted = is_array($data['data']['configurationRestrictedPeers'] ?? null) ? count($data['data']['configurationRestrictedPeers']) : 0;
+    rx_cap_set($report, 'list_users', 'verified', ($peers + $restricted) . ' Peer خوانده شد.');
+    rx_cap_probe_sample_user_via_manager($panel, $report);
+    rx_cap_set($report, 'resources', 'verified', 'پیکربندی ' . $config['inboundid'] . ' در دسترس است.');
+}

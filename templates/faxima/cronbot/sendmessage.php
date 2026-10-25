@@ -18,17 +18,6 @@ if (function_exists('putenv') && !preg_match('/(^|,)\s*putenv\s*(,|$)/', strtolo
 }
 
 
-if (function_exists('fastcgi_finish_request') && !$isCLI) {
-    if (!headers_sent()) {
-        header('Content-Type: text/plain; charset=utf-8');
-        header('Content-Length: 0');
-        header('Connection: close');
-    }
-    @ob_end_flush();
-    @flush();
-    @fastcgi_finish_request();
-}
-
 $baseDir = dirname(__FILE__);
 require_once $baseDir . '/_init.php';
 rx_cron_verify_web_access();

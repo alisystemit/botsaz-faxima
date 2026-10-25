@@ -1,6 +1,9 @@
 <?php
 require_once __DIR__ . '/config.php';
 require_once __DIR__ . '/lib/WebhookAuth.php';
+if (is_file(__DIR__ . '/lib/CronHealth.php')) {
+    require_once __DIR__ . '/lib/CronHealth.php';
+}
 
 if (!function_exists('rx_releaseWebhookConnection')) {
     function rx_releaseWebhookConnection()
@@ -112,6 +115,28 @@ if (!function_exists('rx_callback_busy_reply')) {
     }
 }
 
+if (!function_exists('rx_hasRichMessageContent')) {
+    function rx_hasRichMessageContent($richMessage): bool
+    {
+        if (is_string($richMessage)) {
+            $richMessage = json_decode($richMessage, true);
+        }
+        if (!is_array($richMessage)) {
+            return false;
+        }
+        foreach (['html', 'markdown'] as $key) {
+            if (!isset($richMessage[$key]) || !is_string($richMessage[$key])) {
+                continue;
+            }
+            $body = preg_replace('~<tg-button-row[\s\S]*?</tg-button-row>~i', '', $richMessage[$key]);
+            if (trim(strip_tags($body)) !== '' || preg_match('~<(img|video|audio|tg-document)~i', $body)) {
+                return true;
+            }
+        }
+        return !empty($richMessage['blocks']) && is_array($richMessage['blocks']);
+    }
+}
+
 function telegram($method, $datas = [], $token = null)
 {
     global $APIKEY, $telegramCurlTimeout;
@@ -155,7 +180,7 @@ function telegram($method, $datas = [], $token = null)
 
         if (isset($datas['reply_markup']) && $datas['reply_markup'] !== '' && $datas['reply_markup'] !== null) {
             if (function_exists('processKeyboardStyles')) {
-                $datas['reply_markup'] = processKeyboardStyles($datas['reply_markup'], isset($datas['chat_id']) && function_exists('rx_isAdminChat') && rx_isAdminChat($datas['chat_id']));
+                $datas['reply_markup'] = processKeyboardStyles($datas['reply_markup'], isset($datas['chat_id']) && function_exists('rx_isAdminChat') && rx_isAdminChat($datas['chat_id']), $datas['chat_id'] ?? null);
             }
             if (function_exists('applyPremiumEmojiToKeyboard')) {
                 $datas['reply_markup'] = applyPremiumEmojiToKeyboard($datas['reply_markup']);
@@ -176,7 +201,8 @@ function telegram($method, $datas = [], $token = null)
 
     $rxSendMethod = strtolower((string) $method);
     if (($rxSendMethod === 'sendmessage' || $rxSendMethod === 'editmessagetext')
-        && (!isset($datas['text']) || !is_string($datas['text']) || trim($datas['text']) === '')) {
+        && (!isset($datas['text']) || !is_string($datas['text']) || trim($datas['text']) === '')
+        && !($rxSendMethod === 'editmessagetext' && rx_hasRichMessageContent($datas['rich_message'] ?? null))) {
         $rxEmptyCaller = 'unknown';
         foreach (debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS) as $rxFrame) {
             if (isset($rxFrame['file']) && basename($rxFrame['file']) !== 'botapi.php') {
@@ -191,6 +217,13 @@ function telegram($method, $datas = [], $token = null)
             @error_log($rxEmptyMsg);
         }
         return ['ok' => false, 'error_code' => 400, 'description' => 'message text is empty (skipped locally)'];
+    }
+
+    if (function_exists('rx_richUi_dispatch')) {
+        $rxRichResult = rx_richUi_dispatch($method, $datas, $token);
+        if ($rxRichResult !== null) {
+            return $rxRichResult;
+        }
     }
 
     $preparedPayload = prepareTelegramRequestPayload($datas);
@@ -282,7 +315,11 @@ function telegram($method, $datas = [], $token = null)
         error_log(sprintf('Slow Telegram response detected (method: %s, http_code: %d, duration: %.3fs)', $method, $httpCode, $duration));
     }
 
-    return rx_parse_telegram_response($rawResponse, $httpCode);
+    $rxParsedResponse = rx_parse_telegram_response($rawResponse, $httpCode);
+    if (function_exists('rx_ui_after_send')) {
+        rx_ui_after_send($method, $datas, $rxParsedResponse);
+    }
+    return $rxParsedResponse;
 }
 
 function rx_parse_telegram_response($rawResponse, $httpCode)
@@ -450,6 +487,14 @@ function prepareTelegramRequestPayload(array $datas)
     foreach ($datas as $key => $value) {
         if ($value === null) {
             continue;
+        }
+
+        if ($key === 'reply_markup' && is_string($value) && strpos($value, '"_rxsec"') !== false) {
+            $rxMarked = json_decode($value, true);
+            if (is_array($rxMarked)) {
+                unset($rxMarked['_rxsec']);
+                $value = json_encode($rxMarked, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            }
         }
 
         $normalised[$key] = normaliseTelegramValue($value);
@@ -791,6 +836,24 @@ if (!function_exists('rx_glassModeOn')) {
     }
 }
 
+if (!function_exists('rx_richUserButtonsOn')) {
+    function rx_richUserButtonsOn(): bool {
+        return isset($GLOBALS['setting']['user_rich_buttons_enabled']) && $GLOBALS['setting']['user_rich_buttons_enabled'] === 'on';
+    }
+}
+
+if (!function_exists('rx_richModeOn')) {
+    function rx_richModeOn(): bool {
+        return rx_richUserButtonsOn();
+    }
+}
+
+if (!function_exists('rx_inlineUiOn')) {
+    function rx_inlineUiOn(): bool {
+        return rx_glassModeOn() || rx_richModeOn();
+    }
+}
+
 if (!function_exists('rx_autoRemoveReplyKeyboardOn')) {
     function rx_autoRemoveReplyKeyboardOn(): bool {
         $value = $GLOBALS['setting']['auto_remove_reply_keyboard'] ?? 'on';
@@ -828,7 +891,9 @@ if (!function_exists('removeReplyKeyboardOnStartIfNeeded')) {
         try {
             rx_flushPendingReplyKeyboardCleanup($chatId);
 
-            if (!rx_glassModeOn()) {
+            $rxRichCleanup = rx_richUserButtonsOn() && function_exists('rx_richActiveForSend') && rx_richActiveForSend($chatId, null, 'main_menu');
+
+            if (!rx_glassModeOn() && !$rxRichCleanup) {
                 $flag = select('user', 'reply_kb_cleared', 'id', $chatId, 'select', ['cache' => false]);
                 $flag = is_scalar($flag) ? (string) $flag : '0';
                 if ($flag === '1') {
@@ -844,6 +909,11 @@ if (!function_exists('removeReplyKeyboardOnStartIfNeeded')) {
             $flag = select('user', 'reply_kb_cleared', 'id', $chatId, 'select', ['cache' => false]);
             $flag = is_scalar($flag) ? (string) $flag : '0';
             if ($flag === '1') {
+                return;
+            }
+
+            if ($rxRichCleanup) {
+                $GLOBALS['rx_pending_reply_kb_remove'][$chatId] = true;
                 return;
             }
 
@@ -884,7 +954,7 @@ if (!function_exists('removeReplyKeyboardIfNeeded')) {
     }
 }
 
-function processKeyboardStyles($keyboard, $rxPlainAdmin = false) {
+function processKeyboardStyles($keyboard, $rxPlainAdmin = false, $rxChatId = null) {
     $styleMap = unserialize(REPLY_STYLE_EMOJI_MAP);
     $wasString = is_string($keyboard);
     if ($wasString) {
@@ -938,7 +1008,7 @@ function processKeyboardStyles($keyboard, $rxPlainAdmin = false) {
                             'admin_features','admin_channel','admin_help','admin_category','admin_products',
 
 
-                            'service','account','payment','user_nav','pay_receipt','invoice_copy_buttons','home_menu',
+                            'service','account','payment','user_nav','pay_receipt','invoice_copy_buttons','home_menu','wallet_checkout',
                         ];
                         foreach ($featMenus as $fm) {
                             if (!empty($all[$fm]) && is_array($all[$fm])) {
@@ -1231,6 +1301,9 @@ function processKeyboardStyles($keyboard, $rxPlainAdmin = false) {
 
 
     $rxGlassOn = isset($GLOBALS['setting']['inlinebtnmain']) && $GLOBALS['setting']['inlinebtnmain'] === 'oninline';
+    if (!$rxGlassOn && $rxChatId !== null && function_exists('rx_richActiveForSend') && rx_richActiveForSend($rxChatId, $kb)) {
+        $rxGlassOn = true;
+    }
 
     if ($rxGlassOn && isset($kb['keyboard']) && is_array($kb['keyboard'])) {
         $rxHasReplyFeature = false;
@@ -1317,7 +1390,7 @@ function processKeyboardStyles($keyboard, $rxPlainAdmin = false) {
             'recheckcrypto','rcc_pick_','rcc_skip_photo','rcc_cancel','rcc_resubmit_',
             'Discount','Add_Balance','backuser','backorder','account','rw_pick_','rw_custom','confirmandgetserviceDiscount','aptdc',
             'ticketnew','ticketopen_','ticketmsg_','ticketclose_','tk_cnt_','tk_album_','tk_cancel','tk_media_yes','tk_media_no','departman_','supporttickets','helpos_',
-            'wheel_luck','affiliatesbtn','agentpanel','requestagent','supportbtns','helpbtns','usertestbtn','extendbtn',
+            'wheel_luck','affiliatesbtn','agentpanel','requestagent','supportbtns','helpbtns','helpmenubtn','myservicesbtn','accountbtn','usertestbtn','extendbtn',
             'my_miniapp_pending','location_','buyback','ticketclose_',
             'gen_random_uname',
             'nmstocksel_','nmstockextend_','nmstockrefund_','nmstockcfg_','nmstocksub_',
@@ -2092,6 +2165,13 @@ if (!function_exists('rx_getKeyboardDefaultStyles')) {
                     'tx_next'     => 'primary',
                     'tx_back'     => 'danger',
                 ],
+                'wallet_checkout' => [
+                    'ck_use_wallet'   => 'success',
+                    'ck_pay_external' => 'primary',
+                    'ck_confirm'      => 'success',
+                    'ck_cancel'       => 'danger',
+                    'ck_change'       => 'primary',
+                ],
                 'payment' => [
                     'cart_to_offline'  => 'success',
                     'aqayepardakht'    => 'success',
@@ -2526,7 +2606,7 @@ if (!function_exists('rx_mergeKeyboardSectionDefaults')) {
 function sendmessage($chat_id,$text,$keyboard,$parse_mode,$bot_token = null){
     if(intval($chat_id) == 0)return ['ok' => false];
     $text = applyPremiumEmojiTransform($text, $parse_mode);
-    $keyboard = processKeyboardStyles($keyboard, function_exists('rx_isAdminChat') && rx_isAdminChat($chat_id));
+    $keyboard = processKeyboardStyles($keyboard, function_exists('rx_isAdminChat') && rx_isAdminChat($chat_id), $chat_id);
     $keyboard = applyPremiumEmojiToKeyboard($keyboard);
     return telegram('sendmessage',[
         'chat_id' => $chat_id,
@@ -2599,7 +2679,9 @@ function normalizeConfigFilename($filename, $prefix = '', $wireguard = false)
     $filename = basename(str_replace('\\', '/', (string) $filename));
     $extension = strtolower((string) pathinfo($filename, PATHINFO_EXTENSION));
     $stem = (string) pathinfo($filename, PATHINFO_FILENAME);
-    $stem = preg_replace('/[^A-Za-z0-9.-]+/', '-', str_replace('_', '-', $stem));
+    $stem = $wireguard
+        ? preg_replace('/[^A-Za-z0-9.-]+/', '-', str_replace('_', '-', $stem))
+        : preg_replace('/[^\p{L}\p{N}.-]+/u', '-', str_replace('_', '-', $stem));
     $stem = trim((string) preg_replace('/-+/', '-', $stem), '-.');
     $prefix = preg_replace('/[^A-Za-z0-9.-]+/', '-', str_replace('_', '-', (string) $prefix));
     $prefix = trim((string) preg_replace('/-+/', '-', $prefix), '-.');
@@ -2710,7 +2792,7 @@ function Editmessagetext($chat_id, $message_id, $text, $keyboard,$parse_mode = '
         : ($__callbackMsg ? (int)($__callbackMsg['message_thread_id'] ?? 0) : 0);
     $__sendFallback = function ($fbChatId, $fbText, $fbKeyboard, $fbParseMode) use ($__origThreadId) {
         $fbText = applyPremiumEmojiTransform($fbText, $fbParseMode);
-        $fbKeyboard = processKeyboardStyles($fbKeyboard, function_exists('rx_isAdminChat') && rx_isAdminChat($fbChatId));
+        $fbKeyboard = processKeyboardStyles($fbKeyboard, function_exists('rx_isAdminChat') && rx_isAdminChat($fbChatId), $fbChatId);
         $fbKeyboard = applyPremiumEmojiToKeyboard($fbKeyboard);
         $fbPayload = [
             'chat_id' => $fbChatId,
@@ -2728,7 +2810,7 @@ function Editmessagetext($chat_id, $message_id, $text, $keyboard,$parse_mode = '
         return $__sendFallback($chat_id, $text, $keyboard, strtolower($parse_mode));
     }
     $text = applyPremiumEmojiTransform($text, $parse_mode);
-    $keyboard = processKeyboardStyles($keyboard, function_exists('rx_isAdminChat') && rx_isAdminChat($chat_id));
+    $keyboard = processKeyboardStyles($keyboard, function_exists('rx_isAdminChat') && rx_isAdminChat($chat_id), $chat_id);
     $keyboard = applyPremiumEmojiToKeyboard($keyboard);
 
     $__isPhotoMsg = $__callbackMsg && (
@@ -2761,6 +2843,7 @@ function Editmessagetext($chat_id, $message_id, $text, $keyboard,$parse_mode = '
             strpos($desc, 'no text in the message') !== false
             || strpos($desc, "message can't be edited") !== false
             || strpos($desc, 'message to edit not found') !== false
+            || strpos($desc, 'rich message') !== false
         );
         if ($needsFallback) {
             if (function_exists('deletemessage')) {
@@ -3000,9 +3083,15 @@ if (!is_numeric($from_id) || (string)(int) $from_id !== (string) $from_id) {
 }
 $from_id = (int) $from_id;
 rx_releaseWebhookConnection();
+if (function_exists('rx_cron_health_webhook_tick')) {
+    register_shutdown_function('rx_cron_health_webhook_tick');
+}
 $text =convertPersianNumbersToEnglish($text);
 
 $text_inline = $update["callback_query"]["message"]['text'] ?? '';
+if ($text_inline === '' && isset($update["callback_query"]["message"]['rich_message']) && function_exists('rx_richUi_extractText')) {
+    $text_inline = rx_richUi_extractText($update["callback_query"]["message"]['rich_message']);
+}
 $message_id = $update["message"]["message_id"] ?? $update["callback_query"]["message"]["message_id"] ?? 0;
 $message_id = $rx_assertNumericId($message_id);
 $time_message = $update["message"]["date"] ?? $update["callback_query"]["date"] ?? 0;

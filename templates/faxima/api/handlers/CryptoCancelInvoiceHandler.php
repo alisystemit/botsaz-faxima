@@ -19,7 +19,7 @@ final class CryptoCancelInvoiceHandler extends BaseHandler
 
         $report = FaoximaDb::fetchOne(
             'SELECT id_order, payment_Status, Payment_Method, atlaspay_order_id FROM Payment_report
-              WHERE id_order = :o AND id_user = :u AND source = \'miniapp\' LIMIT 1',
+              WHERE id_order = :o AND id_user = :u AND (source = \'miniapp\' OR (Payment_Method = \'tonpay\' AND tonpay_gateway_mode = \'custom\') OR (Payment_Method = \'atlaspay\' AND atlaspay_gateway_mode = \'custom\')) LIMIT 1',
             [':o' => $orderId, ':u' => (string)$this->user['id']]
         );
         if ($report === null) {
@@ -32,6 +32,36 @@ final class CryptoCancelInvoiceHandler extends BaseHandler
         }
         $status = (string)($report['payment_Status'] ?? '');
 
+        if ($method === 'tonpay' && function_exists('tonpayCustomFetchReport')) {
+            $customReport = tonpayCustomFetchReport($orderId);
+            if ($customReport !== null) {
+                $customResult = tonpayCustomCancel($orderId, (string)$this->user['id']);
+                if (empty($customResult['ok'])) {
+                    FaoximaResponse::fail(409, (string)($customResult['message'] ?? 'لغو فاکتور انجام نشد.'));
+                }
+                FaoximaResponse::ok([
+                    'kind'    => 'cancelled',
+                    'message' => '✅ فاکتور لغو شد',
+                ]);
+                return;
+            }
+        }
+
+
+        if ($method === 'atlaspay' && function_exists('atlaspayCustomFetchReport')) {
+            $customReport = atlaspayCustomFetchReport($orderId);
+            if ($customReport !== null) {
+                $customResult = atlaspayCustomCancel($orderId, (string)$this->user['id']);
+                if (empty($customResult['ok'])) {
+                    FaoximaResponse::fail(409, (string)($customResult['message'] ?? 'لغو فاکتور انجام نشد.'));
+                }
+                FaoximaResponse::ok([
+                    'kind'    => 'cancelled',
+                    'message' => '✅ فاکتور لغو شد',
+                ]);
+                return;
+            }
+        }
 
         if (in_array($status, ['cancelled', 'paid', 'reject'], true)) {
             FaoximaResponse::ok([
@@ -81,6 +111,10 @@ final class CryptoCancelInvoiceHandler extends BaseHandler
                 'order' => $orderId,
             ]);
             FaoximaResponse::serverError('خطا در لغو فاکتور');
+        }
+
+        if (function_exists('rx_ck_release_for_order')) {
+            rx_ck_release_for_order($orderId, 'cancelled', 'crypto_cancelled');
         }
 
         FaoximaLogger::debug('Crypto invoice cancelled by user', [

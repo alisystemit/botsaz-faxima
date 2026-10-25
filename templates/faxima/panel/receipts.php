@@ -4,6 +4,7 @@ ini_set('session.cookie_samesite', 'Lax');
 ini_set('session.cookie_httponly', '1');
 session_start();
 require_once __DIR__ . '/../config.php';
+if (!@include_once __DIR__ . '/lib/ad_boot.php') { http_response_code(503); header('Retry-After: 3600'); exit; }
 require_once __DIR__ . '/../jdf.php';
 require_once __DIR__ . '/../botapi.php';
 require_once __DIR__ . '/../function.php';
@@ -115,9 +116,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST['_rx_action'])) {
     if ($rxOrderId === '') {
         $rxFlash = ['type' => 'err', 'text' => 'درخواست نامعتبر است.'];
     } elseif ($rxAction === 'confirm') {
-        $res = rxReceiptConfirm($rxOrderId, ['actor_label' => $rxActorLabel]);
+        $res = rxReceiptConfirm($rxOrderId, ['actor_label' => $rxActorLabel, 'override_reason' => trim((string) ($_POST['reason'] ?? ''))]);
         if ($res['ok']) {
             $rxFlash = ['type' => 'ok', 'text' => 'رسید با موفقیت تایید شد.'];
+        } elseif (($res['reason'] ?? '') === 'verify_reason_required') {
+            $rxFlash = ['type' => 'err', 'text' => 'این پرداخت با روش «تأیید رسید با بررسی» ایجاد شده و هیچ واریز دقیقاً منطبقی برای آن ثبت نشده است؛ برای تأیید دستی، دلیل را وارد کنید.'];
         } elseif (($res['reason'] ?? '') === 'fulfillment_failed') {
             $rxFlash = ['type' => 'err', 'text' => 'پرداخت به‌صورت نهایی تایید نشد و رسید برای بررسی مجدد به حالت در انتظار بازگشت.'];
         } elseif (in_array($res['reason'] ?? '', ['race_lost', 'already_paid', 'already_final', 'not_waiting'], true)) {
@@ -466,6 +469,8 @@ $rxKeepQsString = http_build_query(array_filter($rxKeepQsArr, function ($v) { re
                 <div class="detail-sheet__field"><span class="detail-sheet__field-label">مبلغ</span><span class="detail-sheet__field-value" id="rx-confirm-price"></span></div>
                 <div class="detail-sheet__field"><span class="detail-sheet__field-label">آیدی کاربر</span><span class="detail-sheet__field-value" id="rx-confirm-user"></span></div>
                 <div class="detail-sheet__field"><span class="detail-sheet__field-label">کد پیگیری</span><span class="detail-sheet__field-value" id="rx-confirm-order"></span></div>
+                <label for="rx-confirm-reason">دلیل تأیید دستی (برای پرداخت‌های «تأیید رسید با بررسی» بدون واریز منطبق الزامی است)</label>
+                <textarea name="reason" id="rx-confirm-reason" rows="2" class="form-control"></textarea>
             </div>
             <div class="modal-foot">
                 <button type="button" class="btn btn-outline" onclick="closeModal('modal-rx-confirm')">انصراف</button>
@@ -593,6 +598,7 @@ function rxOpenConfirm(orderId, priceFmt, userId, keepQs) {
     document.getElementById('rx-confirm-price').textContent = priceFmt + ' تومان';
     document.getElementById('rx-confirm-user').textContent = userId;
     document.getElementById('rx-confirm-order').textContent = orderId;
+    document.getElementById('rx-confirm-reason').value = '';
     openModal('modal-rx-confirm');
 }
 

@@ -379,6 +379,7 @@ function rxRenderFeatureStatus($rxFeatView, $from_id) {
     } elseif ($rxFeatView === 'glass_mode') {
         $rxGlassOn = (string)($setting['inlinebtnmain'] ?? 'offinline') === 'oninline';
         $rxAutoRemoveOn = (string)($setting['auto_remove_reply_keyboard'] ?? 'on') !== 'off';
+        $rxRichOn = (string)($setting['user_rich_buttons_enabled'] ?? 'off') === 'on';
 
         $rxFeatKb = [
             [['text' => $rxGlassOn ? $textbotlang['Admin']['Status']['statuson'] : $textbotlang['Admin']['Status']['statusoff'],
@@ -387,15 +388,22 @@ function rxRenderFeatureStatus($rxFeatView, $from_id) {
             [['text' => $rxAutoRemoveOn ? $textbotlang['Admin']['Status']['statuson'] : $textbotlang['Admin']['Status']['statusoff'],
               'callback_data' => "editstsuts-auto_remove_kb-" . ($rxAutoRemoveOn ? 'on' : 'off')],
              ['text' => "🧹 حذف خودکار Reply Keyboard", 'callback_data' => "none"]],
+            [['text' => $rxRichOn ? $textbotlang['Admin']['Status']['statuson'] : $textbotlang['Admin']['Status']['statusoff'],
+              'callback_data' => "editstsuts-user_rich_buttons-" . ($rxRichOn ? 'on' : 'off')],
+             ['text' => "دکمه داخل متن پیام", 'callback_data' => "none"]],
+            [['text' => "تنظیمات داخلی متن", 'callback_data' => "richsec_menu"]],
             $rxBackRow,
         ];
 
         $rxFeatTitle = "🛡 <b>تنظیمات دکمه شیشه‌ای</b>\n\n"
             . "📌 <b>وضعیت فعلی:</b>\n"
             . "• شیشه‌ای بودن دکمه ربات: " . ($rxGlassOn ? "✅ روشن" : "❌ خاموش") . "\n"
-            . "• حذف خودکار Reply Keyboard: " . ($rxAutoRemoveOn ? "✅ روشن" : "❌ خاموش") . "\n\n"
+            . "• حذف خودکار Reply Keyboard: " . ($rxAutoRemoveOn ? "✅ روشن" : "❌ خاموش") . "\n"
+            . "• دکمه داخل متن پیام: " . ($rxRichOn ? "✅ روشن" : "❌ خاموش") . "\n"
+            . "\n"
             . "💡 اگر «شیشه‌ای بودن» خاموش باشد، منوها به‌صورت Reply Keyboard عادی نمایش داده می‌شوند.\n"
-            . "اگر «شیشه‌ای بودن» روشن باشد، منوها Inline نمایش داده می‌شوند و «حذف خودکار Reply Keyboard» مشخص می‌کند که کیبورد قبلی به‌طور خودکار پاک شود یا نه.";
+            . "اگر «شیشه‌ای بودن» روشن باشد، منوها Inline نمایش داده می‌شوند و «حذف خودکار Reply Keyboard» مشخص می‌کند که کیبورد قبلی به‌طور خودکار پاک شود یا نه.\n"
+            . "اگر «دکمه داخل متن پیام» روشن باشد، دکمه‌های کاربران داخل خود پیام نمایش داده می‌شوند. این حالت می‌تواند هم‌زمان با «شیشه‌ای بودن» روشن باشد؛ بخش‌هایی که در «تنظیمات داخلی متن» انتخاب شده‌اند با دکمه داخل متن و بقیه با حالت عادی نمایش داده می‌شوند.";
     } else {
         return false;
     }
@@ -695,15 +703,61 @@ function rxPremiumEmojiIsDuplicateError($e) {
     return stripos($msg, 'Duplicate') !== false || strpos($msg, '1062') !== false;
 }
 
-function rxStartMediaWaitingStep() {
-    return 'start_media_waiting';
+function rxStartMediaWaitingStep($section = 'start') {
+    return $section === 'start' ? 'start_media_waiting' : 'start_media_waiting:' . $section;
+}
+
+function rxStartMediaStepSection($step) {
+    $step = (string) $step;
+    if ($step === 'start_media_waiting') {
+        return 'start';
+    }
+    if (strpos($step, 'start_media_waiting:') === 0) {
+        $section = substr($step, strlen('start_media_waiting:'));
+        return rx_section_media_is_valid_section($section) ? $section : null;
+    }
+    return null;
 }
 
 function rxStartMediaCallbacks() {
     return [
         'stmedia_menu', 'stmedia_banner_off', 'stmedia_settings', 'stmedia_toggle', 'stmedia_set',
         'stmedia_cancel', 'stmedia_type', 'stmedia_preview', 'stmedia_delete', 'stmedia_delete_yes',
+        'stmedia_sections', 'stmedia_pick',
     ];
+}
+
+function rxStartMediaParseCallback($callbackName) {
+    $parts = explode(':', (string) $callbackName, 2);
+    $base = $parts[0];
+    $section = $parts[1] ?? 'start';
+    if (!in_array($base, rxStartMediaCallbacks(), true) || !rx_section_media_is_valid_section($section)) {
+        return null;
+    }
+    return [$base, $section];
+}
+
+function rxStartMediaCb($base, $section) {
+    return $section === 'start' ? $base : $base . ':' . $section;
+}
+
+function rxStartMediaBannerKey($section) {
+    $map = ['start' => 'start', 'buy' => 'buy'];
+    return $map[$section] ?? null;
+}
+
+function rxStartMediaBannerNoun($section) {
+    $map = ['start' => 'بنر استارت', 'buy' => 'بنر خرید اشتراک'];
+    return $map[$section] ?? '';
+}
+
+function rxStartMediaSectionLabel($section) {
+    $sections = rx_section_media_sections();
+    return (string) ($sections[$section] ?? $section);
+}
+
+function rxStartMediaSectionName($section) {
+    return trim(preg_replace('/^[^\p{L}\p{N}]+/u', '', rxStartMediaSectionLabel($section)));
 }
 
 function rxStartMediaColumns() {
@@ -737,6 +791,14 @@ function rxStartMediaEnsureSchema() {
                 $pdo->exec("ALTER TABLE setting ADD `{$columnName}` {$columnDefinition}");
             }
         }
+        $pdo->exec("CREATE TABLE IF NOT EXISTS section_media (
+            section_id VARCHAR(32) NOT NULL PRIMARY KEY,
+            media_status VARCHAR(20) NULL DEFAULT '0',
+            media_type VARCHAR(32) NULL DEFAULT '',
+            media_file_id VARCHAR(512) NULL DEFAULT '',
+            media_text VARCHAR(255) NULL DEFAULT '',
+            media_entities TEXT NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
         return $schemaReady = true;
     } catch (\Throwable $schemaError) {
         rx_start_media_log('schema ensure failed: ' . $schemaError->getMessage());
@@ -750,7 +812,56 @@ function rxStartMediaReloadSetting() {
     if (is_array($freshSetting)) {
         $setting = $freshSetting;
     }
+    rx_section_media_table_rows(true);
     return is_array($setting) ? $setting : [];
+}
+
+function rxSectionMediaApply($section, array $fields, $clearBanner = false) {
+    global $pdo;
+    if (!($pdo instanceof PDO) || !rx_section_media_is_valid_section($section)) {
+        return false;
+    }
+    $allowed = ['status', 'type', 'file_id', 'text', 'entities'];
+    $fields = array_intersect_key($fields, array_flip($allowed));
+    if (empty($fields)) {
+        return false;
+    }
+    $bannerKey = $clearBanner ? rxStartMediaBannerKey($section) : null;
+    try {
+        $pdo->beginTransaction();
+        if ($section === 'start') {
+            $assignments = [];
+            $params = [];
+            foreach ($fields as $name => $value) {
+                $assignments[] = "start_media_{$name} = ?";
+                $params[] = $value;
+            }
+            $pdo->prepare("UPDATE setting SET " . implode(', ', $assignments))->execute($params);
+        } else {
+            $columns = ['section_id'];
+            $placeholders = ['?'];
+            $updates = [];
+            $params = [$section];
+            foreach ($fields as $name => $value) {
+                $columns[] = "media_{$name}";
+                $placeholders[] = '?';
+                $updates[] = "media_{$name} = VALUES(media_{$name})";
+                $params[] = $value;
+            }
+            $pdo->prepare("INSERT INTO section_media (" . implode(', ', $columns) . ") VALUES (" . implode(', ', $placeholders) . ") ON DUPLICATE KEY UPDATE " . implode(', ', $updates))->execute($params);
+        }
+        if ($bannerKey !== null) {
+            $pdo->exec("UPDATE setting SET banner_{$bannerKey}_status = '0'");
+        }
+        $pdo->commit();
+        return true;
+    } catch (\Throwable $writeError) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        rx_start_media_log('write failed: ' . $writeError->getMessage());
+        return false;
+    }
 }
 
 function rxStartMediaWrite($sql, array $params = []) {
@@ -813,49 +924,93 @@ function rxStartMediaStatusText($isOn) {
         : (string)($textbotlang['Admin']['Status']['statusoff'] ?? '❌ خاموش');
 }
 
-function rxStartMediaRenderMenu($from_id, $editInPlace = true) {
+function rxStartMediaRenderSections($from_id, $editInPlace = true) {
     $settingRow = rxStartMediaReloadSetting();
-    $bannerOn = (string)($settingRow['banner_start_status'] ?? '0') === '1';
-    $mediaOn = rx_start_media_is_enabled($settingRow);
-    $storedConfig = rx_start_media_stored_config($settingRow);
-    $text = "🎭 <b>ارسال استیکر در استارت</b>\n\n"
+    $text = "🎯 <b>انتخاب بخش</b>\n\n"
+        . "بخشی را که می‌خواهید رسانه‌ی خودکارش را تنظیم کنید انتخاب کنید.\n"
+        . "هر بخش تنظیمات و وضعیت مستقل دارد.\n\n"
+        . "✅ = ارسال خودکار روشن | ▫️ = خاموش";
+    $rows = [];
+    $pair = [];
+    foreach (rx_section_media_sections() as $sectionId => $sectionLabel) {
+        $mark = rx_section_media_is_enabled($sectionId, $settingRow) ? "✅ " : "";
+        $button = ['text' => $mark . $sectionLabel, 'callback_data' => rxStartMediaCb('stmedia_pick', $sectionId)];
+        if ($sectionId === 'start') {
+            $rows[] = [$button];
+            continue;
+        }
+        $pair[] = $button;
+        if (count($pair) === 2) {
+            $rows[] = $pair;
+            $pair = [];
+        }
+    }
+    if (!empty($pair)) {
+        $rows[] = $pair;
+    }
+    $rows[] = [['text' => "🔙 بازگشت", 'callback_data' => 'stmedia_settings']];
+    return rxStartMediaShow($from_id, $text, $rows, $editInPlace);
+}
+
+function rxStartMediaRenderMenu($from_id, $editInPlace = true, $section = 'start') {
+    $settingRow = rxStartMediaReloadSetting();
+    $bannerKey = rxStartMediaBannerKey($section);
+    $bannerNoun = rxStartMediaBannerNoun($section);
+    $bannerOn = $bannerKey !== null && (string)($settingRow["banner_{$bannerKey}_status"] ?? '0') === '1';
+    $mediaOn = rx_section_media_is_enabled($section, $settingRow);
+    $storedConfig = rx_section_media_stored_config($section, $settingRow);
+    $title = $section === 'start' ? "ارسال استیکر در استارت" : "ارسال استیکر در " . rxStartMediaSectionName($section);
+    $text = "🎭 <b>{$title}</b>\n\n"
         . "📌 <b>وضعیت فعلی:</b>\n"
-        . "• بنر استارت: " . rxStartMediaStatusText($bannerOn) . "\n"
+        . "• {$bannerNoun}: " . rxStartMediaStatusText($bannerOn) . "\n"
         . "• ارسال خودکار رسانه: " . rxStartMediaStatusText($mediaOn) . "\n"
         . "• رسانه تنظیم‌شده: " . rxStartMediaTypeLabel($storedConfig['type'] ?? '') . "\n\n"
-        . "💡 بنر استارت و رسانه خودکار هم‌زمان فعال نمی‌شوند؛ با روشن کردن ارسال رسانه، بنر استارت به‌صورت خودکار خاموش می‌شود.";
+        . "💡 {$bannerNoun} و رسانه خودکار هم‌زمان فعال نمی‌شوند؛ با روشن کردن ارسال رسانه، {$bannerNoun} به‌صورت خودکار خاموش می‌شود.";
     $bannerButton = $bannerOn
-        ? "🖼 غیرفعال‌سازی بنر استارت (اکنون روشن)"
-        : "🖼 بنر استارت غیرفعال است";
+        ? "🖼 غیرفعال‌سازی {$bannerNoun} (اکنون روشن)"
+        : "🖼 {$bannerNoun} غیرفعال است";
     $rows = [
-        [['text' => $bannerButton, 'callback_data' => 'stmedia_banner_off']],
-        [['text' => "⚙️ تنظیمات ارسال استیکر", 'callback_data' => 'stmedia_settings']],
-        [['text' => "🔙 بازگشت", 'callback_data' => 'featcat_bot']],
+        [['text' => $bannerButton, 'callback_data' => rxStartMediaCb('stmedia_banner_off', $section)]],
+        [['text' => "⚙️ تنظیمات ارسال استیکر", 'callback_data' => rxStartMediaCb('stmedia_settings', $section)]],
+        [['text' => "🔙 بازگشت", 'callback_data' => $section === 'start' ? 'featcat_bot' : 'stmedia_sections']],
     ];
     return rxStartMediaShow($from_id, $text, $rows, $editInPlace);
 }
 
-function rxStartMediaRenderSettings($from_id, $editInPlace = true, $headline = '') {
+function rxStartMediaRenderSettings($from_id, $editInPlace = true, $headline = '', $section = 'start') {
     $settingRow = rxStartMediaReloadSetting();
-    $mediaOn = rx_start_media_is_enabled($settingRow);
-    $storedConfig = rx_start_media_stored_config($settingRow);
+    $mediaOn = rx_section_media_is_enabled($section, $settingRow);
+    $storedConfig = rx_section_media_stored_config($section, $settingRow);
     $typeLabel = rxStartMediaTypeLabel($storedConfig['type'] ?? '');
     $text = ($headline !== '' ? $headline . "\n\n" : '')
-        . "⚙️ <b>تنظیمات ارسال استیکر</b>\n\n"
-        . "• ارسال خودکار در /start: " . rxStartMediaStatusText($mediaOn) . "\n"
-        . "• نوع رسانه فعلی: " . $typeLabel . "\n";
+        . "⚙️ <b>تنظیمات ارسال استیکر</b>\n\n";
+    if ($section === 'start') {
+        $text .= "• ارسال خودکار در /start: " . rxStartMediaStatusText($mediaOn) . "\n";
+    } else {
+        $text .= "• بخش: " . rxStartMediaSectionLabel($section) . "\n"
+            . "• ارسال خودکار: " . rxStartMediaStatusText($mediaOn) . "\n";
+    }
+    $text .= "• نوع رسانه فعلی: " . $typeLabel . "\n";
     if ($storedConfig !== null && in_array($storedConfig['type'], ['emoji', 'custom_emoji'], true)) {
         $text .= "• ایموجی پایه: " . htmlspecialchars($storedConfig['text'], ENT_QUOTES, 'UTF-8') . "\n";
     }
-    $text .= "\n📥 انواع قابل قبول: استیکر معمولی، ایموجی پرمیوم، ایموجی معمولی، گیف (انیمیشن تلگرام).\n"
-        . "رسانه قبل از پیام خوش‌آمد /start به‌صورت یک پیام جداگانه ارسال می‌شود.";
+    $text .= "\n📥 انواع قابل قبول: استیکر معمولی، ایموجی پرمیوم، ایموجی معمولی، گیف (انیمیشن تلگرام).\n";
+    if ($section === 'start') {
+        $text .= "رسانه قبل از پیام خوش‌آمد /start به‌صورت یک پیام جداگانه ارسال می‌شود.";
+    } elseif ($section === 'wallet') {
+        $text .= "رسانه هنگام ورود به کیف پول از منوی اصلی، قبل از پاسخ بخش به‌صورت پیام جداگانه ارسال می‌شود؛ ورود به شارژ، رسانه را دوباره ارسال نمی‌کند.";
+    } else {
+        $text .= "رسانه هنگام ورود به این بخش از منوی اصلی، قبل از پاسخ بخش به‌صورت پیام جداگانه ارسال می‌شود.";
+    }
+    $backTarget = $section === 'start' ? 'stmedia_menu' : (rxStartMediaBannerKey($section) !== null ? rxStartMediaCb('stmedia_menu', $section) : 'stmedia_sections');
     $rows = [
-        [['text' => ($mediaOn ? "✅ ارسال خودکار: روشن" : "❌ ارسال خودکار: خاموش"), 'callback_data' => 'stmedia_toggle']],
-        [['text' => ($storedConfig === null ? "📤 تنظیم رسانه" : "📤 جایگزینی رسانه"), 'callback_data' => 'stmedia_set']],
-        [['text' => "🏷 نوع: " . $typeLabel, 'callback_data' => 'stmedia_type']],
-        [['text' => "👁 پیش‌نمایش", 'callback_data' => 'stmedia_preview'],
-         ['text' => "🗑 حذف رسانه", 'callback_data' => 'stmedia_delete']],
-        [['text' => "🔙 بازگشت", 'callback_data' => 'stmedia_menu']],
+        [['text' => ($mediaOn ? "✅ ارسال خودکار: روشن" : "❌ ارسال خودکار: خاموش"), 'callback_data' => rxStartMediaCb('stmedia_toggle', $section)]],
+        [['text' => ($storedConfig === null ? "📤 تنظیم رسانه" : "📤 جایگزینی رسانه"), 'callback_data' => rxStartMediaCb('stmedia_set', $section)]],
+        [['text' => "🏷 نوع: " . $typeLabel, 'callback_data' => rxStartMediaCb('stmedia_type', $section)]],
+        [['text' => "👁 پیش‌نمایش", 'callback_data' => rxStartMediaCb('stmedia_preview', $section)],
+         ['text' => "🗑 حذف رسانه", 'callback_data' => rxStartMediaCb('stmedia_delete', $section)]],
+        [['text' => "🎯 انتخاب بخش", 'callback_data' => 'stmedia_sections']],
+        [['text' => "🔙 بازگشت", 'callback_data' => $backTarget]],
     ];
     return rxStartMediaShow($from_id, $text, $rows, $editInPlace);
 }
@@ -868,92 +1023,119 @@ function rxStartMediaSetStep(&$user, $from_id, $stepName) {
 }
 
 function rxStartMediaHandleCallback($from_id, $callbackName, &$user) {
+    $parsed = rxStartMediaParseCallback($callbackName);
+    if ($parsed === null) {
+        rxStartMediaAnswer("⚠️ درخواست نامعتبر است.", true);
+        return;
+    }
+    list($action, $section) = $parsed;
+    $bannerKey = rxStartMediaBannerKey($section);
     if (!rxStartMediaEnsureSchema()) {
         rxStartMediaAnswer("⚠️ ساختار پایگاه داده برای این بخش آماده نیست. لطفاً به‌روزرسانی جداول (table.php) را اجرا کنید.", true);
         return;
     }
-    if ((string)($user['step'] ?? '') === rxStartMediaWaitingStep() && $callbackName !== 'stmedia_set') {
+    if (rxStartMediaStepSection($user['step'] ?? '') !== null && $action !== 'stmedia_set') {
         rxStartMediaSetStep($user, $from_id, 'home');
     }
     $settingRow = rxStartMediaReloadSetting();
 
-    if ($callbackName === 'stmedia_menu') {
+    if ($action === 'stmedia_menu') {
         rxStartMediaAnswer();
-        rxStartMediaRenderMenu($from_id);
+        rxStartMediaRenderMenu($from_id, true, $section);
         return;
     }
-    if ($callbackName === 'stmedia_settings') {
+    if ($action === 'stmedia_sections') {
         rxStartMediaAnswer();
-        rxStartMediaRenderSettings($from_id);
+        rxStartMediaRenderSections($from_id);
         return;
     }
-    if ($callbackName === 'stmedia_banner_off') {
-        if ((string)($settingRow['banner_start_status'] ?? '0') !== '1') {
-            rxStartMediaAnswer("ℹ️ بنر استارت از قبل غیرفعال است.", true);
-            rxStartMediaRenderMenu($from_id);
+    if ($action === 'stmedia_pick') {
+        rxStartMediaAnswer();
+        if ($bannerKey !== null) {
+            rxStartMediaRenderMenu($from_id, true, $section);
+        } else {
+            rxStartMediaRenderSettings($from_id, true, '', $section);
+        }
+        return;
+    }
+    if ($action === 'stmedia_settings') {
+        rxStartMediaAnswer();
+        rxStartMediaRenderSettings($from_id, true, '', $section);
+        return;
+    }
+    if ($action === 'stmedia_banner_off') {
+        if ($bannerKey === null) {
+            rxStartMediaAnswer("⚠️ درخواست نامعتبر است.", true);
             return;
         }
-        if (!rxStartMediaWrite("UPDATE setting SET banner_start_status = '0'")) {
+        $bannerNoun = rxStartMediaBannerNoun($section);
+        if ((string)($settingRow["banner_{$bannerKey}_status"] ?? '0') !== '1') {
+            rxStartMediaAnswer("ℹ️ {$bannerNoun} از قبل غیرفعال است.", true);
+            rxStartMediaRenderMenu($from_id, true, $section);
+            return;
+        }
+        if (!rxStartMediaWrite("UPDATE setting SET banner_{$bannerKey}_status = '0'")) {
             rxStartMediaAnswer("❌ غیرفعال‌سازی بنر ناموفق بود. لطفاً دوباره تلاش کنید.", true);
             return;
         }
-        rxStartMediaAnswer("✅ بنر استارت غیرفعال شد.");
-        rxStartMediaRenderMenu($from_id);
+        rxStartMediaAnswer("✅ {$bannerNoun} غیرفعال شد.");
+        rxStartMediaRenderMenu($from_id, true, $section);
         return;
     }
-    if ($callbackName === 'stmedia_toggle') {
-        if (rx_start_media_is_enabled($settingRow)) {
-            if (!rxStartMediaWrite("UPDATE setting SET start_media_status = '0'")) {
+    if ($action === 'stmedia_toggle') {
+        if (rx_section_media_is_enabled($section, $settingRow)) {
+            if (!rxSectionMediaApply($section, ['status' => '0'])) {
                 rxStartMediaAnswer("❌ ذخیره تغییرات ناموفق بود.", true);
                 return;
             }
             rxStartMediaAnswer("❌ ارسال خودکار رسانه خاموش شد.");
-            rxStartMediaRenderSettings($from_id);
+            rxStartMediaRenderSettings($from_id, true, '', $section);
             return;
         }
-        if (rx_start_media_stored_config($settingRow) === null) {
+        if (rx_section_media_stored_config($section, $settingRow) === null) {
             rxStartMediaAnswer("⚠️ ابتدا یک رسانه معتبر تنظیم کنید.", true);
             return;
         }
-        $bannerWasOn = (string)($settingRow['banner_start_status'] ?? '0') === '1';
-        if (!rxStartMediaWrite("UPDATE setting SET start_media_status = '1', banner_start_status = '0'")) {
+        $bannerWasOn = $bannerKey !== null && (string)($settingRow["banner_{$bannerKey}_status"] ?? '0') === '1';
+        if (!rxSectionMediaApply($section, ['status' => '1'], true)) {
             rxStartMediaAnswer("❌ فعال‌سازی ناموفق بود؛ هیچ تغییری اعمال نشد.", true);
             return;
         }
+        $bannerNoun = rxStartMediaBannerNoun($section);
         rxStartMediaAnswer($bannerWasOn
-            ? "✅ ارسال خودکار رسانه روشن شد و بنر استارت به‌صورت خودکار غیرفعال شد."
+            ? "✅ ارسال خودکار رسانه روشن شد و {$bannerNoun} به‌صورت خودکار غیرفعال شد."
             : "✅ ارسال خودکار رسانه روشن شد.", $bannerWasOn);
-        rxStartMediaRenderSettings($from_id);
+        rxStartMediaRenderSettings($from_id, true, '', $section);
         return;
     }
-    if ($callbackName === 'stmedia_set') {
-        rxStartMediaSetStep($user, $from_id, rxStartMediaWaitingStep());
+    if ($action === 'stmedia_set') {
+        rxStartMediaSetStep($user, $from_id, rxStartMediaWaitingStep($section));
         rxStartMediaAnswer();
         rxStartMediaShow($from_id,
-            "📤 <b>تنظیم رسانه استارت</b>\n\n"
+            "📤 <b>تنظیم رسانه " . ($section === 'start' ? "استارت" : rxStartMediaSectionName($section)) . "</b>\n\n"
             . "یکی از موارد زیر را ارسال کنید:\n"
             . "• استیکر معمولی\n"
             . "• ایموجی پرمیوم\n"
             . "• ایموجی معمولی (فقط ایموجی، بدون متن)\n"
             . "• گیف / انیمیشن تلگرام\n\n"
             . "ℹ️ تا زمانی که رسانه معتبری دریافت نشود، رسانه فعلی تغییر نمی‌کند.",
-            [[['text' => "🔙 لغو", 'callback_data' => 'stmedia_cancel']]],
+            [[['text' => "🔙 لغو", 'callback_data' => rxStartMediaCb('stmedia_cancel', $section)]]],
             true
         );
         return;
     }
-    if ($callbackName === 'stmedia_cancel') {
+    if ($action === 'stmedia_cancel') {
         rxStartMediaAnswer("لغو شد.");
-        rxStartMediaRenderSettings($from_id);
+        rxStartMediaRenderSettings($from_id, true, '', $section);
         return;
     }
-    if ($callbackName === 'stmedia_type') {
-        $storedConfig = rx_start_media_stored_config($settingRow);
+    if ($action === 'stmedia_type') {
+        $storedConfig = rx_section_media_stored_config($section, $settingRow);
         rxStartMediaAnswer("نوع رسانه فعلی: " . rxStartMediaTypeLabel($storedConfig['type'] ?? ''), true);
         return;
     }
-    if ($callbackName === 'stmedia_preview') {
-        $storedConfig = rx_start_media_stored_config($settingRow);
+    if ($action === 'stmedia_preview') {
+        $storedConfig = rx_section_media_stored_config($section, $settingRow);
         if ($storedConfig === null) {
             rxStartMediaAnswer("⚠️ هیچ رسانه معتبری تنظیم نشده است.", true);
             return;
@@ -966,41 +1148,42 @@ function rxStartMediaHandleCallback($from_id, $callbackName, &$user) {
         $previewResult = rx_start_media_dispatch($from_id, $storedConfig);
         $headline = '';
         if (!is_array($previewResult) || empty($previewResult['ok'])) {
-            rx_start_media_log('preview ' . $storedConfig['type'] . ' failed: ' . (is_array($previewResult) ? (string)($previewResult['description'] ?? 'unknown error') : 'no response'));
+            rx_start_media_log($section . ' preview ' . $storedConfig['type'] . ' failed: ' . (is_array($previewResult) ? (string)($previewResult['description'] ?? 'unknown error') : 'no response'));
             $headline = "❌ ارسال پیش‌نمایش ناموفق بود؛ ممکن است رسانه ذخیره‌شده دیگر معتبر نباشد. لطفاً رسانه را دوباره تنظیم کنید.";
         } else {
-            $headline = "👆 پیش‌نمایش رسانه استارت";
+            $headline = "👆 پیش‌نمایش رسانه " . ($section === 'start' ? "استارت" : rxStartMediaSectionName($section));
         }
-        rxStartMediaRenderSettings($from_id, false, $headline);
+        rxStartMediaRenderSettings($from_id, false, $headline, $section);
         return;
     }
-    if ($callbackName === 'stmedia_delete') {
-        if (rx_start_media_stored_config($settingRow) === null && trim((string)($settingRow['start_media_type'] ?? '')) === '') {
+    if ($action === 'stmedia_delete') {
+        $row = rx_section_media_row($section, $settingRow);
+        if (rx_section_media_stored_config($section, $settingRow) === null && trim((string)($row['type'] ?? '')) === '') {
             rxStartMediaAnswer("ℹ️ رسانه‌ای برای حذف وجود ندارد.", true);
             return;
         }
         rxStartMediaAnswer();
         rxStartMediaShow($from_id,
-            "🗑 <b>حذف رسانه استارت</b>\n\nآیا مطمئن هستید؟ با حذف رسانه، ارسال خودکار نیز خاموش می‌شود.",
-            [[['text' => "✅ بله، حذف شود", 'callback_data' => 'stmedia_delete_yes'],
-              ['text' => "❌ خیر", 'callback_data' => 'stmedia_settings']]],
+            "🗑 <b>حذف رسانه " . ($section === 'start' ? "استارت" : rxStartMediaSectionName($section)) . "</b>\n\nآیا مطمئن هستید؟ با حذف رسانه، ارسال خودکار نیز خاموش می‌شود.",
+            [[['text' => "✅ بله، حذف شود", 'callback_data' => rxStartMediaCb('stmedia_delete_yes', $section)],
+              ['text' => "❌ خیر", 'callback_data' => rxStartMediaCb('stmedia_settings', $section)]]],
             true
         );
         return;
     }
-    if ($callbackName === 'stmedia_delete_yes') {
-        if (!rxStartMediaWrite("UPDATE setting SET start_media_status = '0', start_media_type = '', start_media_file_id = '', start_media_text = '', start_media_entities = NULL")) {
+    if ($action === 'stmedia_delete_yes') {
+        if (!rxSectionMediaApply($section, ['status' => '0', 'type' => '', 'file_id' => '', 'text' => '', 'entities' => null])) {
             rxStartMediaAnswer("❌ حذف رسانه ناموفق بود.", true);
             return;
         }
         rxStartMediaAnswer("🗑 رسانه حذف شد.");
-        rxStartMediaRenderSettings($from_id);
+        rxStartMediaRenderSettings($from_id, true, '', $section);
         return;
     }
     rxStartMediaAnswer("⚠️ درخواست نامعتبر است.", true);
 }
 
-function rxStartMediaHandleInput($from_id, array $message, &$user) {
+function rxStartMediaHandleInput($from_id, array $message, &$user, $section = 'start') {
     $cancelKind = null;
     if (isset($message['text']) && is_string($message['text']) && function_exists('rxPremiumEmojiCancelKind')) {
         $cancelKind = rxPremiumEmojiCancelKind($message['text'], '');
@@ -1011,10 +1194,10 @@ function rxStartMediaHandleInput($from_id, array $message, &$user) {
     }
     if ($cancelKind === 'panel') {
         rxStartMediaSetStep($user, $from_id, 'home');
-        rxStartMediaRenderSettings($from_id, false, "لغو شد.");
+        rxStartMediaRenderSettings($from_id, false, "لغو شد.", $section);
         return true;
     }
-    $cancelRow = [[['text' => "🔙 لغو", 'callback_data' => 'stmedia_cancel']]];
+    $cancelRow = [[['text' => "🔙 لغو", 'callback_data' => rxStartMediaCb('stmedia_cancel', $section)]]];
     $parsedConfig = rx_start_media_parse_message($message);
     if ($parsedConfig === null) {
         rxStartMediaShow($from_id,
@@ -1034,33 +1217,31 @@ function rxStartMediaHandleInput($from_id, array $message, &$user) {
         rxStartMediaShow($from_id, "⚠️ ساختار پایگاه داده برای این بخش آماده نیست. لطفاً به‌روزرسانی جداول (table.php) را اجرا کنید.", $cancelRow, false);
         return true;
     }
-    $saved = rxStartMediaWrite(
-        "UPDATE setting SET start_media_type = ?, start_media_file_id = ?, start_media_text = ?, start_media_entities = ?",
-        [
-            $parsedConfig['type'],
-            $parsedConfig['file_id'],
-            $parsedConfig['text'],
-            empty($parsedConfig['entities']) ? null : json_encode($parsedConfig['entities'], JSON_UNESCAPED_UNICODE),
-        ]
-    );
+    $saved = rxSectionMediaApply($section, [
+        'type' => $parsedConfig['type'],
+        'file_id' => $parsedConfig['file_id'],
+        'text' => $parsedConfig['text'],
+        'entities' => empty($parsedConfig['entities']) ? null : json_encode($parsedConfig['entities'], JSON_UNESCAPED_UNICODE),
+    ]);
     if (!$saved) {
         rxStartMediaShow($from_id, "❌ ذخیره رسانه ناموفق بود. رسانه قبلی حفظ شد؛ دوباره تلاش کنید یا لغو را بزنید.", $cancelRow, false);
         return true;
     }
     rxStartMediaSetStep($user, $from_id, 'home');
-    rxStartMediaRenderSettings($from_id, false, "✅ رسانه با موفقیت ذخیره شد: " . rxStartMediaTypeLabel($parsedConfig['type']));
+    rxStartMediaRenderSettings($from_id, false, "✅ رسانه با موفقیت ذخیره شد: " . rxStartMediaTypeLabel($parsedConfig['type']), $section);
     return true;
 }
 
 function rxStartMediaHandleAdminUpdate($from_id, $datain, $update, &$user, $isAdministrator) {
     $callbackName = is_string($datain) ? trim($datain) : '';
-    $isWaiting = is_array($user) && (string)($user['step'] ?? '') === rxStartMediaWaitingStep();
+    $waitingSection = is_array($user) ? rxStartMediaStepSection($user['step'] ?? '') : null;
+    $isWaiting = $waitingSection !== null;
     if ($callbackName !== '' && strpos($callbackName, 'stmedia_') === 0) {
         if (!$isAdministrator) {
             rxStartMediaAnswer("⛔️ فقط ادمین اصلی به این بخش دسترسی دارد.", true);
             return true;
         }
-        if (!in_array($callbackName, rxStartMediaCallbacks(), true)) {
+        if (rxStartMediaParseCallback($callbackName) === null) {
             rxStartMediaAnswer("⚠️ درخواست نامعتبر است.", true);
             return true;
         }
@@ -1084,10 +1265,10 @@ function rxStartMediaHandleAdminUpdate($from_id, $datain, $update, &$user, $isAd
         return false;
     }
     try {
-        return rxStartMediaHandleInput($from_id, $message, $user);
+        return rxStartMediaHandleInput($from_id, $message, $user, $waitingSection);
     } catch (\Throwable $inputError) {
         rx_start_media_log('admin input failed: ' . $inputError->getMessage());
-        rxStartMediaShow($from_id, "⚠️ خطای داخلی رخ داد؛ رسانه قبلی حفظ شد.", [[['text' => "🔙 لغو", 'callback_data' => 'stmedia_cancel']]], false);
+        rxStartMediaShow($from_id, "⚠️ خطای داخلی رخ داد؛ رسانه قبلی حفظ شد.", [[['text' => "🔙 لغو", 'callback_data' => rxStartMediaCb('stmedia_cancel', $waitingSection)]]], false);
         return true;
     }
 }

@@ -7,6 +7,7 @@ if (session_status() === PHP_SESSION_NONE) {
 }
 
 require_once __DIR__ . '/../config.php';
+if (!@include_once __DIR__ . '/lib/ad_boot.php') { http_response_code(503); header('Retry-After: 3600'); exit; }
 require_once __DIR__ . '/lib/icons.php';
 require_once __DIR__ . '/../botapi.php';
 
@@ -118,6 +119,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST['_save'])) {
                 $upd = $pdo->prepare($statusSql);
                 $upd->bindValue(':v', $newStatus, PDO::PARAM_STR);
                 $upd->execute();
+                if ($key === 'buy' && $newStatus === '1') {
+                    try {
+                        $pdo->exec("UPDATE section_media SET media_status = '0' WHERE section_id = 'buy'");
+                    } catch (\Throwable $mediaError) {
+                        error_log('[panel/banner] buy media exclusion failed: ' . $mediaError->getMessage());
+                    }
+                }
                 $savedCount++;
             } catch (\Throwable $e) {
                 error_log('[panel/banner] ' . $statusCol . ' failed: ' . $e->getMessage());

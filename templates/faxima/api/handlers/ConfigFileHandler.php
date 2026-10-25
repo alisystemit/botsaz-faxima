@@ -68,13 +68,23 @@ final class ConfigFileHandler extends BaseHandler
             FaoximaResponse::notFound('Service not found');
         }
 
-        $payload = $svcHandler->buildPayloadFromInvoice($invoice);
+        $requestedType = ServiceHandler::normalizeClientType(FaoximaInput::nullableString($this->data, 'client_type') ?? 'links');
+        $payload = $svcHandler->buildPayloadFromInvoice($invoice, $requestedType);
         if ($payload === null) {
             FaoximaResponse::fail(502, 'Service data unavailable');
         }
 
         $content = null;
         $filename = null;
+
+        if ($requestedType !== 'links') {
+            $documents = ServiceHandler::clientDocumentsFromPayload($payload, $requestedType);
+            $document = $documents[$index] ?? null;
+            if (!is_string($document) || !ServiceHandler::isValidClientDocument($requestedType, $document)) {
+                FaoximaResponse::notFound('Requested client configuration is not available');
+            }
+            $this->sendDownload($document, ServiceHandler::clientDocumentFilename($requestedType, $index, count($documents)), (string)($payload['file_prefix'] ?? ''), false);
+        }
 
         foreach ((array)($payload['service_output'] ?? []) as $entry) {
             if (strtolower((string)($entry['type'] ?? '')) !== 'file') {
@@ -120,7 +130,11 @@ final class ConfigFileHandler extends BaseHandler
 
         $wireguard = strtolower((string)pathinfo((string)$filename, PATHINFO_EXTENSION)) === 'conf'
             && stripos((string)$content, '[Interface]') !== false;
-        $prefix = (string)($payload['file_prefix'] ?? '');
+        $this->sendDownload((string)$content, (string)$filename, (string)($payload['file_prefix'] ?? ''), $wireguard);
+    }
+
+    private function sendDownload(string $content, string $filename, string $prefix, bool $wireguard): void
+    {
         $filename = function_exists('normalizeConfigFilename')
             ? normalizeConfigFilename((string)$filename, $prefix, $wireguard)
             : $this->sanitizeFilename(($prefix !== '' ? $prefix . '-' : '') . (string)$filename);

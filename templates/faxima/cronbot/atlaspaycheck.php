@@ -24,12 +24,17 @@ if (!function_exists('atlaspayCheckOrder')) {
     return;
 }
 
+if (function_exists('atlaspayCustomRunCron')) {
+    atlaspayCustomRunCron();
+}
+
 try {
     $stmt = $pdo->prepare(
-        "SELECT id_order, atlaspay_order_id, price
+        "SELECT id_order, atlaspay_order_id, price, payment_Status, payment_processing_version, atlaspay_total_amount, atlaspay_local_state, id_user
            FROM Payment_report
           WHERE payment_Status = 'Unpaid'
             AND Payment_Method = 'atlaspay'
+            AND (atlaspay_gateway_mode IS NULL OR atlaspay_gateway_mode <> 'custom')
             AND atlaspay_order_id IS NOT NULL
             AND atlaspay_order_id <> ''
           ORDER BY id DESC
@@ -37,6 +42,22 @@ try {
     );
     $stmt->execute();
     $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    $lateStmt = $pdo->prepare(
+        "SELECT id_order, atlaspay_order_id, price, payment_Status, payment_processing_version, atlaspay_total_amount, atlaspay_local_state, id_user
+           FROM Payment_report
+          WHERE payment_Status = 'expire'
+            AND Payment_Method = 'atlaspay'
+            AND (atlaspay_gateway_mode IS NULL OR atlaspay_gateway_mode <> 'custom')
+            AND payment_processing_version >= 2
+            AND atlaspay_order_id IS NOT NULL
+            AND atlaspay_order_id <> ''
+            AND atlaspay_created_at >= ?
+            AND (atlaspay_last_checked_at IS NULL OR atlaspay_last_checked_at <= ?)
+          ORDER BY atlaspay_last_checked_at ASC, id ASC
+          LIMIT 20"
+    );
+    $lateStmt->execute([time() - 172800, time() - 900]);
+    $rows = array_merge($rows, $lateStmt->fetchAll(PDO::FETCH_ASSOC));
 } catch (Throwable $e) {
     error_log('[atlaspaycheck] select pending failed: ' . $e->getMessage());
     return;
@@ -59,6 +80,13 @@ foreach ($rows as $row) {
     }
 
     $check = atlaspayCheckOrder($atlaspayOrderId);
+    if ((int) ($row['payment_processing_version'] ?? 0) >= 2 && function_exists('atlaspayOfficialV2Process')) {
+        if (function_exists('atlaspayCustomUpdateOfficialChecked')) {
+            atlaspayCustomUpdateOfficialChecked($orderId);
+        }
+        atlaspayOfficialV2Process($row, $check);
+        continue;
+    }
     if (!is_array($check) || (int) ($check['id'] ?? 0) !== (int) $atlaspayOrderId) {
         continue;
     }

@@ -118,6 +118,14 @@ if (!function_exists('rxReceiptConfirm')) {
             return ['ok' => false, 'reason' => 'purchase_receipts_pending', 'report' => $report];
         }
 
+        $sbvReason = trim((string) ($ctx['override_reason'] ?? ''));
+        if (function_exists('rx_sbv_confirm_guard')) {
+            $sbvGuard = rx_sbv_confirm_guard((string) $report['id_order'], $sbvReason);
+            if ($sbvGuard !== null) {
+                return ['ok' => false, 'reason' => $sbvGuard, 'report' => $report];
+            }
+        }
+
         $claim = rx_pf_claim((string) $report['id_order'], ['from' => ['waiting'], 'to' => 'processing']);
         $claimStatus = (string) ($claim['status'] ?? 'error');
         if ($claimStatus === 'error') {
@@ -176,6 +184,10 @@ if (!function_exists('rxReceiptConfirm')) {
         }
 
         $finalReport = rxReceiptGet($orderId, false);
+
+        if (function_exists('rx_sbv_after_external_confirm')) {
+            rx_sbv_after_external_confirm($orderId, $actorLabel, $sbvReason);
+        }
 
         if (!empty($finalReport['card_photo_file_id']) && !empty($finalReport['card_last4'])) {
             $vcUid = (string)$finalReport['id_user'];
@@ -467,6 +479,9 @@ if (!function_exists('rxCancelAbandonedCardPayment')) {
                     $refuse = 'receipt_delivered';
                 }
             }
+            if ($refuse === null && function_exists('rx_sbv_cancel_guard')) {
+                $refuse = rx_sbv_cancel_guard($pdo, $orderId, $reason, $targetStatus);
+            }
             if ($refuse !== null) {
                 if ($ownTx) $pdo->rollBack();
                 return ['ok' => false, 'reason' => $refuse];
@@ -645,6 +660,7 @@ if (!function_exists('rxReceiptHardDelete')) {
     {
         global $pdo;
         if (!($pdo instanceof PDO)) return false;
+        if (function_exists('rx_sbv_is_verify_order') && rx_sbv_is_verify_order($orderId)) return false;
         $stmt = $pdo->prepare("DELETE FROM Payment_report WHERE id_order = :id_order AND " . rxReceiptScopeSql());
         $stmt->bindValue(':id_order', $orderId, PDO::PARAM_STR);
         $stmt->execute();

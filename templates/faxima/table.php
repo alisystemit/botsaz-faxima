@@ -565,6 +565,8 @@ try {
         volumewarn varchar(200)  NULL,
         inlinebtnmain varchar(200)  NULL,
         auto_remove_reply_keyboard varchar(20) NULL DEFAULT 'on',
+        user_rich_buttons_enabled varchar(20) NULL DEFAULT 'off',
+        user_rich_sections text NULL,
         verifystart varchar(200)  NULL,
         id_support varchar(200)  NULL,
         statusnamecustom varchar(100)  NULL,
@@ -688,6 +690,9 @@ try {
         addFieldToTable("setting", "affiliatespercentage", "0", "VARCHAR(600)");
         addFieldToTable("setting", "inlinebtnmain", "offinline", "VARCHAR(200)");
         addFieldToTable("setting", "auto_remove_reply_keyboard", "on", "VARCHAR(20)");
+        addFieldToTable("setting", "user_rich_buttons_enabled", "off", "VARCHAR(20)");
+        addFieldToTable("setting", "user_rich_sections", null, "TEXT");
+        addFieldToTable("user", "ui_section", null, "VARCHAR(24)");
         addFieldToTable("setting", "volumewarn", "2", "VARCHAR(200)");
         addFieldToTable("setting", "statusagentrequest", "onrequestagent", "VARCHAR(600)");
         addFieldToTable("setting", "statusnewuser", "onnewuser", "VARCHAR(600)");
@@ -707,6 +712,7 @@ try {
 
         addFieldToTable("setting", "premium_emoji_status", "0", "VARCHAR(20)");
         addFieldToTable("setting", "keyboard_styles_all", "{}", "TEXT");
+        addFieldToTable("setting", "account_keyboard_layout", null, "TEXT");
 
 
         addFieldToTable("setting", "antispam_status", "0", "VARCHAR(20)");
@@ -750,7 +756,8 @@ try {
         password_hash varchar(255) NULL,
         iplogin varchar(1000) NULL,
         rule varchar(500) NOT NULL,
-        last_ticket_seen INT(11) NULL DEFAULT 0)");
+        last_ticket_seen INT(11) NULL DEFAULT 0,
+        ad_modal_hidden_until INT(11) NULL DEFAULT 0)");
         $stmt->execute();
         $randomString = bin2hex(random_bytes(5));
 
@@ -770,6 +777,7 @@ try {
         addFieldToTable("admin", "password_hash", null, "VARCHAR(255)");
         addFieldToTable("admin", "iplogin", null, "VARCHAR(1000)");
         addFieldToTable("admin", "last_ticket_seen", "0", "INT(11)");
+        addFieldToTable("admin", "ad_modal_hidden_until", "0", "INT(11)");
     }
 } catch (Exception $e) {
     error_log('[panels] ' . $e->getMessage());
@@ -817,6 +825,7 @@ try {
     if (!$table_exists) {
         $result = $connect->query("CREATE TABLE marzban_panel (
         id INT(6) UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        position INT(11) NOT NULL DEFAULT 0,
         code_panel varchar(200) NULL,
         name_panel varchar(2000) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL,
         status varchar(500) NULL,
@@ -909,6 +918,12 @@ try {
             'n' => "365",
             'n2' => "365"
         ));
+        $panelPositionColumnExisted = rxTableColumnExists($connect, "marzban_panel", "position");
+        addFieldToTable("marzban_panel", "position", null, "INT(11) NOT NULL DEFAULT 0");
+        if (!$panelPositionColumnExisted) {
+            $connect->query("SET @fx_pos := 0");
+            $connect->query("UPDATE marzban_panel SET position = (@fx_pos := @fx_pos + 1) ORDER BY id ASC");
+        }
         addFieldToTable("marzban_panel", "on_hold_test", "1", "VARCHAR(60)");
         addFieldToTable("marzban_panel", "version_panel", "0", "VARCHAR(60)");
         addFieldToTable("marzban_panel", "proxies", null, "TEXT");
@@ -1576,7 +1591,27 @@ try {
 
 📆 {date_now} → ⏰ {time_now}
                     ";
-    $text_service_detail = "📊وضعیت سرویس : {status}
+    $text_service_detail = "🗂 نام سرویس : {product}
+📊وضعیت سرویس : {status}
+🌍 موقعیت سرویس :{location}
+👤 شناسه سرویس : <code>{username}</code>
+
+🔋 ترافیک : {traffic}
+📥 حجم مصرفی : {used}
+💢 حجم باقی مانده : {remaining} ({percent}%)
+
+📅 تاریخ اتمام : {expire_date} ({days_left})";
+    $text_service_detail_previous = "🗂 نام سرویس : {product}
+📊وضعیت سرویس : {status}
+🌍 موقعیت سرویس :{location}
+
+🔋 ترافیک : {traffic}
+📥 حجم مصرفی : {used}
+💢 حجم باقی مانده : {remaining} ({percent}%)
+
+📅 تاریخ اتمام : {expire_date} ({days_left})
+🆔 شناسه سرویس : <code>{username}</code>";
+    $text_service_detail_legacy = "📊وضعیت سرویس : {status}
 👤 نام سرویس : <code>{username}</code>
 🌍 موقعیت سرویس :{location}
 🗂 نام محصول :{product}
@@ -2051,9 +2086,9 @@ try {
         ['dyn_panel_user_unblocked_notice', "✳️ حساب کاربری شما از مسدودی خارج شد ✳️\nاکنون میتوانید از ربات استفاده کنید "],
         ['dyn_panel_user_balance_added_tpl', '💎 کاربر عزیز مبلغ {amount} T به موجودی کیف پول تان اضافه گردید.'],
         ['dyn_panel_user_admin_message_tpl', "📥 یک پیام از مدیریت برای شما ارسال شد.\n\nمتن پیام : {message}"],
-        ['dyn_cron_volume_warning_tpl', "با سلام خدمت شما کاربر گرامی 👋\n🚨 از حجم سرویس {username} تنها {volume} باقی مانده است. لطفاً در صورت تمایل برای خرید حجم اضافه و یا تمدید سرویستون از طریق بخش «{purchased_services}» اقدام بفرمایین"],
+        ['dyn_cron_volume_warning_tpl', "با سلام خدمت شما کاربر گرامی 👋\n🚨 از حجم سرویس «{plan}» شما تنها {volume} باقی مانده است (شناسه سرویس: {username}). لطفاً در صورت تمایل برای خرید حجم اضافه و یا تمدید سرویستون از طریق بخش «{purchased_services}» اقدام بفرمایین"],
         ['dyn_cron_volume_warning_report_tpl', "📌 اطلاعیه کرون حجم\n\nنام کاربری سرویس :‌ <code>{username}</code>\nوضعیت سرویس : {status}\nحجم باقی مانده : {volume}"],
-        ['dyn_cron_time_warning_tpl', "با سلام خدمت شما کاربر گرامی 👋\n📌 از مهلت زمانی استفاده از سرویس {username} فقط {days} روز باقی مانده است. لطفاً در صورت تمایل برای تمدید این سرویس، از طریق بخش «{purchased_services}» اقدام بفرمایین. با تشکر از همراهی شما"],
+        ['dyn_cron_time_warning_tpl', "با سلام خدمت شما کاربر گرامی 👋\n📌 از مهلت زمانی سرویس «{plan}» شما فقط {days_display} روز باقی مانده است (شناسه سرویس: {username}). لطفاً در صورت تمایل برای تمدید این سرویس، از طریق بخش «{purchased_services}» اقدام بفرمایین. با تشکر از همراهی شما"],
         ['dyn_cron_time_warning_report_tpl', "📌 اطلاعیه کرون زمان\n\nنام کاربری سرویس :‌ <code>{username}</code>\nوضعیت سرویس : {status}\nتعداد روز باقی مانده ‌:‌{days}"],
         ['dyn_cron_removal_notice_tpl', "📌 کاربر گرامی بدلیل عدم تمدید، سرویس {username} از لیست سرویس های شما حذف گردید\n\n🌟 جهت تهیه سرویس جدید از بخش خرید سرویس اقدام فرمایید"],
         ['dyn_cron_removal_report_tpl', "📌 اطلاعیه کرون حذف\n\nنام کاربری سرویس :‌ <code>{username}</code>\nوضعیت سرویس : {status}\nتعداد روز باقی مانده ‌:‌{days}\nحجم باقی مانده : {volume}"],
@@ -2070,6 +2105,42 @@ try {
         ['dyn_queued_renewal_activated_tpl', "با سلام خدمت شما کاربر گرامی 👋\n✅ رزرو اشتراک سرویس {username} فعال شد و حجم و زمان سرویس شما تمدید گردید."],
         ['dyn_errors_queued_renewal_exists', "❌ یک رزرو اشتراک برای این سرویس در انتظار فعال‌سازی است. مبلغی از حساب شما کسر نشد."]
     ];
+    if (function_exists('rxRenewalTextDefaults')) {
+        foreach (rxRenewalTextDefaults() as $rxRenewalTextKey => $rxRenewalTextValue) {
+            $insertQueries[] = ['dyn_renewal_' . $rxRenewalTextKey, $rxRenewalTextValue];
+        }
+    }
+    $rxTonpayTemplatesFile = __DIR__ . '/re/rx/function/tonpay_templates.php';
+    if (is_file($rxTonpayTemplatesFile)) {
+        require_once $rxTonpayTemplatesFile;
+        foreach (tonpayTemplateDefaults() as $rxTonpayTemplateKey => $rxTonpayTemplateValue) {
+            $insertQueries[] = [$rxTonpayTemplateKey, $rxTonpayTemplateValue];
+        }
+        if ($table_exists) {
+            $rxTonpayWarningNew = $connect->real_escape_string(tonpayTemplateDefaults()['dyn_tonpay_amount_warning']);
+            $rxTonpayWarningOld = $connect->real_escape_string(tonpayLegacyAmountWarningDefault());
+            $connect->query("UPDATE textbot SET text = '$rxTonpayWarningNew' WHERE id_text = 'dyn_tonpay_amount_warning' AND text = '$rxTonpayWarningOld'");
+            $connect->query("UPDATE textbot SET text = REPLACE(text, '<b>پرداخت کارت‌به‌کارت (تون‌پی)</b>', '<b>{gateway_title}</b>') WHERE id_text IN ('dyn_tonpay_invoice_tpl', 'dyn_tonpay_progress_tpl')");
+        }
+    }
+    $rxCronWarningUpgrades = [
+        'dyn_cron_volume_warning_tpl' => [
+            "با سلام خدمت شما کاربر گرامی 👋\n🚨 از حجم سرویس {username} تنها {volume} باقی مانده است. لطفاً در صورت تمایل برای خرید حجم اضافه و یا تمدید سرویستون از طریق بخش «{purchased_services}» اقدام بفرمایین",
+            "با سلام خدمت شما کاربر گرامی 👋\n🚨 از حجم سرویس «{plan}» شما تنها {volume} باقی مانده است (شناسه سرویس: {username}). لطفاً در صورت تمایل برای خرید حجم اضافه و یا تمدید سرویستون از طریق بخش «{purchased_services}» اقدام بفرمایین",
+        ],
+        'dyn_cron_time_warning_tpl' => [
+            "با سلام خدمت شما کاربر گرامی 👋\n📌 از مهلت زمانی استفاده از سرویس {username} فقط {days} روز باقی مانده است. لطفاً در صورت تمایل برای تمدید این سرویس، از طریق بخش «{purchased_services}» اقدام بفرمایین. با تشکر از همراهی شما",
+            "با سلام خدمت شما کاربر گرامی 👋\n📌 از مهلت زمانی سرویس «{plan}» شما فقط {days_display} روز باقی مانده است (شناسه سرویس: {username}). لطفاً در صورت تمایل برای تمدید این سرویس، از طریق بخش «{purchased_services}» اقدام بفرمایین. با تشکر از همراهی شما",
+        ],
+    ];
+    if ($table_exists) {
+        foreach ($rxCronWarningUpgrades as $rxCronWarningKey => $rxCronWarningPair) {
+            $rxCronWarningKeyEsc = $connect->real_escape_string($rxCronWarningKey);
+            $rxCronWarningOldEsc = $connect->real_escape_string($rxCronWarningPair[0]);
+            $rxCronWarningNewEsc = $connect->real_escape_string($rxCronWarningPair[1]);
+            $connect->query("UPDATE textbot SET text = '$rxCronWarningNewEsc' WHERE id_text = '$rxCronWarningKeyEsc' AND text = '$rxCronWarningOldEsc'");
+        }
+    }
     if (!$table_exists) {
         $result = $connect->query("CREATE TABLE textbot (
         id_text varchar(600) PRIMARY KEY NOT NULL,
@@ -2131,6 +2202,10 @@ try {
                 "✅ گزارش تراکنش #شارژ_کیف_پول\n\n<blockquote>👤 آیدی کاربر : <code>{user_id}</code></blockquote>\n<blockquote>📦 مقدار : {amount} تومان</blockquote>\n<blockquote>💰 مبلغ پرداختی : {price} تومان</blockquote>\n\n📅 : {date} - ⏰ : {time}",
                 ["💳 شارژ کیف پول\n\n<blockquote>👤 آیدی کاربر : <code>{user_id}</code></blockquote>\n<blockquote>📦 مقدار : {amount} تومان</blockquote>\n<blockquote>⏰ زمان : {when}</blockquote>\n<blockquote>💰 مبلغ پرداختی : {price} تومان</blockquote>"],
             ],
+        ];
+        $rxPublicLogDefaults['text_service_detail'] = [
+            $text_service_detail,
+            [$text_service_detail_legacy, str_replace("\r\n", "\n", $text_service_detail_legacy), $text_service_detail_previous, str_replace("\r\n", "\n", $text_service_detail_previous)],
         ];
         foreach ($rxPublicLogDefaults as $rxKey => $rxPair) {
             $rxKeyEsc = $connect->real_escape_string($rxKey);
@@ -2238,6 +2313,8 @@ try {
         ['helpnowpayment', '2'],
         ['helpofflinearze', '2'],
         ['autoconfirmcart', 'offauto'],
+        ['sbv_status', 'off'],
+        ['sbv_lifetime_min', '30'],
         ['cashbacknowpayment', '0'],
         ['statusstar', '0'],
         ['statusnowpayment', '0'],
@@ -2252,6 +2329,7 @@ try {
         ['maxbalancetonpay', $max],
         ['helptonpay', '2'],
         ['tonpay_payment_mode', 'bot'],
+        ['tonpay_custom_api_key', ''],
         ['statuscubepay', 'offcubepay'],
         ['apicubepay', ''],
         ['chashbackcubepay', '0'],
@@ -2285,6 +2363,8 @@ try {
         ['minbalanceatlaspay', 50000],
         ['maxbalanceatlaspay', 2000000],
         ['helpatlaspay', '2'],
+        ['atlaspay_payment_mode', 'official'],
+        ['atlaspay_webhook_secret', ''],
         ['chashbackcart_target', 'all'],
         ['chashbackiranpay2_target', 'all'],
         ['chashbacktonpay_target', 'all'],
@@ -2777,29 +2857,15 @@ try {
     $table_exists = ($result->num_rows > 0);
 
     if (!$table_exists) {
-        $result = $connect->query("CREATE TABLE queued_renewal (
-        id INT(11) UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-        id_user varchar(500) NOT NULL,
-        username varchar(1000) NOT NULL,
-        name_panel varchar(500) NOT NULL,
-        code_panel varchar(500) NOT NULL,
-        code_product varchar(500) NOT NULL,
-        new_limit_gb varchar(200) NOT NULL,
-        time_day varchar(200) NOT NULL,
-        price varchar(200) NOT NULL,
-        id_invoice varchar(500) NULL,
-        status varchar(200) NOT NULL DEFAULT 'pending',
-        bottype varchar(200) NULL,
-        created_at varchar(200) NOT NULL,
-        applied_at varchar(200) NULL,
-        output TEXT NULL,
-        INDEX idx_queued_renewal_username_status (username(191), status(50)))
-        ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_unicode_ci");
+        $result = $connect->query(rx_rn_queued_table_ddl());
         if (!$result) {
             error_log("[table.php] table queued_renewal: " . mysqli_error($connect));
         }
     } else {
         rxSafeAddIndex($connect, "queued_renewal", "idx_queued_renewal_username_status", "username", 191);
+    }
+    if (!rx_rn_ensure_schema()) {
+        error_log("[table.php] renewal schema migration failed");
     }
 } catch (Exception $e) {
     error_log('[panels] ' . $e->getMessage());
@@ -3137,10 +3203,18 @@ try {
     if (!$table_exists) {
         $result = $connect->query("CREATE TABLE category (
         id INT(6) UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-        remark varchar(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin  NOT NULL)
+        remark varchar(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin  NOT NULL,
+        position INT(11) NOT NULL DEFAULT 0)
         ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_bin");
         if (!$result) {
             error_log("[table.php] table category: " . mysqli_error($connect));
+        }
+    } else {
+        $categoryPositionColumnExisted = rxTableColumnExists($connect, "category", "position");
+        addFieldToTable("category", "position", null, "INT(11) NOT NULL DEFAULT 0");
+        if (!$categoryPositionColumnExisted) {
+            $connect->query("SET @fx_pos := 0");
+            $connect->query("UPDATE category SET position = (@fx_pos := @fx_pos + 1) ORDER BY id ASC");
         }
     }
 } catch (Exception $e) {
@@ -3387,6 +3461,18 @@ try {
     rxSafeAddColumn($connect, "Payment_report", "tonpay_invoice_url",     "VARCHAR(500) NULL");
     rxSafeAddColumn($connect, "Payment_report", "tonpay_web_invoice_url", "VARCHAR(500) NULL");
     rxSafeAddColumn($connect, "Payment_report", "tonpay_last_checked_at", "BIGINT NULL");
+    rxSafeAddColumn($connect, "Payment_report", "tonpay_gateway_mode", "VARCHAR(10) NULL");
+    rxSafeAddColumn($connect, "Payment_report", "tonpay_final_amount", "BIGINT NULL");
+    rxSafeAddColumn($connect, "Payment_report", "tonpay_card_number", "VARCHAR(40) NULL");
+    rxSafeAddColumn($connect, "Payment_report", "tonpay_card_name", "VARCHAR(120) NULL");
+    rxSafeAddColumn($connect, "Payment_report", "tonpay_remote_status", "VARCHAR(20) NULL");
+    rxSafeAddColumn($connect, "Payment_report", "tonpay_created_at", "BIGINT NULL");
+    rxSafeAddColumn($connect, "Payment_report", "tonpay_receipt_available_at", "BIGINT NULL");
+    rxSafeAddColumn($connect, "Payment_report", "tonpay_receipt_submitted_at", "BIGINT NULL");
+    rxSafeAddColumn($connect, "Payment_report", "tonpay_review_deadline_at", "BIGINT NULL");
+    rxSafeAddColumn($connect, "Payment_report", "tonpay_local_state", "VARCHAR(24) NULL");
+    rxSafeAddColumn($connect, "Payment_report", "tonpay_card_changed_at", "BIGINT NULL");
+    rxSafeAddColumn($connect, "Payment_report", "tonpay_change_card_exhausted", "TINYINT(1) NOT NULL DEFAULT 0");
     rxSafeAddColumn($connect, "Payment_report", "cubepay_authority",      "VARCHAR(64) NULL");
     rxSafeAddColumn($connect, "Payment_report", "cubepay_payment_link",   "VARCHAR(500) NULL");
     rxSafeAddColumn($connect, "Payment_report", "cubepay_method",         "VARCHAR(20) NULL");
@@ -3395,6 +3481,41 @@ try {
     rxSafeAddColumn($connect, "Payment_report", "atlaspay_order_id",      "VARCHAR(64) NULL");
     rxSafeAddColumn($connect, "Payment_report", "atlaspay_tracking_code", "VARCHAR(64) NULL");
     rxSafeAddColumn($connect, "Payment_report", "atlaspay_payment_url",   "VARCHAR(500) NULL");
+    rxSafeAddColumn($connect, "Payment_report", "atlaspay_gateway_mode", "VARCHAR(10) NULL");
+    rxSafeAddColumn($connect, "Payment_report", "atlaspay_total_amount", "BIGINT NULL");
+    rxSafeAddColumn($connect, "Payment_report", "atlaspay_card_number", "VARCHAR(40) NULL");
+    rxSafeAddColumn($connect, "Payment_report", "atlaspay_card_name", "VARCHAR(120) NULL");
+    rxSafeAddColumn($connect, "Payment_report", "atlaspay_bank_name", "VARCHAR(80) NULL");
+    rxSafeAddColumn($connect, "Payment_report", "atlaspay_remote_status", "VARCHAR(40) NULL");
+    rxSafeAddColumn($connect, "Payment_report", "atlaspay_created_at", "BIGINT NULL");
+    rxSafeAddColumn($connect, "Payment_report", "atlaspay_deadline_at", "BIGINT NULL");
+    rxSafeAddColumn($connect, "Payment_report", "atlaspay_local_state", "VARCHAR(32) NULL");
+    rxSafeAddColumn($connect, "Payment_report", "atlaspay_last_checked_at", "BIGINT NULL");
+    rxSafeAddColumn($connect, "Payment_report", "atlaspay_actual_received", "BIGINT NULL");
+    rxSafeAddColumn($connect, "Payment_report", "atlaspay_manual_delivery", "TINYINT(1) NOT NULL DEFAULT 0");
+    rxSafeAddColumn($connect, "Payment_report", "payment_processing_version", "TINYINT NULL");
+    rxSafeAddColumn($connect, "Payment_report", "tronado_tron_amount", "DECIMAL(24,8) NULL");
+    rxSafeAddColumn($connect, "Payment_report", "tronado_wage_pct", "SMALLINT NULL");
+    rxSafeAddColumn($connect, "Payment_report", "tronado_estimated_toman", "BIGINT NULL");
+    rxSafeAddColumn($connect, "Payment_report", "tronado_token", "VARCHAR(80) NULL");
+    rxSafeAddColumn($connect, "Payment_report", "tronado_created_at", "BIGINT NULL");
+    rxSafeAddColumn($connect, "Payment_report", "tronado_local_state", "VARCHAR(24) NULL");
+    rxSafeAddColumn($connect, "Payment_report", "tronado_last_checked_at", "BIGINT NULL");
+    rxSafeAddColumn($connect, "Payment_report", "tronado_review_reason", "VARCHAR(255) NULL");
+    rxSafeAddColumn($connect, "Payment_report", "tronado_paid_toman", "BIGINT NULL");
+    rxSafeAddColumn($connect, "Payment_report", "stars_amount", "INT NULL");
+    $connect->query("CREATE TABLE IF NOT EXISTS tronado_dispute_event (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        dispute_id BIGINT NOT NULL,
+        event_id VARCHAR(64) NOT NULL,
+        payment_id VARCHAR(128) NOT NULL,
+        outcome VARCHAR(32) NULL,
+        payload MEDIUMTEXT NULL,
+        created_at BIGINT NOT NULL,
+        UNIQUE KEY uniq_tronado_dispute (dispute_id),
+        UNIQUE KEY uniq_tronado_dispute_event (event_id),
+        KEY idx_tronado_dispute_payment (payment_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_unicode_ci");
 
     try {
         $haveBlupalIdx = $connect->query("SHOW INDEX FROM Payment_report WHERE Key_name = 'idx_pr_blupal_invoice'");
@@ -3530,6 +3651,71 @@ try {
     }
 
     try {
+        if (function_exists('rx_sbv_ddl')) {
+            foreach (rx_sbv_ddl() as $sbvTable => $sbvDdl) {
+                if (!$connect->query($sbvDdl)) {
+                    error_log('[table.php] ' . $sbvTable . ' create: ' . mysqli_error($connect));
+                }
+            }
+        }
+    } catch (Throwable $e) {
+        error_log('[table.php] card_sms tables create: ' . $e->getMessage());
+    }
+
+    try {
+        $connect->query("CREATE TABLE IF NOT EXISTS checkout_order (
+            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            checkout_id VARCHAR(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+            id_user VARCHAR(200) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+            operation VARCHAR(40) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+            op_key VARCHAR(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+            target VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL,
+            final_price BIGINT NOT NULL DEFAULT 0,
+            wallet_choice VARCHAR(10) NOT NULL DEFAULT 'pending',
+            wallet_amount BIGINT NOT NULL DEFAULT 0,
+            external_amount BIGINT NOT NULL DEFAULT 0,
+            status VARCHAR(20) NOT NULL DEFAULT 'awaiting_choice',
+            reservation_state VARCHAR(10) NOT NULL DEFAULT 'none',
+            reservation_expires_at INT UNSIGNED NULL,
+            wallet_state VARCHAR(10) NOT NULL DEFAULT 'none',
+            resolution VARCHAR(20) NULL,
+            settle_order_id VARCHAR(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL,
+            payment_order_id VARCHAR(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL,
+            payment_method VARCHAR(60) NULL,
+            fulfillment_state VARCHAR(20) NULL,
+            source VARCHAR(10) NOT NULL DEFAULT 'bot',
+            meta MEDIUMTEXT NULL,
+            expires_at INT UNSIGNED NOT NULL DEFAULT 0,
+            created_at INT UNSIGNED NOT NULL,
+            updated_at INT UNSIGNED NOT NULL,
+            UNIQUE KEY uniq_ck_checkout_id (checkout_id),
+            KEY idx_ck_user_res (id_user, reservation_state),
+            KEY idx_ck_user_key (id_user, op_key(191)),
+            KEY idx_ck_payment_order (payment_order_id),
+            KEY idx_ck_status_exp (status, expires_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+    } catch (Throwable $e) {
+        error_log('[table.php] checkout_order create: ' . $e->getMessage());
+    }
+
+    try {
+        $ckColumns = [
+            'wallet_state' => "VARCHAR(10) NOT NULL DEFAULT 'none'",
+            'resolution' => "VARCHAR(20) NULL",
+            'settle_order_id' => "VARCHAR(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL",
+        ];
+        foreach ($ckColumns as $ckColumn => $ckDefinition) {
+            $haveCkColumn = $connect->query("SHOW COLUMNS FROM checkout_order LIKE '" . $ckColumn . "'");
+            if ($haveCkColumn && $haveCkColumn->num_rows === 0) {
+                $connect->query("ALTER TABLE checkout_order ADD COLUMN {$ckColumn} {$ckDefinition}");
+            }
+        }
+        $connect->query("UPDATE checkout_order SET reservation_state = 'released', reservation_expires_at = NULL WHERE reservation_state = 'reserved'");
+    } catch (Throwable $e) {
+        error_log('[table.php] checkout_order migrate: ' . $e->getMessage());
+    }
+
+    try {
         $connect->query("CREATE TABLE IF NOT EXISTS PublicLog_Queue (
             id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
             chat_id VARCHAR(600) NOT NULL,
@@ -3646,6 +3832,7 @@ try {
 try {
     addFieldToTable("setting", "premium_emoji_status", "0", "VARCHAR(20)");
     addFieldToTable("setting", "keyboard_styles_all", "{}", "TEXT");
+    addFieldToTable("setting", "account_keyboard_layout", null, "TEXT");
     addFieldToTable("setting", "forced_miniapp_mode", "0", "VARCHAR(20)");
     addFieldToTable("setting", "miniapp_ticket_mode", "0", "VARCHAR(20)");
 } catch (Exception $e) {
@@ -3677,6 +3864,19 @@ try {
     addFieldToTable("setting", "start_media_entities", null, "TEXT NULL");
 } catch (Exception $e) {
     file_put_contents('error_log', '[table.php setting start media cols] ' . $e->getMessage() . "\n", FILE_APPEND);
+}
+
+try {
+    $pdo->exec("CREATE TABLE IF NOT EXISTS section_media (
+        section_id VARCHAR(32) NOT NULL PRIMARY KEY,
+        media_status VARCHAR(20) NULL DEFAULT '0',
+        media_type VARCHAR(32) NULL DEFAULT '',
+        media_file_id VARCHAR(512) NULL DEFAULT '',
+        media_text VARCHAR(255) NULL DEFAULT '',
+        media_entities TEXT NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+} catch (Exception $e) {
+    file_put_contents('error_log', '[table.php section media table] ' . $e->getMessage() . "\n", FILE_APPEND);
 }
 
 try {
@@ -3723,6 +3923,17 @@ try {
         KEY idx_processed_updates_time (processed_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
     rxSafeAddIndex($connect, 'processed_updates', 'idx_processed_updates_time', 'processed_at');
+
+    $connect->query("CREATE TABLE IF NOT EXISTS ui_decor (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        id_user BIGINT NOT NULL,
+        message_id BIGINT NOT NULL,
+        kind VARCHAR(12) NOT NULL,
+        screen VARCHAR(40) NOT NULL DEFAULT '',
+        created_at INT NOT NULL,
+        UNIQUE KEY uq_user_message (id_user, message_id),
+        KEY idx_user_id (id_user, id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 
     $connect->query("CREATE TABLE IF NOT EXISTS cron_runtime_state (
         job_key VARCHAR(255) PRIMARY KEY,

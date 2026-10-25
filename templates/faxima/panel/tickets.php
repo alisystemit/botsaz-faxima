@@ -4,6 +4,7 @@ ini_set('session.cookie_samesite', 'Lax');
 ini_set('session.cookie_httponly', '1');
 session_start();
 require_once __DIR__ . '/../config.php';
+if (!@include_once __DIR__ . '/lib/ad_boot.php') { http_response_code(503); header('Retry-After: 3600'); exit; }
 require_once __DIR__ . '/lib/icons.php';
 require_once __DIR__ . '/lib/pagination.php';
 require_once __DIR__ . '/lib/search_filter.php';
@@ -92,18 +93,6 @@ function tk_delete_trackings(PDO $pdo, array $trackings): int
 
 if (isset($_GET['ajax']) && $_GET['ajax'] === 'mark_ticket_seen') {
     header('Content-Type: application/json; charset=utf-8');
-    // این action وضعیت «دیده‌شده» را تغییر می‌دهد؛ GET آن قابل CSRF با <img> بود.
-    if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-        http_response_code(405);
-        echo json_encode(['ok' => false, 'error' => 'method']);
-        exit;
-    }
-    $incoming = (string)($_POST['_csrf'] ?? ($_SERVER['HTTP_X_CSRF_TOKEN'] ?? ''));
-    if ($incoming === '' || !isset($_SESSION['csrf_token']) || !hash_equals((string)$_SESSION['csrf_token'], $incoming)) {
-        http_response_code(403);
-        echo json_encode(['ok' => false, 'error' => 'csrf']);
-        exit;
-    }
     try {
         $maxId = (int)$pdo->query("SELECT COALESCE(MAX(id),0) FROM support_message")->fetchColumn();
         $st = $pdo->prepare("UPDATE admin SET last_ticket_seen = ? WHERE username = ?");

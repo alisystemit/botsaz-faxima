@@ -407,7 +407,27 @@ function getCrontabBinary()
     }
 
     $resolvedPath = '';
-    error_log('Unable to locate the crontab executable on this system.');
+    $markerPath = APP_ROOT_PATH . '/cron/.crontab_missing_log';
+    $markerHandle = @fopen($markerPath, 'c+');
+    if ($markerHandle === false) {
+        $markerPath = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'rx_crontab_missing_' . hash('sha256', APP_ROOT_PATH) . '.log';
+        $markerHandle = @fopen($markerPath, 'c+');
+    }
+    if (is_resource($markerHandle)) {
+        if (@flock($markerHandle, LOCK_EX | LOCK_NB)) {
+            $lastLoggedAt = (int) stream_get_contents($markerHandle);
+            $now = time();
+            if ($lastLoggedAt <= 0 || $now - $lastLoggedAt >= 3600) {
+                rewind($markerHandle);
+                if (@ftruncate($markerHandle, 0) && @fwrite($markerHandle, (string) $now) !== false) {
+                    @fflush($markerHandle);
+                    error_log('Unable to locate the crontab executable on this system.');
+                }
+            }
+            @flock($markerHandle, LOCK_UN);
+        }
+        @fclose($markerHandle);
+    }
 
     return null;
 }

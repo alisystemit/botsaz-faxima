@@ -20,7 +20,7 @@ final class CategoriesHandler extends BaseHandler
             FaoximaResponse::ok([]);
         }
 
-        $allCategories = FaoximaDb::fetchAll('SELECT * FROM category');
+        $allCategories = FaoximaDb::fetchAll('SELECT * FROM category ORDER BY (position = 0) ASC, position ASC, id ASC');
 
         $userAgent = $this->user['agent'] ?? 'f';
         $list = [];

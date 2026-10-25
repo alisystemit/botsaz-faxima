@@ -395,7 +395,17 @@ switch ($action) {
         $panel = select("marzban_panel", "*", "name_panel", $invoice['Service_location'], "select");
         if (!$panel)
             sendJsonResponse(false, "Panel Not Found", [], 200);
-        $extend = $ManagePanel->extend($panel['Methodextend'], $data['volume_service'], $data['time_service'], $invoice['username'], "custom_volume", $panel['code_panel']);
+        $rxApiRef = 'api:' . bin2hex(random_bytes(6));
+        $extend = $ManagePanel->extend($panel['Methodextend'], $data['volume_service'], $data['time_service'], $invoice['username'], "custom_volume", $panel['code_panel'], null, [
+            'source' => 'admin',
+            'ref' => $rxApiRef,
+            'id_user' => $invoice['id_user'],
+            'price' => 0,
+            'reservation' => is_array($data['reservation'] ?? null) ? array_merge($data['reservation'], ['payment_ref' => $rxApiRef]) : ['payment_ref' => $rxApiRef],
+        ]);
+        if (rxRenewalIsPending($extend)) {
+            sendJsonResponse(false, "Renewal sent to panel; verification pending", ['operation_id' => (string) ($extend['operation_id'] ?? ''), 'pending_verification' => true], 202);
+        }
         if ($extend['status'] == false) {
             $extend['msg'] = rx_panel_error_text($extend['msg'] ?? null, $extend['detail'] ?? null);
             $textreports = "
@@ -403,7 +413,7 @@ switch ($action) {
 <blockquote>نام پنل : {$panel['name_panel']}</blockquote>
 <blockquote>نام کاربری سرویس : {$invoice['username']}</blockquote>
 <blockquote>دلیل خطا : {$extend['msg']}</blockquote>";
-            sendmessage($invoice['id_user'], (($extend['code'] ?? '') === 'manual_stock_empty') ? "❌ موجودی انبار برای این محصول تمام شده است." : "❌خطایی در تمدید سرویس رخ داده با پشتیبانی در ارتباط باشید", null, 'HTML');
+            sendmessage($invoice['id_user'], (($extend['code'] ?? '') === 'manual_stock_empty') ? "❌ موجودی انبار برای این محصول تمام شده است." : rxRenewalFailureText($extend, "❌خطایی در تمدید سرویس رخ داده با پشتیبانی در ارتباط باشید"), null, 'HTML');
             if (strlen($setting['Channel_Report']) > 0) {
                 telegram('sendmessage', [
                     'chat_id' => $setting['Channel_Report'],
@@ -429,8 +439,15 @@ switch ($action) {
         $output_json_var = $output_json;
         $stmt->bindParam(':output', $output_json_var, PDO::PARAM_STR);
         $stmt->execute();
-        update("invoice", "Status", "active", "id_invoice", $data['id_invoice']);
-        sendJsonResponse(true, "Successful");
+        if (empty($extend['queued']) && ($invoice['Status'] ?? '') !== 'disablebyadmin') {
+            update("invoice", "Status", "active", "id_invoice", $data['id_invoice']);
+        }
+        sendJsonResponse(true, "Successful", [
+            'queued' => !empty($extend['queued']),
+            'reservation_id' => $extend['reservation_id'] ?? null,
+            'operation_id' => $extend['operation_id'] ?? null,
+            'after' => $extend['rx_renewal']['after'] ?? null,
+        ]);
         break;
     default:
         sendJsonResponse(false, "Action Invalid");

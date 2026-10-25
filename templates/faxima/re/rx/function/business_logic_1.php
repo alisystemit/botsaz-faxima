@@ -82,6 +82,8 @@ if (!function_exists('rx_walletChargeAmountAccepted')) {
         }
 
         update("user", "Processing_value", $amount, "id", $from_id);
+        update("user", "Processing_value_one", "", "id", $from_id);
+        update("user", "Processing_value_tow", "", "id", $from_id);
         update("user", "Processing_value_four", "", "id", $from_id);
 
         $__discEligibleCharge = class_exists('MiniDiscount') ? MiniDiscount::hasEligible('charge', '', '', '', $user) : false;
@@ -257,10 +259,28 @@ function rxAppendSubscriptionLinkLine($caption, $sub_link, $panel_info)
     }
     return $combined;
 }
+function rxManualsalePublicName($recordName, $ext)
+{
+    $ext = strtolower(ltrim(trim((string) $ext), '.'));
+    if ($ext === '') {
+        $ext = 'bin';
+    }
+    $stem = trim((string) $recordName);
+    $suffix = '.' . $ext;
+    if ($stem !== '' && strtolower(substr($stem, -strlen($suffix))) === $suffix) {
+        $stem = substr($stem, 0, -strlen($suffix));
+    }
+    return normalizeConfigFilename($stem . $suffix, '', $ext === 'conf');
+}
+function rxManualsaleTempPath($publicName)
+{
+    return sys_get_temp_dir() . DIRECTORY_SEPARATOR . bin2hex(random_bytes(6)) . '-' . $publicName;
+}
 function rxManualsaleDelivery($username_service)
 {
     $result = [
         'ext' => '',
+        'name' => '',
         'content' => '',
         'sub_link' => '',
         'is_file' => false,
@@ -288,6 +308,7 @@ function rxManualsaleDelivery($username_service)
     $isText = ($ext === 'text');
     $isLink = ($ext === 'sub');
     $result['ext'] = $ext;
+    $result['name'] = trim((string) ($row['namerecord'] ?? ''));
     $result['content'] = $content;
     $result['sub_link'] = $subLink;
     $result['is_file'] = $isFile;
@@ -327,6 +348,7 @@ function rxManualsaleDelivery($username_service)
         }
         $items[] = [
             'ext' => $rExt,
+            'name' => trim((string) ($r['namerecord'] ?? '')),
             'content' => $rContent,
             'sub_link' => $rSub,
             'is_file' => $rIsFile,
@@ -366,12 +388,7 @@ function rxManualsaleSendFileItems($user_id, $username_service, $fileItems, $cap
     if (!is_array($fileItems) || empty($fileItems)) {
         return false;
     }
-    $cleanUser = preg_replace('/[^a-zA-Z0-9\-]/', '', str_replace('_', '-', (string) $username_service));
-    if ($cleanUser === '') {
-        $cleanUser = 'config';
-    }
     $fileCount = count($fileItems);
-    $namingTotal = ($totalForNaming > 0) ? (int) $totalForNaming : $fileCount;
     $index = 0;
     $sentAny = false;
     foreach ($fileItems as $fi) {
@@ -379,11 +396,9 @@ function rxManualsaleSendFileItems($user_id, $username_service, $fileItems, $cap
             continue;
         }
         $index++;
-        $namingIndex = (int) $startIndex + $index;
         $ext = (trim((string) ($fi['ext'] ?? '')) !== '') ? $fi['ext'] : 'bin';
-        $baseName = $namingTotal > 1 ? ($cleanUser . '-' . $namingIndex) : $cleanUser;
-        $publicName = normalizeConfigFilename($baseName . '.' . $ext, '', strtolower($ext) === 'conf');
-        $manualFile = sys_get_temp_dir() . DIRECTORY_SEPARATOR . $publicName;
+        $publicName = rxManualsalePublicName($fi['name'] ?? '', $ext);
+        $manualFile = rxManualsaleTempPath($publicName);
         file_put_contents($manualFile, (string) ($fi['content'] ?? ''));
         $isLastFile = ($index === $fileCount);
         $thisCaption = ($index === 1) ? (string) $caption : '';
@@ -523,16 +538,13 @@ function sendMessageService($panel_info, $config, $sub_link, $username_service, 
         $hasConfigOffer = !empty($textItems);
 
         if (!empty($fileItems)) {
-            $cleanUser = preg_replace('/[^a-zA-Z0-9\-]/', '', str_replace('_', '-', (string) $username_service));
-            if ($cleanUser === '') $cleanUser = 'config';
             $fileCount = count($fileItems);
             $index = 0;
             foreach ($fileItems as $fi) {
                 $index++;
                 $ext = (trim((string) ($fi['ext'] ?? '')) !== "") ? $fi['ext'] : "bin";
-                $baseName = $fileCount > 1 ? ($cleanUser . '-' . $index) : $cleanUser;
-                $publicName = normalizeConfigFilename($baseName . "." . $ext, '', strtolower($ext) === 'conf');
-                $manualFile = sys_get_temp_dir() . DIRECTORY_SEPARATOR . $publicName;
+                $publicName = rxManualsalePublicName($fi['name'] ?? '', $ext);
+                $manualFile = rxManualsaleTempPath($publicName);
                 file_put_contents($manualFile, (string) ($fi['content'] ?? ''));
                 $isLastFile = ($index === $fileCount);
                 $thisCaption = ($index === 1) ? $cleanCaption : '';

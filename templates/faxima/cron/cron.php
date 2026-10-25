@@ -14,15 +14,33 @@ if (function_exists('putenv') && !preg_match('/(^|,)\s*putenv\s*(,|$)/', strtolo
 }
 
 
+$rxCronHealthLib = dirname(__DIR__) . '/lib/CronHealth.php';
+if (is_file($rxCronHealthLib)) {
+    try {
+        require_once $rxCronHealthLib;
+    } catch (Throwable $e) {
+    }
+}
+if (function_exists('rx_cron_health_orch_begin')) {
+    rx_cron_health_orch_begin();
+}
+$rxHealthStage = static function (string $name, string $state): void {
+    if (function_exists('rx_cron_health_orch_stage')) {
+        rx_cron_health_orch_stage($name, $state);
+    }
+};
+
 $lockFile = __DIR__ . '/cron.lock';
 $lockHandle = @fopen($lockFile, 'c');
 if ($lockHandle === false || !@flock($lockHandle, LOCK_EX | LOCK_NB)) {
+    $rxHealthStage('lock', $lockHandle === false ? 'open_failed' : 'busy');
     if (is_resource($lockHandle)) {
         @fclose($lockHandle);
     }
     echo "BUSY\n";
     exit;
 }
+$rxHealthStage('lock', 'acquired');
 @ftruncate($lockHandle, 0);
 @fwrite($lockHandle, getmypid() . '|' . date('Y-m-d H:i:s'));
 @fflush($lockHandle);
@@ -55,10 +73,12 @@ if (is_readable($functionBootstrap)) {
     try {
         require_once $functionBootstrap;
         $bootstrapLoaded = true;
+        $rxHealthStage('bootstrap', 'ok');
         if (is_file($rxCronBootstrapMarker)) {
             @unlink($rxCronBootstrapMarker);
         }
     } catch (Throwable $e) {
+        $rxHealthStage('bootstrap', 'failed');
         $rxLogIt = true;
         if (is_file($rxCronBootstrapMarker) && (time() - (int) @filemtime($rxCronBootstrapMarker)) < 3600) {
             $rxLogIt = false;
@@ -73,6 +93,7 @@ if (is_readable($functionBootstrap)) {
 }
 
 if (!$bootstrapLoaded) {
+    $rxHealthStage('bootstrap', 'missing');
     echo "SKIP (bootstrap unavailable)\n";
     exit;
 }
@@ -144,9 +165,11 @@ if (!defined('APP_ROOT_PATH')) {
 
 $pdo = function_exists('getDatabaseConnection') ? getDatabaseConnection() : null;
 if (!($pdo instanceof PDO)) {
+    $rxHealthStage('db', 'failed');
     echo "SKIP (db unavailable)\n";
     exit;
 }
+$rxHealthStage('db', 'ok');
 
 $runtimeState = [];
 if (function_exists('loadCronRuntimeState')) {
@@ -156,6 +179,10 @@ if (function_exists('loadCronRuntimeState')) {
         $runtimeState = [];
     }
 }
+
+$rxHealthTrace = function_exists('rx_cron_health_orch_attach_db')
+    ? rx_cron_health_orch_attach_db($pdo)
+    : ['traced' => false, 'claimed' => [], 'active' => false];
 
 
 $rxCronbotDir = __DIR__ . DIRECTORY_SEPARATOR . '..' . DIRECTORY_SEPARATOR . 'cronbot';
@@ -262,8 +289,8 @@ $dispatchAsync = static function (array $urls, bool $useLoopback) use ($rxIntern
             CURLOPT_NOSIGNAL        => true,
             CURLOPT_CONNECTTIMEOUT_MS => 1500,
             CURLOPT_TIMEOUT_MS      => 4000,
-            CURLOPT_SSL_VERIFYPEER  => function_exists('faoxima_ssl_verify') ? faoxima_ssl_verify() : true,
-            CURLOPT_SSL_VERIFYHOST  => (function_exists('faoxima_ssl_verify') ? faoxima_ssl_verify() : true) ? 2 : 0,
+            CURLOPT_SSL_VERIFYPEER  => false,
+            CURLOPT_SSL_VERIFYHOST  => 0,
             CURLOPT_FOLLOWLOCATION  => false,
             CURLOPT_FORBID_REUSE    => true,
             CURLOPT_FRESH_CONNECT   => true,
@@ -441,6 +468,25 @@ if (is_file($rxLegacyLoopbackFlag)) {
 
 $dueTasks = [];
 $rxSuccessfulDispatches = 0;
+$rxSkippedMissingScripts = 0;
+
+$rxCronScriptExists = static function (string $script): bool {
+    $script = ltrim($script, '/');
+    if ($script === '' || strpos($script, '..') !== false) {
+        return false;
+    }
+    return is_file(__DIR__ . '/../cronbot/' . $script);
+};
+
+$rxReportMissingCronScript = static function (string $key, string $script): void {
+    $script = ltrim($script, '/');
+    $marker = rtrim(sys_get_temp_dir(), '/' . DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'faoxima_cron_missing_' . md5(__DIR__ . '|' . $key . '|' . $script);
+    if (is_file($marker) && (time() - (int) @filemtime($marker)) < 86400) {
+        return;
+    }
+    @touch($marker);
+    error_log(sprintf('[cron] skipped job "%s": script cronbot/%s does not exist', $key, $script));
+};
 
 $rxMarkJobRun = static function (PDO $pdo, string $key, int $now, array &$runtimeState) : void {
     if (function_exists('setCronJobLastRun')) {
@@ -507,6 +553,12 @@ if ($bootstrapLoaded && function_exists('getCronJobDefinitions')) {
 
     foreach ($definitions as $key => $definition) {
         if (empty($definition['script'])) {
+            continue;
+        }
+
+        if (!$rxCronScriptExists((string) $definition['script'])) {
+            $rxSkippedMissingScripts++;
+            $rxReportMissingCronScript((string) $key, (string) $definition['script']);
             continue;
         }
 
@@ -626,7 +678,10 @@ if ($bootstrapLoaded && function_exists('getCronJobDefinitions')) {
         }
     }
 
-    if (!in_array('index.php', $definedScripts, true)) {
+    if (!in_array('index.php', $definedScripts, true) && !$rxCronScriptExists('index.php')) {
+        $rxSkippedMissingScripts++;
+        $rxReportMissingCronScript('__index__', 'index.php');
+    } elseif (!in_array('index.php', $definedScripts, true)) {
         $indexDispatched = false;
 
         if ($rxIsCli) {
@@ -709,6 +764,19 @@ if (!$rxIsCli && !empty($dueTasks)) {
     }
 }
 
+if (!empty($rxHealthTrace['traced']) && function_exists('rx_cron_health_orch_diagnostics')) {
+    rx_cron_health_orch_diagnostics($pdo);
+}
+if (function_exists('rx_cron_health_orch_complete')) {
+    try {
+        if (!empty($rxHealthTrace['active']) && !function_exists('telegram') && is_readable(APP_ROOT_PATH . '/botapi.php')) {
+            require_once APP_ROOT_PATH . '/botapi.php';
+        }
+        rx_cron_health_orch_complete($pdo, !empty($rxHealthTrace['active']));
+    } catch (Throwable $e) {
+    }
+}
+
 $rxDispatchedTotal = $rxSuccessfulDispatches;
-echo "OK " . date('Y-m-d H:i:s') . " (Asia/Tehran) | dispatched=" . $rxDispatchedTotal . "\n";
+echo "OK " . date('Y-m-d H:i:s') . " (Asia/Tehran) | dispatched=" . $rxDispatchedTotal . ($rxSkippedMissingScripts > 0 ? " | skipped_missing=" . $rxSkippedMissingScripts : '') . "\n";
 

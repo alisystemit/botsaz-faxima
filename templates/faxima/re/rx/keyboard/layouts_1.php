@@ -237,7 +237,7 @@ $rxMiniAppApply = function (array $rows) use ($datatextbot, $rxMiniAppDomain) {
     return $rxMiniAppRows;
 };
 
-if ($setting['inlinebtnmain'] == "oninline" && !empty($keyboardRows)) {
+if (($setting['inlinebtnmain'] == "oninline" || (function_exists('rx_richSectionActive') && rx_richSectionActive('main_menu'))) && !empty($keyboardRows)) {
     $trace_keyboard = $keyboardRows;
     foreach ($trace_keyboard as $key => $callback_set) {
         foreach ($callback_set as $keyboard_key => $keyboard) {
@@ -246,7 +246,7 @@ if ($setting['inlinebtnmain'] == "oninline" && !empty($keyboardRows)) {
                 $trace_keyboard[$key][$keyboard_key]['_rxsk'] = "home_buy";
             }
             if ($keyboard['text'] == "accountwallet") {
-                $trace_keyboard[$key][$keyboard_key]['callback_data'] = "account";
+                $trace_keyboard[$key][$keyboard_key]['callback_data'] = "accountbtn";
                 $trace_keyboard[$key][$keyboard_key]['_rxsk'] = "home_account";
             }
             if ($keyboard['text'] == "text_Tariff_list") {
@@ -266,11 +266,12 @@ if ($setting['inlinebtnmain'] == "oninline" && !empty($keyboardRows)) {
                 $trace_keyboard[$key][$keyboard_key]['callback_data'] = "supportbtns";
             }
             if ($keyboard['text'] == "text_Purchased_services") {
-                $trace_keyboard[$key][$keyboard_key]['callback_data'] = "backorder";
+                $trace_keyboard[$key][$keyboard_key]['callback_data'] = "myservicesbtn";
                 $trace_keyboard[$key][$keyboard_key]['_rxsk'] = "home_myservices";
             }
             if ($keyboard['text'] == "text_help") {
-                $trace_keyboard[$key][$keyboard_key]['callback_data'] = "helpbtns";
+                $trace_keyboard[$key][$keyboard_key]['callback_data'] = "helpmenubtn";
+                $trace_keyboard[$key][$keyboard_key]['_rxsk'] = "helpbtns";
             }
             if ($keyboard['text'] == "text_usertest") {
                 $trace_keyboard[$key][$keyboard_key]['callback_data'] = "usertestbtn";
@@ -305,6 +306,7 @@ if ($setting['inlinebtnmain'] == "oninline" && !empty($keyboardRows)) {
         ? rx_finalizeInlineAdminKb(json_encode($keyboard), false)
         : json_encode($keyboard);
     $keyboard = function_exists('rx_sanitizeKeyboardButtons') ? rx_sanitizeKeyboardButtons($keyboard) : $keyboard;
+    if (function_exists('rx_ui_mark_keyboard')) { $keyboard = rx_ui_mark_keyboard($keyboard, 'main_menu'); }
 } else {
     if ($admin_idss != 0) {
         $rx_lbl_admin = (string)($textbotlang['Admin']['textpaneladmin'] ?? '');
@@ -334,6 +336,7 @@ if ($setting['inlinebtnmain'] == "oninline" && !empty($keyboardRows)) {
         ? rx_finalizeInlineAdminKb(json_encode($keyboard), false)
         : json_encode($keyboard);
     $keyboard = function_exists('rx_sanitizeKeyboardButtons') ? rx_sanitizeKeyboardButtons($keyboard) : $keyboard;
+    if (function_exists('rx_ui_mark_keyboard')) { $keyboard = rx_ui_mark_keyboard($keyboard, 'main_menu'); }
 }
 global $_rx_acc_styles, $_rx_tx_styles, $_rx_pay_styles, $_rx_payrcpt_styles, $_rx_adm_styles, $_rx_set_styles, $_rx_shp_styles, $_rx_nav_styles, $_rx_rol_styles, $_rx_gw_styles, $_rx_svc_styles, $_rx_feat_styles, $_rx_chan_styles, $_rx_helpa_styles, $_rx_cat_styles, $_rx_prod_styles, $_rx_pedit_styles;
 
@@ -491,29 +494,9 @@ if (!function_exists('rx_kb_encode')) {
         return json_encode(['keyboard' => $replyRows, 'resize_keyboard' => true], JSON_UNESCAPED_UNICODE);
     }
 }
-$_rx_acc_d  = rx_kb_style(['text' => $datatextbot['text_Discount'],    'callback_data' => "Discount"],    'Discount',    $_rx_acc_styles);
-$_rx_acc_b  = rx_kb_style(['text' => $datatextbot['text_Add_Balance'], 'callback_data' => "Add_Balance"], 'Add_Balance', $_rx_acc_styles);
-$_rx_acc_tr = rx_kb_style(['text' => '🔄 انتقال موجودی',                'callback_data' => "TransferBalance"], 'TransferBalance', $_rx_acc_styles);
-$_rx_acc_mt = rx_kb_style(['text' => '📑 تراکنش‌های من',                'callback_data' => "MyTransactions"], 'MyTransactions', $_rx_acc_styles);
-$_rx_acc_rc = rx_kb_style(['text' => '🔁 بررسی مجدد هش کریپتو',         'callback_data' => "recheckcrypto"], 'recheckcrypto', $_rx_acc_styles);
-$_rx_acc_t  = rx_kb_style(['text' => '🎫 تیکت‌های پشتیبانی',           'callback_data' => "supporttickets"], 'supporttickets', $_rx_acc_styles);
-$_rx_acc_k  = rx_kb_style(['text' => $textbotlang['users']['backbtn'], 'callback_data' => "backuser"],    'backuser',    $_rx_acc_styles);
-$_rx_acc_hasCryptoWallet = function_exists('crypto_active_wallets') && !empty(crypto_active_wallets());
-$_rx_acc_rows = [
-    [$_rx_acc_d, $_rx_acc_b],
-    [$_rx_acc_tr, $_rx_acc_mt],
-    [$_rx_acc_t],
-];
-if ($_rx_acc_hasCryptoWallet) {
-    $_rx_acc_rows[] = [$_rx_acc_rc];
-}
-$_rx_acc_rows[] = [$_rx_acc_k];
-$keyboardPanel = json_encode([
-    'inline_keyboard' => $_rx_acc_rows,
-    'resize_keyboard' => true
-]);
 if($adminrulecheck['rule'] == "administrator"){
 $keyboardadmin = rx_kb_encode([
+        [rx_kb_style(['text' => "🚦 آمادگی فروش", 'callback_data' => 'admin_readiness'], 'admin_readiness', $_rx_adm_styles)],
         [rx_kb_style(['text' => $textbotlang['Admin']['Status']['btn'], 'callback_data' => 'admin_status'], 'admin_status', $_rx_adm_styles)],
         [rx_kb_style(['text' => "📁 مدیریت پنل‌ها و سرورها", 'callback_data' => 'admin_panels'], 'admin_panels', $_rx_adm_styles)],
         [
@@ -562,6 +545,7 @@ $CartManage = rx_kb_encode([
         [rx_kb_style(['text' => "📚 آموزش کارت به کارت", 'callback_data' => 'cart_edu'], 'cart_edu', $_rx_gw_styles)],
         [['text' => "🔑 حداقل مبلغ احراز کارت", 'callback_data' => 'cart_cvmin']],
         [['text' => "🤖 تایید رسید بدون بررسی", 'callback_data' => 'cart_autocheck']],
+        [['text' => "🔐 تأیید رسید با بررسی", 'callback_data' => 'cart_smsverify']],
         [['text' => "⚙️ تنظیمات تایید خودکار", 'callback_data' => 'cart_except_user']],
         [['text' => "⏳ زمان تایید خودکار", 'callback_data' => 'cart_autotime']],
         [
@@ -589,6 +573,7 @@ $trnado = rx_kb_encode([
 $tonpay = rx_kb_encode([
         [rx_kb_style(['text' => "🏷️ نام نمایشی درگاه تون‌پی", 'callback_data' => 'tonpay_name'], 'tonpay_name', $_rx_gw_styles)],
         [rx_kb_style(['text' => "🔑 ثبت API Key تون‌پی", 'callback_data' => 'tonpay_apikey'], 'tonpay_apikey', $_rx_gw_styles)],
+        [rx_kb_style(['text' => "🔐 ثبت API Key کاستوم تون‌پی", 'callback_data' => 'tonpay_customkey'], 'tonpay_customkey', $_rx_gw_styles)],
         [rx_kb_style(['text' => "🔀 مقصد پرداخت تون‌پی", 'callback_data' => 'tonpay_paymode'], 'tonpay_paymode', $_rx_gw_styles)],
         [rx_kb_style(['text' => "💰 کش بک تون‌پی", 'callback_data' => 'tonpay_cashback'], 'tonpay_cashback', $_rx_gw_styles)],
         [
@@ -663,6 +648,7 @@ $abangateway = rx_kb_encode([
 $atlaspay = rx_kb_encode([
         [rx_kb_style(['text' => "🏷️ نام نمایشی درگاه اطلس‌پی", 'callback_data' => 'atlaspay_name'], 'atlaspay_name', $_rx_gw_styles)],
         [rx_kb_style(['text' => "🔑 ثبت API Key اطلس‌پی", 'callback_data' => 'atlaspay_apikey'], 'atlaspay_apikey', $_rx_gw_styles)],
+        [rx_kb_style(['text' => "🔀 مقصد پرداخت اطلس‌پی", 'callback_data' => 'atlaspay_paymode'], 'atlaspay_paymode', $_rx_gw_styles)],
         [rx_kb_style(['text' => "📊 موجودی و اطلاعات حساب", 'callback_data' => 'atlaspay_account'], 'atlaspay_account', $_rx_gw_styles)],
         [rx_kb_style(['text' => "💰 کش بک اطلس‌پی", 'callback_data' => 'atlaspay_cashback'], 'atlaspay_cashback', $_rx_gw_styles)],
         [

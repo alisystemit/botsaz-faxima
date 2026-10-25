@@ -127,6 +127,15 @@ class ServiceMonitor
         ];
     }
 
+    private function getServiceLabel($invoice, $username)
+    {
+        $label = trim((string) ($invoice['name_product'] ?? ''));
+        if ($label === '') {
+            $label = (string) $username;
+        }
+        return htmlspecialchars($label, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+    }
+
     private function checkVolumeThreshold($invoice, $user, $userData, $username)
     {
         $remainingVolume = $userData['data_limit'] - $userData['used_traffic'];
@@ -135,8 +144,9 @@ class ServiceMonitor
 
         if ($isVolumeWarning) {
             $formattedVolume = formatBytes($remainingVolume);
-            $message = faoxima_render_text(faoxima_textbot_get('dyn_cron_volume_warning_tpl', "با سلام خدمت شما کاربر گرامی 👋\n🚨 از حجم سرویس {username} تنها {volume} باقی مانده است. لطفاً در صورت تمایل برای خرید حجم اضافه و یا تمدید سرویستون از طریق بخش «{purchased_services}» اقدام بفرمایین"), [
+            $message = faoxima_render_text(faoxima_textbot_get('dyn_cron_volume_warning_tpl', "با سلام خدمت شما کاربر گرامی 👋\n🚨 از حجم سرویس «{plan}» شما تنها {volume} باقی مانده است (شناسه سرویس: {username}). لطفاً در صورت تمایل برای خرید حجم اضافه و یا تمدید سرویستون از طریق بخش «{purchased_services}» اقدام بفرمایین"), [
                 'username' => $username,
+                'plan' => $this->getServiceLabel($invoice, $username),
                 'volume' => $formattedVolume,
                 'purchased_services' => $this->text_Purchased_services,
             ]);
@@ -154,7 +164,7 @@ class ServiceMonitor
     }
     private function hasPendingQueuedRenewal($username)
     {
-        $stmt = $this->pdo->prepare("SELECT id FROM queued_renewal WHERE username = :username AND status = 'pending' LIMIT 1");
+        $stmt = $this->pdo->prepare("SELECT id FROM queued_renewal WHERE username = :username AND status IN ('pending', 'processing', 'retry', 'reconciling') LIMIT 1");
         $stmt->execute([':username' => $username]);
         return $stmt->fetch(PDO::FETCH_ASSOC) !== false;
     }
@@ -284,9 +294,11 @@ class ServiceMonitor
         $isTimeWarning = $timeRemaining <= $warningThreshold && $timeRemaining > 0;
 
         if ($isTimeWarning) {
-            $message = faoxima_render_text(faoxima_textbot_get('dyn_cron_time_warning_tpl', "با سلام خدمت شما کاربر گرامی 👋\n📌 از مهلت زمانی استفاده از سرویس {username} فقط {days} روز باقی مانده است. لطفاً در صورت تمایل برای تمدید این سرویس، از طریق بخش «{purchased_services}» اقدام بفرمایین. با تشکر از همراهی شما"), [
+            $message = faoxima_render_text(faoxima_textbot_get('dyn_cron_time_warning_tpl', "با سلام خدمت شما کاربر گرامی 👋\n📌 از مهلت زمانی سرویس «{plan}» شما فقط {days_display} روز باقی مانده است (شناسه سرویس: {username}). لطفاً در صورت تمایل برای تمدید این سرویس، از طریق بخش «{purchased_services}» اقدام بفرمایین. با تشکر از همراهی شما"), [
                 'username' => $username,
+                'plan' => $this->getServiceLabel($invoice, $username),
                 'days' => $daysRemaining,
+                'days_display' => $daysRemaining < 1 ? 'کمتر از ۱' : $daysRemaining,
                 'purchased_services' => $this->text_Purchased_services,
             ]);
             $reportMessage = faoxima_render_text(faoxima_textbot_get('dyn_cron_time_warning_report_tpl', "📌 اطلاعیه کرون زمان\n\n<blockquote>نام کاربری سرویس :‌ <code>{username}</code></blockquote>\n<blockquote>وضعیت سرویس : {status}</blockquote>\n<blockquote>تعداد روز باقی مانده ‌:‌{days}</blockquote>"), [

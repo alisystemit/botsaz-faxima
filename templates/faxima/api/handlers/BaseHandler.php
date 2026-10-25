@@ -157,42 +157,102 @@ abstract class BaseHandler
         return $value;
     }
 
-    protected function serverPurchaseDueAmount(string $purchaseUsername): int
+    protected function checkoutPayload(array $ck, ?array $preview = null, bool $choiceRequired = false): array
     {
-        $price = FaoximaDb::fetchScalar(
-            "SELECT price_product FROM invoice
-              WHERE username = :u AND id_user = :uid AND Status = 'unpaid'
-              ORDER BY time_sell DESC LIMIT 1",
-            [':u' => $purchaseUsername, ':uid' => $this->user['id']]
-        );
-        if ($price === null || $price === false || !is_numeric($price)) {
-            FaoximaResponse::fail(404, faoxima_textbot_get('dyn_paymentinit_unpaid_invoice_not_found', '❌ فاکتور خرید ناتمامی برای این نام کاربری پیدا نشد.'));
-        }
-        $due = (int) ceil((float) $price - (float) ($this->user['Balance'] ?? 0));
-        if ($due <= 1) {
-            FaoximaResponse::fail(409, faoxima_textbot_get('dyn_paymentinit_restart_purchase', '❌ مبلغ این خرید تغییر کرده است. لطفاً خرید را دوباره انجام دهید.'));
-        }
-        return $due;
+        $preview = $preview ?? rx_ck_preview($ck);
+        return [
+            'checkout_id'       => (string) $ck['checkout_id'],
+            'operation'         => (string) $ck['operation'],
+            'target'            => (string) ($ck['target'] ?? ''),
+            'final_price'       => (int) $ck['final_price'],
+            'recorded_balance'  => (int) $preview['recorded_balance'],
+            'available_balance' => (int) $preview['available_balance'],
+            'can_use_wallet'    => (bool) $preview['can_use_wallet'],
+            'use_wallet'        => $preview['use_wallet'],
+            'no_wallet'         => $preview['no_wallet'],
+            'wallet_choice'     => (string) $ck['wallet_choice'],
+            'wallet_amount'     => (int) $ck['wallet_amount'],
+            'external_amount'   => (int) $ck['external_amount'],
+            'status'            => (string) $ck['status'],
+            'choice_required'   => $choiceRequired,
+            'expires_at'        => (int) $ck['expires_at'],
+        ];
     }
 
-    protected function serverPendingActionAmount(?string $expectedAction = null, ?string $expectedOne = null): int
+    protected function openCheckout(string $operation, string $opKey, string $target, int $finalPrice, array $meta = []): array
     {
-        $tow = (string) ($this->user['Processing_value_tow'] ?? '');
-        $one = (string) ($this->user['Processing_value_one'] ?? '');
-        $allowedTow = ['getextenduser', 'getextravolumeuser', 'getextratimeuser'];
-        $stateValid = in_array($tow, $allowedTow, true) && $one !== '' && strpos($one, '%') !== false;
-        if ($stateValid && $expectedAction !== null && !hash_equals($tow, $expectedAction)) {
-            $stateValid = false;
+        $ck = function_exists('rx_ck_open') ? rx_ck_open([
+            'id_user'     => (string) $this->user['id'],
+            'operation'   => $operation,
+            'op_key'      => $opKey,
+            'target'      => $target,
+            'final_price' => $finalPrice,
+            'source'      => 'miniapp',
+            'meta'        => $meta,
+        ]) : null;
+        if ($ck === null) {
+            FaoximaResponse::serverError(faoxima_textbot_get('dyn_ck_failed', '❌ خطایی در آماده‌سازی پرداخت رخ داد. لطفاً دوباره تلاش کنید.'));
         }
-        if ($stateValid && $expectedOne !== null && !hash_equals($one, $expectedOne)) {
-            $stateValid = false;
+        $preview = rx_ck_preview($ck);
+        if (!$preview['can_use_wallet']) {
+            $conf = rx_ck_confirm((string) $ck['checkout_id'], $this->user['id'], 'none', 0, $finalPrice);
+            if (empty($conf['ok'])) {
+                FaoximaResponse::serverError(faoxima_textbot_get('dyn_ck_failed', '❌ خطایی در آماده‌سازی پرداخت رخ داد. لطفاً دوباره تلاش کنید.'));
+            }
+            return ['checkout' => $conf['checkout'], 'preview' => $preview, 'choice_required' => false];
         }
-        $stored = $this->user['Processing_value'] ?? null;
-        $due = is_numeric($stored) ? (int) ceil((float) $stored) : 0;
-        if (!$stateValid || $due <= 0) {
-            FaoximaResponse::fail(409, faoxima_textbot_get('dyn_paymentinit_renew_steps_incomplete', '❌ مراحل تمدید کامل نشده است. لطفاً تمدید را از ابتدا انجام دهید.'));
+        return ['checkout' => $ck, 'preview' => $preview, 'choice_required' => true];
+    }
+
+    protected function checkoutResponseFields(array $opened): array
+    {
+        $ck = $opened['checkout'];
+        $payload = $this->checkoutPayload($ck, $opened['preview'], (bool) $opened['choice_required']);
+        return [
+            'checkout'              => $payload,
+            'checkout_id'           => $payload['checkout_id'],
+            'requires_wallet_choice' => (bool) $opened['choice_required'],
+            'amount_due'            => (int) $ck['external_amount'],
+        ];
+    }
+
+    protected function serverCheckoutForPayment(?string $checkoutId, string $expectedOpKey = ''): array
+    {
+        $uid = (string) $this->user['id'];
+        $ck = ($checkoutId !== null && $checkoutId !== '' && function_exists('rx_ck_fetch')) ? rx_ck_fetch($checkoutId, $uid) : null;
+        if ($ck === null && $expectedOpKey !== '' && function_exists('rx_ck_find_for_key')) {
+            $ck = rx_ck_find_for_key($uid, $expectedOpKey, ['confirmed', 'awaiting_payment']);
         }
-        return $due;
+        if ($ck === null) {
+            FaoximaResponse::fail(409, faoxima_textbot_get('dyn_ck_choice_required', '❌ ابتدا نحوه پرداخت (استفاده یا عدم استفاده از کیف پول) باید تایید شود. لطفاً خرید را دوباره انجام دهید.'));
+        }
+        if ($expectedOpKey !== '' && !hash_equals((string) $ck['op_key'], $expectedOpKey)) {
+            FaoximaResponse::fail(409, faoxima_textbot_get('dyn_ck_mismatch', '❌ اطلاعات پرداخت با سفارش هم‌خوانی ندارد. لطفاً دوباره تلاش کنید.'));
+        }
+        $status = (string) $ck['status'];
+        if ($status === 'awaiting_choice') {
+            FaoximaResponse::fail(409, faoxima_textbot_get('dyn_ck_choice_required', '❌ ابتدا نحوه پرداخت (استفاده یا عدم استفاده از کیف پول) باید تایید شود.'), ['code' => 'choice_required', 'checkout' => $this->checkoutPayload($ck, null, true)]);
+        }
+        if (!in_array($status, ['confirmed', 'awaiting_payment'], true)) {
+            FaoximaResponse::fail(409, faoxima_textbot_get('dyn_ck_expired', '❌ این سفارش دیگر معتبر نیست. لطفاً مراحل را از ابتدا انجام دهید.'), ['code' => $status]);
+        }
+        if ((int) $ck['external_amount'] <= 0) {
+            FaoximaResponse::fail(409, faoxima_textbot_get('dyn_paymentinit_restart_purchase', '❌ مبلغ این خرید تغییر کرده است. لطفاً خرید را دوباره انجام دهید.'));
+        }
+        return $ck;
+    }
+
+    protected function validateCheckoutForPayment(array $ck, string $method): array
+    {
+        $res = rx_ck_validate_payment((string) $ck['checkout_id'], $this->user['id'], $method);
+        if (!empty($res['ok'])) {
+            return $res['checkout'];
+        }
+        $code = (string) ($res['code'] ?? 'error');
+        if ($code === 'refresh_required' && is_array($res['checkout'] ?? null)) {
+            FaoximaResponse::fail(409, faoxima_textbot_get('dyn_ck_refresh', '⚠️ موجودی کیف پول شما تغییر کرده است. لطفاً مبالغ را دوباره تایید کنید.'), ['code' => 'refresh_required', 'checkout' => $this->checkoutPayload($res['checkout'], $res['preview'] ?? null, true)]);
+        }
+        FaoximaResponse::fail(409, faoxima_textbot_get('dyn_ck_expired', '❌ این سفارش دیگر معتبر نیست. لطفاً مراحل را از ابتدا انجام دهید.'), ['code' => $code]);
     }
 
     abstract public function handle(): void;

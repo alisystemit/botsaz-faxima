@@ -48,8 +48,52 @@ final class ServiceHandler extends BaseHandler
     }
 
 
-    public function buildPayloadFromInvoice(array $invoice): ?array
+    public static function normalizeClientType($clientType): string
     {
+        if (function_exists('pasarguardNormalizeClientType')) {
+            return pasarguardNormalizeClientType($clientType);
+        }
+        $clientType = strtolower(trim((string)$clientType));
+        return in_array($clientType, ['links', 'xray', 'sing_box', 'clash_meta'], true) ? $clientType : 'links';
+    }
+
+    public static function clientDocumentFilename(string $clientType, int $index, int $count): string
+    {
+        if ($clientType === 'xray') {
+            return $count > 1 ? 'xray-' . ($index + 1) . '.json' : 'xray.json';
+        }
+        if ($clientType === 'sing_box') {
+            return 'sing-box.json';
+        }
+        return 'clash-meta.yaml';
+    }
+
+    public static function isValidClientDocument(string $clientType, $document): bool
+    {
+        if ($clientType === 'links' || !is_string($document) || $document === '' || !function_exists('pasarguardParseClientDocuments')) {
+            return false;
+        }
+        return count(pasarguardParseClientDocuments($clientType === 'xray' ? 'xray' : $clientType, $document)) === 1;
+    }
+
+    public static function clientDocumentsFromPayload(array $payload, string $requestedType): array
+    {
+        if ($requestedType === 'links' || ($payload['client_type'] ?? 'links') !== $requestedType) {
+            return [];
+        }
+        $documents = [];
+        foreach ((array)($payload['client_documents'] ?? []) as $document) {
+            if (!self::isValidClientDocument($requestedType, $document)) {
+                return [];
+            }
+            $documents[] = $document;
+        }
+        return $documents;
+    }
+
+    public function buildPayloadFromInvoice(array $invoice, string $clientType = 'links'): ?array
+    {
+        $clientType = self::normalizeClientType($clientType);
         $stock = $this->resolveStockRow($invoice);
         if ($stock !== null) {
             return $this->buildStockPayload($invoice, $stock);
@@ -64,7 +108,13 @@ final class ServiceHandler extends BaseHandler
             FaoximaResponse::fail(200, '🌐 وضعیت نت ملی این پنل روشن است؛ این سرویس فعلاً نمایش داده نمی‌شود. وقتی نت ملی خاموش شود، سرویس‌های قبلی دوباره در دسترس قرار می‌گیرند.');
         }
 
+        if (($panel['type'] ?? '') !== 'pasarguard') {
+            $clientType = 'links';
+        }
         $rxPanelCacheKey = 'faoxima:panelcache:' . $invoice['Service_location'] . ':' . $invoice['username'];
+        if ($clientType !== 'links') {
+            $rxPanelCacheKey .= ':fmt:' . $clientType;
+        }
         $remote = null;
         if (function_exists('rx_redis_is_active') && rx_redis_is_active()) {
             $rxPanelCached = rx_redis_get($rxPanelCacheKey);
@@ -78,7 +128,9 @@ final class ServiceHandler extends BaseHandler
 
         if ($remote === null) {
             $managePanel = new ManagePanel();
-            $remote = $managePanel->DataUser($invoice['Service_location'], $invoice['username']);
+            $remote = $clientType === 'links'
+                ? $managePanel->DataUser($invoice['Service_location'], $invoice['username'])
+                : $managePanel->DataUser($invoice['Service_location'], $invoice['username'], $clientType);
 
             if (is_array($remote) && function_exists('rx_redis_is_active') && rx_redis_is_active()) {
                 $rxPanelEncoded = json_encode($remote, JSON_UNESCAPED_UNICODE);
@@ -129,9 +181,16 @@ final class ServiceHandler extends BaseHandler
             $invoice['Status'] = $dbStatus;
         }
 
-        try {
-            update('invoice', 'user_info', json_encode($remote, JSON_UNESCAPED_UNICODE), 'id_invoice', $invoice['id_invoice']);
-        } catch (Throwable $e) {
+        $effectiveClientType = self::normalizeClientType($remote['client_type'] ?? 'links');
+        $clientDocuments = [];
+        if ($effectiveClientType !== 'links') {
+            $clientDocuments = is_array($remote['links'] ?? null) ? array_values(array_filter($remote['links'], 'is_string')) : [];
+            $remote['links'] = [];
+        } else {
+            try {
+                update('invoice', 'user_info', json_encode($remote, JSON_UNESCAPED_UNICODE), 'id_invoice', $invoice['id_invoice']);
+            } catch (Throwable $e) {
+            }
         }
 
         $dataLimitBytes = is_numeric($remote['data_limit']) ? (float)$remote['data_limit'] : 0.0;
@@ -145,7 +204,7 @@ final class ServiceHandler extends BaseHandler
         $config = [];
         $type = $panel['type'] ?? '';
         $filePrefix = trim((string)($panel['namecustom'] ?? ''));
-        if (strtolower($filePrefix) === 'none') {
+        if (strtolower($filePrefix) === 'none' || $type !== 'WGDashboard') {
             $filePrefix = '';
         }
         if (in_array($type, ['marzban', 'x-ui_single', 'eylanpanel', 'pasarguard'], true)) {
@@ -455,6 +514,10 @@ final class ServiceHandler extends BaseHandler
             'ip_summary'               => $ipSummary,
             'hwid_info'                => $hwidInfo,
             'has_queued_renewal'       => $this->hasQueuedRenewal($invoice['username']),
+            'queued_renewal'           => $this->queuedRenewalSummary($invoice),
+            'client_type'              => $effectiveClientType,
+            'requested_client_type'    => $clientType,
+            'client_documents'         => (($panel['config'] ?? '') === 'onconfig' && panel_feature_enabled($panel, 'configbtn')) ? $clientDocuments : [],
         ];
     }
 
@@ -462,10 +525,20 @@ final class ServiceHandler extends BaseHandler
     private function hasQueuedRenewal(string $username): bool
     {
         $row = FaoximaDb::fetchOne(
-            "SELECT id FROM queued_renewal WHERE username = :username AND status = 'pending' LIMIT 1",
+            "SELECT id FROM queued_renewal WHERE username = :username AND status IN (" . rx_rn_unresolved_sql() . ") LIMIT 1",
             [':username' => $username]
         );
         return $row !== null;
+    }
+
+
+    private function queuedRenewalSummary(array $invoice): ?array
+    {
+        try {
+            return rxReservationSummaryForService((string)($invoice['username'] ?? ''), (string)($invoice['Service_location'] ?? ''), (string)($invoice['id_invoice'] ?? ''));
+        } catch (Throwable $e) {
+            return null;
+        }
     }
 
 
@@ -640,6 +713,7 @@ final class ServiceHandler extends BaseHandler
             'disabled_actions'         => array_values(array_unique($disabled)),
             'note'                     => (string)($invoice['note'] ?? ''),
             'has_queued_renewal'       => $this->hasQueuedRenewal((string)$invoice['username']),
+            'queued_renewal'           => $this->queuedRenewalSummary($invoice),
         ];
     }
 

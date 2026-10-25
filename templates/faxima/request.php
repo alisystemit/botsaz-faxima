@@ -16,6 +16,85 @@ if (!function_exists('faoxima_dedup_error_log')) {
     }
 }
 
+if (!function_exists('faoxima_panel_timeout_validate')) {
+    function faoxima_panel_timeout_validate($value)
+    {
+        if (is_int($value)) {
+            $candidate = $value;
+        } elseif (is_string($value) && ctype_digit(trim($value))) {
+            $candidate = (int) trim($value);
+        } else {
+            return null;
+        }
+        return ($candidate >= 5 && $candidate <= 120) ? $candidate : null;
+    }
+}
+
+if (!function_exists('faoxima_panel_connect_timeout')) {
+    function faoxima_panel_connect_timeout($timeoutSeconds)
+    {
+        $timeoutSeconds = max(1, (int) $timeoutSeconds);
+        return min($timeoutSeconds, max(6, (int) round($timeoutSeconds * 0.4)));
+    }
+}
+
+if (!function_exists('faoxima_panel_timeout_info')) {
+    function faoxima_panel_timeout_info($refresh = false)
+    {
+        static $cached = null;
+        $default = 20;
+        $raw = null;
+        $source = null;
+        if (isset($GLOBALS['setting']) && is_array($GLOBALS['setting']) && array_key_exists('panel_curl_timeout', $GLOBALS['setting'])) {
+            $raw = $GLOBALS['setting']['panel_curl_timeout'];
+            $source = 'setting';
+        } elseif (!$refresh && is_array($cached) && $cached['expires_at'] > time()) {
+            return $cached['info'];
+        } else {
+            $source = 'database';
+            try {
+                $row = null;
+                if (function_exists('select')) {
+                    $row = select('setting', '*', null, null, 'select');
+                } else {
+                    $pdo = function_exists('getDatabaseConnection') ? getDatabaseConnection() : ($GLOBALS['pdo'] ?? null);
+                    if ($pdo instanceof PDO) {
+                        $stmt = $pdo->query('SELECT * FROM setting LIMIT 1');
+                        $row = $stmt ? $stmt->fetch(PDO::FETCH_ASSOC) : null;
+                    }
+                }
+                $raw = is_array($row) && array_key_exists('panel_curl_timeout', $row) ? $row['panel_curl_timeout'] : null;
+            } catch (Throwable $e) {
+                error_log('faoxima_panel_timeout_info: ' . $e->getMessage());
+                $raw = null;
+            }
+        }
+        $validated = faoxima_panel_timeout_validate($raw);
+        if ($validated === null) {
+            $timeout = $default;
+            $source = ($raw === null || $raw === '') ? 'default' : 'invalid_default';
+        } else {
+            $timeout = $validated;
+        }
+        $info = [
+            'timeout' => $timeout,
+            'connect_timeout' => faoxima_panel_connect_timeout($timeout),
+            'source' => $source,
+        ];
+        if ($source !== 'setting') {
+            $cached = ['info' => $info, 'expires_at' => time() + 60];
+        }
+        return $info;
+    }
+}
+
+if (!function_exists('faoxima_panel_timeout')) {
+    function faoxima_panel_timeout()
+    {
+        return faoxima_panel_timeout_info()['timeout'];
+    }
+}
+
 class CurlRequest {
     private $url;
     private $headers = [];
@@ -62,10 +141,9 @@ class CurlRequest {
 
     private function execute($method, $data = null) {
         if (!$this->timeout) {
-            $cfgTimeout = isset($GLOBALS['setting']['panel_curl_timeout']) ? (int)$GLOBALS['setting']['panel_curl_timeout'] : 0;
-            $this->timeout = $cfgTimeout > 0 ? $cfgTimeout : 20;
+            $this->timeout = faoxima_panel_timeout();
         }
-        $connectTimeout = max(6, (int)round($this->timeout * 0.4));
+        $connectTimeout = faoxima_panel_connect_timeout($this->timeout);
         $maxAttempts = 2;
         $lastError = '';
         $response = false;
@@ -84,11 +162,7 @@ class CurlRequest {
         curl_setopt($ch, CURLOPT_TCP_KEEPIDLE, 60);
         curl_setopt($ch, CURLOPT_TCP_KEEPINTVL, 30);
 
-        // پیش‌فرض امن: تأیید TLS روشن است. برای پنل self-signed می‌توان
-        // BOT_CURL_VERIFY_TLS=false یا FAOXIMA_SSL_INSECURE=1 را صریحاً تنظیم کرد.
-        $verifyTls = function_exists('faoxima_ssl_verify')
-            ? faoxima_ssl_verify()
-            : (!defined('BOT_CURL_VERIFY_TLS') || BOT_CURL_VERIFY_TLS !== false);
+        $verifyTls = defined('BOT_CURL_VERIFY_TLS') && BOT_CURL_VERIFY_TLS === true;
         if ($verifyTls) {
             curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
             curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 2);

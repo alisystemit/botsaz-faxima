@@ -15,14 +15,20 @@
 // بروزرسانیِ سورسِ قالب‌ها برگشته می‌شود و «رباتِ جدید باز همان سورسِ قدیمی»
 // تحویل می‌دهد (همان باگِ گزارش‌شده).
 //
-// استفاده: php tools/sync_templates.php [timeout-seconds]
+// استفاده: php tools/sync_templates.php [timeout-seconds] [--force]
+//   --force: حتی اگر SHA با state یکی باشد، فایل‌های متفاوت با مخزن بازنویسی
+//   می‌شوند (همان کاری که دکمهٔ «بازنویسی از مخزن» و کرون انجام می‌دهند).
 
 require_once __DIR__ . '/../src/Logger.php';
 require_once __DIR__ . '/../src/Manager.php';
 require_once __DIR__ . '/../src/SourceUpdate.php';
 require_once __DIR__ . '/../src/SelfUpdate.php';
 
-$timeout = isset($argv[1]) && is_numeric($argv[1]) ? max(60, (int)$argv[1]) : 600;
+$force = in_array('--force', array_slice($argv, 1), true);
+$timeout = 600;
+foreach (array_slice($argv, 1) as $_arg) {
+    if (is_numeric($_arg)) $timeout = max(60, (int)$_arg);
+}
 $log = Logger::getInstance();
 
 echo "▶ fetch مخازن قالب‌ها…\n";
@@ -33,8 +39,8 @@ if (!$fetch['ok']) {
     // کلون محلی اگر باشد ادامه می‌دهیم؛ updateTemplates خودش خطای هر قالب را گزارش می‌کند
 }
 
-echo "▶ همگام‌سازی templates/…\n";
-$run = SelfUpdate::updateTemplates($timeout);
+echo "▶ همگام‌سازی templates/" . ($force ? ' (اجباری)' : '') . "…\n";
+$run = SelfUpdate::updateTemplates($timeout, $force);
 
 try { SourceUpdate::clearCounter(); } catch (Throwable $e) { /* شمارندهٔ کش‌دار است؛ سقف ۱۰ دقیقه هم هست */ }
 

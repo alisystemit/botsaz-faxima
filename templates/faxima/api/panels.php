@@ -149,7 +149,7 @@ switch ($data['actions'] ?? '') {
             $stmt->execute();
             $totalpanel = (int) $stmt->fetchColumn();
             $totalPages = ceil($totalpanel / $limit);
-            $query = "SELECT * FROM marzban_panel WHERE name_panel  LIKE CONCAT('%', :name_panel, '%') ORDER BY id LIMIT :limit OFFSET :offset";
+            $query = "SELECT * FROM marzban_panel WHERE name_panel  LIKE CONCAT('%', :name_panel, '%') ORDER BY (position = 0) ASC, position ASC, id ASC LIMIT :limit OFFSET :offset";
             $stmt = $pdo->prepare($query);
             $stmt->bindValue(':name_panel', $q, PDO::PARAM_STR);
             $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);

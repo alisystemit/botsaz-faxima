@@ -1,5 +1,9 @@
+map $request_id $faoxima_request_id {
+    default $request_id;
+}
+
 map $status $faoxima_loggable {
-    ~^[0-4] 0;
+    ~^[23] 0;
     default 1;
 }
 
@@ -56,7 +60,10 @@ server {
         allow 192.168.0.0/16;
         deny all;
 
-        proxy_pass http://phpmyadmin:80/;
+        resolver 127.0.0.11 valid=30s ipv6=off;
+        set $faoxima_pma_upstream phpmyadmin;
+        rewrite ^/phpmyadmin/(.*)$ /$1 break;
+        proxy_pass http://$faoxima_pma_upstream:80;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;

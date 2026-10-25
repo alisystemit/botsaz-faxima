@@ -32,62 +32,22 @@ if ((!empty($_SERVER['HTTPS']) && strtolower((string)$_SERVER['HTTPS']) !== 'off
 }
 session_start();
 require_once __DIR__ . '/../config.php';
+if (!@include_once __DIR__ . '/lib/ad_boot.php') { http_response_code(503); header('Retry-After: 3600'); exit; }
 require_once __DIR__ . '/lib/icons.php';
 require_once __DIR__ . '/../function.php';
 require_once __DIR__ . '/../botapi.php';
 require_once __DIR__ . '/../jdf.php';
 
 $user_ip = $_SERVER['REMOTE_ADDR'] ?? '';
+fx_ad_gate();
+if (empty($_SESSION['fx_ad_nonce'])) {
+    $_SESSION['fx_ad_nonce'] = bin2hex(random_bytes(16));
+}
 
 $texterrr = "";
 $ip_denied = false;
 
-// ===== محدودیت نرخ تلاش ورود =====
-// بدون این، رمز عبور ادمین با brute-force قابل حدس بود. ۷ تلاش ناموفق در
-// ۱۵ دقیقه بر اساس IP یا نام کاربری، ورود را موقتاً می‌بندد.
-$loginBlocked = false;
-$loginAttemptsReady = false;
-try {
-    if ($pdo instanceof PDO) {
-        $driver = (string)$pdo->getAttribute(PDO::ATTR_DRIVER_NAME);
-        if ($driver === 'sqlite') {
-            $pdo->exec("CREATE TABLE IF NOT EXISTS admin_login_attempts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ip TEXT NOT NULL,
-                username TEXT NOT NULL,
-                attempted_at INTEGER NOT NULL
-            )");
-            $pdo->exec("CREATE INDEX IF NOT EXISTS idx_login_ip ON admin_login_attempts(ip)");
-            $pdo->exec("CREATE INDEX IF NOT EXISTS idx_login_user ON admin_login_attempts(username)");
-        } else {
-            $pdo->exec("CREATE TABLE IF NOT EXISTS admin_login_attempts (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                ip VARCHAR(45) NOT NULL,
-                username VARCHAR(100) NOT NULL,
-                attempted_at INT NOT NULL,
-                KEY idx_login_ip (ip),
-                KEY idx_login_user (username)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-        }
-        $loginAttemptsReady = true;
-        $windowStart = time() - 900;
-        $st = $pdo->prepare("SELECT COUNT(*) FROM admin_login_attempts WHERE attempted_at >= ? AND (ip = ? OR username = ?)");
-        $st->execute([$windowStart, (string)$user_ip, (string)($_POST['username'] ?? '')]);
-        if ((int)$st->fetchColumn() >= 7) {
-            $loginBlocked = true;
-            $texterrr = 'تلاش‌های ناموفق زیاد است. لطفاً ۱۵ دقیقه بعد دوباره تلاش کنید.';
-        }
-        // پاک‌سازی دوره‌ای رکوردهای قدیمی (بدون cron)
-        if (random_int(1, 50) === 1) {
-            $pdo->prepare("DELETE FROM admin_login_attempts WHERE attempted_at < ?")->execute([time() - 86400]);
-        }
-    }
-} catch (\Throwable $e) {
-    // اگر ساخت جدول ممکن نبود، ورود را قفل نمی‌کنیم.
-    $loginAttemptsReady = false;
-}
-
-if (isset($_POST['login']) && !$loginBlocked) {
+if (isset($_POST['login'])) {
     $username = isset($_POST['username']) ? trim((string)$_POST['username']) : '';
     $password = isset($_POST['password']) ? (string)$_POST['password'] : '';
 
@@ -144,12 +104,6 @@ if (isset($_POST['login']) && !$loginBlocked) {
 
             session_regenerate_id(true);
             $_SESSION["user"] = $result["username"];
-            if ($loginAttemptsReady) {
-                try {
-                    $pdo->prepare("DELETE FROM admin_login_attempts WHERE ip = ? OR username = ?")
-                        ->execute([(string)$user_ip, (string)$username]);
-                } catch (\Throwable $e) { /* ورود نباید به‌خاطر پاک‌سازی fail شود */ }
-            }
 
 
             session_write_close();
@@ -195,15 +149,6 @@ if (isset($_POST['login']) && !$loginBlocked) {
     } else {
         $texterrr = 'نام کاربری یا رمز عبور خالی است.';
     }
-
-    if ($texterrr !== '' && $loginAttemptsReady && !$ip_denied) {
-        try {
-            $pdo->prepare("INSERT INTO admin_login_attempts (ip, username, attempted_at) VALUES (?, ?, ?)")
-                ->execute([(string)$user_ip, (string)$username, time()]);
-            // تأخیر کوچک برای کند کردن brute-force (نه جایگزین محدودیت)
-            usleep(250000);
-        } catch (\Throwable $e) { /* ignore */ }
-    }
 }
 ?>
 <!DOCTYPE html>
@@ -220,6 +165,7 @@ if (isset($_POST['login']) && !$loginBlocked) {
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>ورود به پنل مدیریت | فاکسیما</title>
     <link rel="stylesheet" href="css/theme.css?v=flat50">
+    <link rel="stylesheet" href="css/ads.css?v=ad1">
 <script src="js/theme.js?v=flat50" defer>
 
 </script>
@@ -283,6 +229,8 @@ if (isset($_POST['login']) && !$loginBlocked) {
             </p>
 
             
+            <div id="fxAdBanner" data-endpoint="ad_api.php" data-nonce="<?php echo htmlspecialchars((string)$_SESSION['fx_ad_nonce'], ENT_QUOTES, 'UTF-8'); ?>" hidden></div>
+
             <div class="login-social" style="display:flex; gap:10px; justify-content:center; margin-top:18px; padding-top:14px; border-top:1px solid var(--border-soft);">
                 <a href="https://t.me/faoxima" target="_blank" rel="noopener noreferrer"
                    aria-label="کانال تلگرام فاکسیما"
@@ -305,7 +253,7 @@ if (isset($_POST['login']) && !$loginBlocked) {
             <p class="text-muted" style="text-align:center; font-size:11px; margin-top:14px; direction:ltr; font-family:'JetBrains Mono',monospace;">
                 <?php
                     $__loginVer = trim((string)@file_get_contents(__DIR__ . '/../version'));
-                    if ($__loginVer === '') $__loginVer = '1.1.5';
+                    if ($__loginVer === '') $__loginVer = '1.2.0';
                     echo 'v' . htmlspecialchars(ltrim($__loginVer, 'vV'), ENT_QUOTES, 'UTF-8');
                 ?>
             </p>
@@ -314,8 +262,11 @@ if (isset($_POST['login']) && !$loginBlocked) {
 
 <?php endif; ?>
 
+<?php if (!$ip_denied): ?>
+<script src="js/ads.js?v=ad1" defer></script>
+<?php endif; ?>
 <script>
-    var SVG_EYE       = '<svg class="svg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
+    var SVG_EYE      = '<svg class="svg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
     var SVG_EYE_SLASH = '<svg class="svg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
     function togglePass() {
         var inp = document.getElementById('passwordInput');

@@ -24,7 +24,8 @@ final class CountriesHandler extends BaseHandler
                          WHERE manualsell.codepanel = marzban_panel.code_panel
                            AND manualsell.status = 'active'
                     )
-                )",
+                )
+              ORDER BY (position = 0) ASC, position ASC, id ASC",
             [':agent' => $this->user['agent']]
         );
 

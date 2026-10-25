@@ -31,7 +31,7 @@ final class ServiceLocationsHandler extends BaseHandler
             "SELECT * FROM marzban_panel
               WHERE status = 'active'
                 AND (agent = :agent OR agent = 'all')
-                AND name_panel != :current",
+                AND name_panel != :current ORDER BY (position = 0) ASC, position ASC, id ASC",
             [':agent' => $agent, ':current' => $currentPanel]
         );
 

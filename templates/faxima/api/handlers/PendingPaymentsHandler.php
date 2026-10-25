@@ -18,6 +18,9 @@ final class PendingPaymentsHandler extends BaseHandler
             FaoximaResponse::ok(['pending' => []]);
         }
 
+        $sbvSourceSql = (function_exists('rx_sbv_has_schema') && rx_sbv_has_schema())
+            ? " OR EXISTS (SELECT 1 FROM card_sms_payment csp WHERE csp.id_order = Payment_report.id_order)"
+            : '';
         try {
             $rows = FaoximaDb::fetchAll(
                 "SELECT id, id_order, time, price, payment_Status, Payment_Method,
@@ -26,7 +29,7 @@ final class PendingPaymentsHandler extends BaseHandler
                   WHERE id_user = :u
                     AND payment_Status IN ('Unpaid','waiting','AwaitingHash','pending','expire')
                      AND Payment_Method IN ('plisio','nowpayment','digitaltron','arze digital offline','cart to cart','carttocart_pv','iranpay2','tonpay','cubepay','blupal','variza','abangateway','atlaspay')
-                    AND source = 'miniapp'
+                    AND (source = 'miniapp'" . $sbvSourceSql . " OR (Payment_Method = 'tonpay' AND tonpay_gateway_mode = 'custom') OR (Payment_Method = 'atlaspay' AND atlaspay_gateway_mode = 'custom'))
                   ORDER BY id DESC
                   LIMIT 8",
                 [':u' => $userId]
@@ -41,6 +44,26 @@ final class PendingPaymentsHandler extends BaseHandler
         }
 
         $now = time();
+        $sbvMap = [];
+        if (function_exists('rx_sbv_has_schema') && rx_sbv_has_schema()) {
+            $sbvIds = array_values(array_filter(array_map(static function ($r) {
+                return (string) ($r['id_order'] ?? '');
+            }, $rows)));
+            if (!empty($sbvIds)) {
+                try {
+                    $sbvRows = FaoximaDb::fetchAll(
+                        'SELECT id_order, expires_at, state FROM card_sms_payment WHERE id_order IN (' . implode(',', array_fill(0, count($sbvIds), '?')) . ')',
+                        $sbvIds
+                    );
+                    foreach ((array) $sbvRows as $sr) {
+                        $sbvMap[(string) $sr['id_order']] = $sr;
+                    }
+                } catch (Throwable $e) {
+                    $sbvMap = [];
+                }
+            }
+        }
+        $sbvActive = function_exists('rx_sbv_active_payment') ? rx_sbv_active_payment($userId) : null;
         $seenMethods = [];
         $pending = [];
         $labels = [];
@@ -109,7 +132,7 @@ final class PendingPaymentsHandler extends BaseHandler
             if ($methodLc === 'arze digital offline') {
                 if ($hashVal === '') continue;
             } elseif (in_array($methodLc, ['cart to cart', 'carttocart_pv'], true)) {
-                if ($decVal === '') continue;
+                if ($decVal === '' && !isset($sbvMap[(string) $r['id_order']])) continue;
             } elseif ($methodLc === 'tonpay') {
                 if (trim((string)($r['tonpay_invoice_id'] ?? '')) === '') continue;
             } elseif ($methodLc === 'cubepay') {
@@ -122,11 +145,28 @@ final class PendingPaymentsHandler extends BaseHandler
                 if ($decVal === '') continue;
             }
 
-            if ($createdAt + self::MAX_AGE_SEC < $now) continue;
+            if ($createdAt + self::MAX_AGE_SEC < $now && !($methodLc === 'tonpay' && (string) ($r['payment_Status'] ?? '') !== 'expire' && function_exists('tonpayCustomFetchReport') && tonpayCustomFetchReport((string) $r['id_order']) !== null)) continue;
 
             $status = (string)($r['payment_Status'] ?? '');
             $windowSec = $this->methodWindow($method, false);
-            $expiresAt = $createdAt + $windowSec;
+            $expiresAt = isset($sbvMap[(string) $r['id_order']]) ? (int) $sbvMap[(string) $r['id_order']]['expires_at'] : $createdAt + $windowSec;
+            if ($methodLc === 'tonpay' && $status !== 'expire' && function_exists('tonpayCustomFetchReport')) {
+                $customRow = tonpayCustomFetchReport((string) $r['id_order']);
+                if ($customRow !== null && (int) ($customRow['tonpay_review_deadline_at'] ?? 0) > 0) {
+                    $expiresAt = (int) $customRow['tonpay_review_deadline_at'];
+                }
+            }
+            if ($methodLc === 'atlaspay' && function_exists('atlaspayCustomFetchReport')) {
+                $atlasRow = atlaspayCustomFetchReport((string) $r['id_order']);
+                if ($atlasRow !== null) {
+                    $atlasState = atlaspayCustomBuildState($atlasRow);
+                    if ($atlasState['deadline_at'] > 0 && $atlasState['phase'] === 'awaiting_payment') {
+                        $expiresAt = $atlasState['deadline_at'];
+                    } elseif ($atlasState['open'] || in_array($atlasState['phase'], ['confirming', 'manual_review'], true)) {
+                        $expiresAt = max($now + 60, $createdAt + 7200);
+                    }
+                }
+            }
             if ($status !== 'expire' && $expiresAt < $now) {
                 continue;
             }
@@ -144,7 +184,13 @@ final class PendingPaymentsHandler extends BaseHandler
                 'expires_at'    => $expiresAt,
                 'remaining_sec' => max(0, $expiresAt - $now),
                 'currency_code' => trim((string)($r['crypto_currency'] ?? '')) ?: null,
+                'verify'        => isset($sbvMap[(string) $r['id_order']]),
+                'cancellable'   => isset($sbvMap[(string) $r['id_order']]) && $sbvActive !== null && (string) $sbvActive['id_order'] === (string) $r['id_order'] && !empty($sbvActive['cancellable']),
+                'resumable'     => isset($sbvMap[(string) $r['id_order']]) && $sbvActive !== null && (string) $sbvActive['id_order'] === (string) $r['id_order'] && !empty($sbvActive['resumable']),
             ];
+            if (isset($sbvMap[(string) $r['id_order']]) && $sbvActive !== null && (string) $sbvActive['id_order'] === (string) $r['id_order']) {
+                $pending[count($pending) - 1]['amount'] = (int) $sbvActive['payable_toman'];
+            }
         }
 
         FaoximaResponse::ok(['pending' => $pending]);

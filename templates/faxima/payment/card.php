@@ -118,7 +118,8 @@ if(preg_match('/(\d{1,3}(?:,\d{3})*\+)/', $valuepost, $matches)) {
 
 if (is_numeric($amountInteger) && substr($amountInteger, -3) === '000')return;
 if(isset($amountInteger) && $amountInteger !== NULL){
-    $_stmt = $connect->prepare("SELECT * FROM Payment_report WHERE price = ? AND (payment_Status = 'Unpaid' OR payment_Status = 'waiting')");
+    $_sbvExcl = (function_exists('rx_sbv_has_schema') && rx_sbv_has_schema()) ? " AND NOT EXISTS (SELECT 1 FROM card_sms_payment csp WHERE csp.id_order = Payment_report.id_order)" : "";
+    $_stmt = $connect->prepare("SELECT * FROM Payment_report WHERE price = ? AND (payment_Status = 'Unpaid' OR payment_Status = 'waiting')" . $_sbvExcl);
     $_amtFloat = (float)$amountInteger;
     $_stmt->bind_param("d", $_amtFloat);
     $_stmt->execute();
@@ -131,6 +132,7 @@ if(isset($amountInteger) && $amountInteger !== NULL){
     $Payment_report = $_stmt->get_result()->fetch_assoc();
     $_stmt->close();
     if(!isset($Payment_report['price']) || $Payment_report['price'] == null)return;
+    if (function_exists('rx_sbv_is_verify_order') && rx_sbv_is_verify_order((string) $order_id)) return;
     $_uid = $Payment_report['id_user'];
     $_stmt = $connect->prepare("SELECT * FROM user WHERE id = ? LIMIT 1");
     $_stmt->bind_param("s", $_uid);

@@ -114,14 +114,17 @@ final class CardSelectHandler extends BaseHandler
             FaoximaResponse::fail(503, '❌ کارت بانکی فعالی برای کارت‌به‌کارت تنظیم نشده است.');
         }
 
+        $sbvView = function_exists('rx_sbv_public_view') ? rx_sbv_public_view($orderId) : null;
         FaoximaResponse::ok([
             'order_id'    => $orderId,
             'card_number' => (string)$card['cardnumber'],
             'name_card'   => (string)$card['namecard'],
             'amount'      => (int)($payment['price'] ?? 0),
-            'amount_rial' => (int)($payment['price'] ?? 0) * 10,
+            'amount_rial' => $sbvView !== null ? (int) $sbvView['payable_rial'] : (int)($payment['price'] ?? 0) * 10,
+            'verify'      => $sbvView,
+            'auto_confirm' => $sbvView !== null,
             'used_last4'  => $last4,
-            'message'     => '✅ کارت تاییدشده انتخاب شد. مبلغ را واریز کنید و رسید را آپلود نمایید.',
+            'message'     => $sbvView !== null ? '✅ کارت تاییدشده انتخاب شد. دقیقاً مبلغ قابل پرداخت را واریز کنید؛ پرداخت به‌صورت خودکار بررسی می‌شود.' : '✅ کارت تاییدشده انتخاب شد. مبلغ را واریز کنید و رسید را آپلود نمایید.',
         ]);
     }
 }
