@@ -251,8 +251,8 @@ check('زرین‌پال: request با پارامتر ناقص «ناموفق» 
 check('زرین‌پال: StartPay درست ساخته می‌شود',
     PaymentZarin::startPayUrl('A0000', false) === 'https://payment.zarinpal.com/pg/StartPay/A0000');
 check('زرین‌پال: لینک sandbox', str_contains(PaymentZarin::startPayUrl('A0000', true), 'sandbox.zarinpal.com'));
-check('آقای پرداخت: مبلغ زیر کف به کف می‌رسد', PaymentAqaye::clampAmount(500) === PaymentAqaye::MIN_TOMAN);
-check('آقای پرداخت: مبلغ بالای سقف کلمه می‌شود', PaymentAqaye::clampAmount(999999999) === PaymentAqaye::MAX_TOMAN);
+check('آقای پرداخت: مبلغ زیر کف صریحاً رد می‌شود', PaymentAqaye::clampAmount(500) === null);
+check('آقای پرداخت: مبلغ بالای سقف صریحاً رد می‌شود', PaymentAqaye::clampAmount(999999999) === null);
 check('آقای پرداخت: مبلغ صفر null می‌دهد', PaymentAqaye::clampAmount(0) === null);
 check('آقای پرداخت: لینک پرداخت درست است',
     PaymentAqaye::startPayUrl('T1', false) === 'https://panel.aqayepardakht.ir/startpay/T1');

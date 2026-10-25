@@ -248,6 +248,14 @@ try {
 
         case 'payment_decline': {
             $id = (int)($_POST['id'] ?? 0);
+            $pay = $id > 0 ? Payments::getPayment($store, $id) : null;
+            if (!$pay) out(404, ['ok' => false, 'msg' => 'پرداخت یافت نشد']);
+            if (in_array($pay['status'], [Payments::ST_PAID, Payments::ST_USED], true)) {
+                out(400, ['ok' => false, 'msg' => 'این پرداخت قبلاً نهایی شده و قابل رد نیست']);
+            }
+            if (in_array($pay['status'], [Payments::ST_CANCELLED, Payments::ST_EXPIRED], true)) {
+                out(400, ['ok' => false, 'msg' => 'این پرداخت قبلاً بسته شده است']);
+            }
             Payments::setStatus($store, $id, Payments::ST_DECLINED);
             out(200, ['ok' => true]);
         }
