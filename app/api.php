@@ -609,6 +609,7 @@ try {
                           'failed' => (int)($res['failed'] ?? 0),
                           'reverted' => (int)($res['reverted'] ?? 0),
                           'failed_files' => array_values((array)($res['failed_files'] ?? [])),
+                          'failed_errors' => (array)($res['failed_errors'] ?? []),
                           'config_new' => !empty($res['config_new'])]);
             } catch (Throwable $e) {
                 internalError($e, 'bot_update');

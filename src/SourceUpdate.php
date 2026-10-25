@@ -795,7 +795,8 @@ class SourceUpdate
      * config.php و دیتابیس در هیچ‌کدام از این مراحل لمس نمی‌شوند.
      *
      * @return array{ok:bool, error:string, applied:int, failed:int, reverted:int,
-     *               files:string[], backup:array, notes:string[], skipped:int, obsolete:int,
+     *               files:string[], failed_files:string[], failed_errors:array<string,string>,
+     *               backup:array, notes:string[], skipped:int, obsolete:int,
      *               config_new:bool, elapsed_ms:int}
      */
     public static function apply(array $plan, ?int $byUid = null): array
@@ -803,7 +804,7 @@ class SourceUpdate
         $log = Logger::getInstance();
         $out = [
             'ok' => false, 'error' => '', 'applied' => 0, 'failed' => 0, 'reverted' => 0,
-            'files' => [], 'failed_files' => [], 'backup' => [], 'notes' => [], 'skipped' => 0, 'obsolete' => 0,
+            'files' => [], 'failed_files' => [], 'failed_errors' => [], 'backup' => [], 'notes' => [], 'skipped' => 0, 'obsolete' => 0,
             'config_new' => false, 'elapsed_ms' => 0,
         ];
         $started = microtime(true);
@@ -875,10 +876,12 @@ class SourceUpdate
                     if (!is_dir($keepDir)) @mkdir($keepDir, 0755, true);
                     @copy($dst, $keepDir . '/' . basename($rel));
                 }
-                if (!self::copyAtomic($src, $dst)) {
+                $copyErr = self::copyAtomic($src, $dst);
+                if ($copyErr !== '') {
                     $out['failed']++;
                     $out['failed_files'][] = $rel;
-                    $log->warning('source', "{$folder}: copy failed for {$rel}");
+                    $out['failed_errors'][$rel] = $copyErr;
+                    $log->warning('source', "{$folder}: copy failed for {$rel} — {$copyErr}");
                     continue;
                 }
                 $done[$rel] = true;
@@ -890,17 +893,25 @@ class SourceUpdate
                 foreach (array_keys($done) as $rel) {
                     if (!self::isPhp($rel)) continue;
                     $abs = $botDir . '/' . $rel;
-                    if (self::lintPhp($abs)) continue;
+                    $lintRes = self::lintPhpError($abs);
+                    if ($lintRes['ok']) continue;
+                    $why = trim((string)($lintRes['out'] ?? ''));
                     $prev = $tmpPrev . '/' . $rel;
                     if (is_file($prev) && @copy($prev, $abs)) {
                         $out['reverted']++;
                         $out['applied'] = max(0, $out['applied'] - 1);
                         $out['failed_files'][] = $rel;
-                        $out['notes'][] = "خطای نحوی ⇒ نسخهٔ قبلی برگردانده شد: {$rel}";
-                        $log->error('source', "{$folder}: lint failed, reverted {$rel}");
+                        $out['failed_errors'][$rel] = $why !== '' ? $why : 'خطای نحوی';
+                        $msg = "خطای نحوی ⇒ نسخهٔ قبلی برگردانده شد: {$rel}";
+                        if ($why !== '') $msg .= " — {$why}";
+                        $out['notes'][] = $msg;
+                        $log->error('source', "{$folder}: lint failed, reverted {$rel}" . ($why !== '' ? " — {$why}" : ''));
                     } else {
                         $out['failed_files'][] = $rel;
-                        $out['notes'][] = "⚠️ خطای نحوی و نسخهٔ قبلی هم نبود: {$rel}";
+                        $out['failed_errors'][$rel] = $why !== '' ? $why : 'خطای نحوی';
+                        $msg = "⚠️ خطای نحوی و نسخهٔ قبلی هم نبود: {$rel}";
+                        if ($why !== '') $msg .= " — {$why}";
+                        $out['notes'][] = $msg;
                         $log->error('source', "{$folder}: lint failed and no previous copy for {$rel}");
                     }
                 }
@@ -959,16 +970,24 @@ class SourceUpdate
     }
 
     /** کپی با فایل موقت و rename — قطع‌شدن وسط کار نباید فایل نیم‌کاره بگذارد */
-    private static function copyAtomic(string $src, string $dst): bool
+    private static function copyAtomic(string $src, string $dst): string
     {
         $dir = dirname($dst);
-        if (!is_dir($dir) && !@mkdir($dir, 0755, true) && !is_dir($dir)) return false;
+        if (!is_dir($dir) && !@mkdir($dir, 0755, true) && !is_dir($dir)) {
+            return "ناتوان از ساخت پوشهٔ «{$dir}»";
+        }
         $tmp = $dst . '.botsaztmp';
-        if (!@copy($src, $tmp)) { @unlink($tmp); return false; }
+        if (!@copy($src, $tmp)) {
+            @unlink($tmp);
+            return 'کپی موقت ناموفق بود (پرمیژن نوشتن؟ درایو پر؟)';
+        }
         if (!@rename($tmp, $dst)) {
             // بعضی هاست‌ها rename روی فایل موجود را رد می‌کنند
             @unlink($dst);
-            if (!@rename($tmp, $dst)) { @unlink($tmp); return false; }
+            if (!@rename($tmp, $dst)) {
+                @unlink($tmp);
+                return 'جابه‌جایی نهایی فایل ناموفق بود';
+            }
         }
         @chmod($dst, 0644);
         return true;
@@ -996,7 +1015,21 @@ class SourceUpdate
      */
     public static function lintPhp(string $file): bool
     {
-        if (!is_file($file)) return true;
+        return self::lintPhpError($file)['ok'];
+    }
+
+    /**
+     * `php -l` روی یک فایل و برگرداندن جزئیات خطای نحوی (برای گزارش دقیق).
+     *
+     * اگر اجرای php در این هاست ممکن نباشد، «ok» برمی‌گردد (یعنی «دلیلی برای
+     * برگشتِ فایل نیست»). خروجی «out» همان متنِ `php -l` است که شامل فایل،
+     * شمارهٔ خط و توکنِ مشکل‌دار می‌شود.
+     *
+     * @return array{ok:bool, out:string}
+     */
+    public static function lintPhpError(string $file): array
+    {
+        if (!is_file($file)) return ['ok' => true, 'out' => ''];
         $php = Manager::phpBinary();
         $cmd = escapeshellarg($php) . ' -l ' . escapeshellarg($file) . ' 2>&1';
         try {
@@ -1005,16 +1038,22 @@ class SourceUpdate
                 $rc = 1;
                 @exec($cmd, $lines, $rc);
                 $out = implode("\n", $lines);
-                return $rc === 0 && stripos($out, 'No syntax errors') !== false;
+                return [
+                    'ok'  => $rc === 0 && stripos($out, 'No syntax errors') !== false,
+                    'out' => trim((string)$out),
+                ];
             }
             if (function_exists('shell_exec')) {
                 $out = (string)@shell_exec($cmd);
-                return stripos($out, 'No syntax errors') !== false;
+                return [
+                    'ok'  => stripos($out, 'No syntax errors') !== false,
+                    'out' => trim($out),
+                ];
             }
         } catch (Throwable $e) {
-            return true; // ابزار در دسترس نبود ⇒ دلیلی برای برگشت نیست
+            return ['ok' => true, 'out' => ''];
         }
-        return true;
+        return ['ok' => true, 'out' => ''];
     }
 
     public static function fmtMs(int $ms): string
