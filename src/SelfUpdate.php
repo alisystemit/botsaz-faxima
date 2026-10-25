@@ -267,8 +267,14 @@ class SelfUpdate
         $branch = self::git('rev-parse --abbrev-ref HEAD');
         $commit = self::git('rev-parse --short HEAD');
         $dirty = self::git('status --porcelain --untracked-files=no');
-        // بدون fetch زور نمی‌کنیم؛ فقط از آخرین fetch خبر داریم
-        $ahead = self::git('rev-list --count HEAD..origin/' . $branch);
+        // بدون fetch زور نمی‌کنیم؛ فقط از آخرین fetch خبر داریم.
+        // نام شاخه از خروجی git می‌آید ولی نباید خام داخل رشتهٔ دستور برود:
+        // کاراکترهایی مثل ; و $() در نام ref مجازند و می‌توانند دستور تزریق کنند.
+        if ($branch === '' || !preg_match('/^[A-Za-z0-9._\/-]+$/', $branch)) {
+            $ahead = '';
+        } else {
+            $ahead = self::git('rev-list --count ' . escapeshellarg('HEAD..origin/' . $branch));
+        }
         $lastFetch = '';
         $f = self::repoDir() . '/.git/FETCH_HEAD';
         if (is_file($f)) $lastFetch = date('Y-m-d H:i', (int)@filemtime($f));
@@ -427,6 +433,10 @@ class SelfUpdate
         $state = self::templateSourceState();
         $now = time();
         foreach (Manager::templates() as $key => $spec) {
+            // قالب «فهرست فقط» (PGClockBot) سورس PHP نیست: نه در پنل «دریافت سورس
+            // بروز» لازم است، نه باید کلون/کپی شود. اگر اینجا رد نشود، یک ریپوی
+            // پایتون چند صد مگابایتی داخل templates/ کش میشود.
+            if (!Manager::isBuildable($key)) continue;
             $repo = (string)($spec['repo'] ?? '');
             if ($repo === '') continue;
             $dir = Manager::templateDir($key);
@@ -472,6 +482,7 @@ class SelfUpdate
         $errors = [];
         $seen = 0;
         foreach (Manager::templates() as $key => $spec) {
+            if (!Manager::isBuildable($key)) continue;
             $repo = (string)($spec['repo'] ?? '');
             if ($repo === '') continue;
             $seen++;
@@ -482,6 +493,7 @@ class SelfUpdate
         // چکِ زندهٔ ls-remote را هم به‌روز کن تا پنل عددِ درست نشان دهد
         $state = self::templateSourceState();
         foreach (Manager::templates() as $key => $spec) {
+            if (!Manager::isBuildable($key)) continue;
             $repo = (string)($spec['repo'] ?? '');
             if ($repo === '') continue;
             $sha = self::lsRemoteHead($repo, 20);
@@ -511,6 +523,7 @@ class SelfUpdate
         }
         $state = self::templateSourceState();
         foreach (Manager::templates() as $key => $spec) {
+            if (!Manager::isBuildable($key)) continue;
             $repo = (string)($spec['repo'] ?? '');
             $dir = Manager::templateDir($key);
             if ($repo === '' || !is_dir($dir)) continue;

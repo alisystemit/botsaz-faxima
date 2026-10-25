@@ -46,6 +46,7 @@ require_once __DIR__ . '/src/BotApi.php';
 require_once __DIR__ . '/src/Store.php';
 require_once __DIR__ . '/src/SuperAdmins.php';
 require_once __DIR__ . '/src/Manager.php';
+require_once __DIR__ . '/src/BotLifecycle.php';
 require_once __DIR__ . '/src/Logger.php';
 require_once __DIR__ . '/src/DbBackup.php';
 require_once __DIR__ . '/src/AdminNotify.php';
@@ -180,13 +181,72 @@ if (!hash_equals($secret, $provided)) {
 // (علامت‌گذاری update هم فقط بعد از موفقیت انجام می‌شود). قبلاً اتصال زود آزاد می‌شد و
 // خطاهای mid-flight با پاسخ 200 بی‌صدا گم می‌شدند.
 
+// ===== قفل‌های هم‌زمانی =====
+// فایل‌قفل‌ها تا پایان همین درخواست نگه داشته می‌شوند و در shutdown آزاد می‌شوند.
+$GLOBALS['__botsaz_locks'] = [];
+register_shutdown_function(static function (): void {
+    foreach (($GLOBALS['__botsaz_locks'] ?? []) as $fh) {
+        if (is_resource($fh)) { @flock($fh, LOCK_UN); @fclose($fh); }
+    }
+    $GLOBALS['__botsaz_locks'] = [];
+});
+
+/**
+ * گرفتن قفل انحصاری فایل. پیش‌فرض non-blocking است تا درخواست تکراری سریع
+ * رد شود، نه اینکه ده‌ها پروسه تا پایان build منتظر بمانند.
+ */
+function botsazLock(string $key, bool $blocking = false): bool
+{
+    $dir = __DIR__ . '/data/locks';
+    if (!is_dir($dir) && !@mkdir($dir, 0700, true) && !is_dir($dir)) {
+        // اگر FS اجازه نمی‌دهد، سرویس را کامل از کار نیندازیم.
+        Logger::getInstance()->warning('lock', 'data/locks ساخته نشد؛ پردازش بدون قفل ادامه یافت');
+        return true;
+    }
+    // قفل‌ها عمر کوتاه دارند؛ اما فایل هر update_id تا ابد می‌ماند. هر چند وقت
+    // یک‌بار فایل‌های قدیمی‌تر از یک روز را پاک می‌کنیم تا inode دیسک پر نشود.
+    if (mt_rand(1, 100) === 1) {
+        $old = glob($dir . '/*.lock') ?: [];
+        $cutoff = time() - 86400;
+        $removed = 0;
+        foreach ($old as $f) {
+            if ($removed >= 500) break;
+            if ((int)@filemtime($f) < $cutoff && @unlink($f)) $removed++;
+        }
+    }
+    $safe = preg_replace('/[^A-Za-z0-9_.-]/', '_', $key) ?: 'lock';
+    $fh = @fopen($dir . '/' . $safe . '.lock', 'c');
+    if ($fh === false) {
+        Logger::getInstance()->warning('lock', 'باز کردن فایل قفل ناموفق بود؛ پردازش بدون قفل ادامه یافت');
+        return true;
+    }
+    $op = LOCK_EX | ($blocking ? 0 : LOCK_NB);
+    if (!@flock($fh, $op)) { @fclose($fh); return false; }
+    $GLOBALS['__botsaz_locks'][] = $fh;
+    return true;
+}
+
 // ===== Dedup با update_id =====
 $update = json_decode(file_get_contents('php://input'), true) ?: [];
 if (!$update) { webhookDone(); }
 
-$updateId = $update['update_id'] ?? null;
-if ($updateId !== null && $store->isUpdateProcessed($updateId)) {
-    webhookDone(['ok' => true, 'duplicate' => true]);
+$updateIdRaw = $update['update_id'] ?? null;
+if ($updateIdRaw !== null && !is_int($updateIdRaw)
+    && !(is_string($updateIdRaw) && $updateIdRaw !== '' && ctype_digit($updateIdRaw))) {
+    Logger::getInstance()->warning('webhook', 'update_id نامعتبر نادیده گرفته شد');
+    http_response_code(400);
+    webhookDone(['ok' => false, 'error' => 'invalid update_id']);
+}
+$updateId = $updateIdRaw === null ? null : (int)$updateIdRaw;
+if ($updateId !== null) {
+    // قفل update_id: دو درخواست هم‌زمان تلگرام (retry قبل از mark) نباید هر دو
+    // build/پرداخت را اجرا کنند. دومی فوراً 200 می‌گیرد؛ اولی کار را کامل می‌کند.
+    if (!botsazLock('update_' . $updateId)) {
+        webhookDone(['ok' => true, 'duplicate' => true]);
+    }
+    if ($store->isUpdateProcessed($updateId)) {
+        webhookDone(['ok' => true, 'duplicate' => true]);
+    }
 }
 // «علامت‌گذاری بعد از پردازش موفق» — اگر وسط کار خطا بود، تلگرام دوباره می‌فرستد
 
@@ -217,6 +277,12 @@ if ($cb) {
     }
     if (!isset($cb['message'])) { if ($updateId !== null) $store->markUpdateProcessed($updateId); webhookDone(); }
     $uid = (int)$cbFrom['id'];
+    // یک عملیات per-user در هر لحظه؛ build/پرداخت/تغییر state نباید با هم بجنگند.
+    if (!botsazLock('user_' . $uid)) {
+        BotApi::answerCb($TOKEN, (string)$cb['id'], '⏳ یک عملیات دیگر در حال انجام است؛ چند لحظه بعد دوباره بزنید.');
+        if ($updateId !== null) $store->markUpdateProcessed($updateId);
+        webhookDone();
+    }
     $user = $store->user($uid, $cbFrom['first_name'] ?? '', $cbFrom['username'] ?? '');
     $cbChatId = $cb['message']['chat']['id'] ?? $uid;
     $cbData = (string)($cb['data'] ?? '');
@@ -252,6 +318,14 @@ if ($msg) {
         webhookDone();
     }
     $uid = (int)$from['id'];
+    // قفل per-user: از ورود هم‌زمان دو پیام (مثلاً دو بار زدن «ساخت») جلوگیری می‌کند.
+    // بدون این، هر دو درخواست از چک is_dir رد می‌شدند و دو build/دو مصرف سقف داشتیم.
+    if (!botsazLock('user_' . $uid)) {
+        BotApi::send($TOKEN, (string)($msg['chat']['id'] ?? $uid),
+            "⏳ یک عملیات دیگر برای شما در حال انجام است. لطفاً چند لحظه صبر کنید و دوباره تلاش کنید.");
+        if ($updateId !== null) $store->markUpdateProcessed($updateId);
+        webhookDone();
+    }
     $user = $store->user($uid, $from['first_name'] ?? '', $from['username'] ?? '');
     $text = is_string($msg['text'] ?? null) ? trim($msg['text']) : '';
     $chatId = $msg['chat']['id'] ?? $uid;
@@ -1060,6 +1134,60 @@ function myBotsSummaryText(array $bots, int $uid, Store $store): string
     }
     $t .= "\n\n👇 <b>روی هر ربات بزنید</b> تا پنل مدیریتش (آمار، وبهوک، ویرایش توکن…) باز شود.";
     return Ui::out($t);
+}
+
+/**
+ * راهنمای «قالب فهرست» — محصولی که این ربات‌ساز نمی‌سازد.
+ *
+ * چرا اصلاً نمایش داده می‌شود: کاربر باید بداند چنین محصولی در سبد هست، ولی
+ * نباید دکمهٔ «ساخت» ببیند؛ چون ساخت آن با مدل کپیِ قالب PHP + پچ config.php
+ * فقط یک ربات مرده با پیام موفقیت تولید می‌کند. این تابع همان تفاوت را
+ * شفاف می‌گوید و مسیر درست (نصب جداگانه روی VPS) را نشان می‌دهد.
+ */
+function showCatalogTemplate(string $TOKEN, $chatId, int $msgId, string $type): void
+{
+    $spec = Manager::templateSpec($type);
+    // اگر کلید جعلی/کهنه بود یا اشتباهاً قالب ساختنی آمد، بی‌صدا منو را نشان بده
+    if ($spec === null || Manager::isBuildable($type)) {
+        if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, "⚠️ این مورد در فهرست نیست.");
+        BotApi::send($TOKEN, $chatId, "🗂 یک قالب انتخاب کن:", ['reply_markup' => Nav::typeMenu()]);
+        return;
+    }
+
+    $label    = (string)($spec['label'] ?? $type);
+    $icon     = (string)($spec['icon'] ?? '🧩');
+    $runtime  = (string)($spec['runtime'] ?? '—');
+    $db       = (string)($spec['db'] ?? '—');
+    $repo     = (string)($spec['repo'] ?? '');
+    $docs     = (string)($spec['docs'] ?? '');
+
+    $t = "{$icon} <b>" . Ui::e($label) . "</b>\n"
+        . "<i>در فهرست محصولات هست، ولی ساخت خودکار ندارد.</i>\n\n" . Ui::sep() . "\n\n"
+        . "این پروژه با PHP نوشته نشده؛ یک سرویس دائمی است و با مدل «کپی قالب و"
+        . " وبهوک PHP» این ربات‌ساز اجرا نمی‌شود. برای همین دکمهٔ ساخت ندارد تا"
+        . " رباتِ نیمه‌کاره‌ای تحویل داده نشود.\n\n"
+        . Ui::kv('🧠', 'ران‌تایم', $runtime)
+        . "\n" . Ui::kv('🗄', 'دیتابیس', $db);
+
+    $req = (array)($spec['requires'] ?? []);
+    if ($req !== []) {
+        $t .= "\n\n📋 <b>پیش‌نیازهای نصب</b>\n";
+        foreach ($req as $r) $t .= Ui::bullet('•', Ui::e((string)$r));
+    }
+
+    if ($repo !== '') $t .= "\n\n🔗 <b>مخزن:</b> " . Ui::link($repo);
+    if ($docs !== '') $t .= "\n📚 <b>راهنمای نصب:</b> " . Ui::code($docs);
+
+    $t .= "\n\n💡 نصب درست: روی سرور لینوکس (با دسترسی root) جداگانه نصب می‌شود و"
+        . " بعد می‌توان این ربات‌ساز را برای فروش/مدیریتش به آن وصل کرد.";
+
+    $kb = BotApi::ikb([
+        [['text' => '📦 ربات‌های من', 'callback_data' => Nav::CB_MY_BOTS]],
+        [['text' => '↩️ انتخاب قالب', 'callback_data' => Nav::CB_BACK_TYPE]],
+        [['text' => '🏠 منو', 'callback_data' => Nav::CB_BACK_MAIN]],
+    ]);
+    if ($msgId > 0) BotApi::edit($TOKEN, $chatId, $msgId, Ui::out($t), ['reply_markup' => $kb]);
+    else BotApi::send($TOKEN, $chatId, Ui::out($t), ['reply_markup' => $kb]);
 }
 
 /** پنل مدیریت کاربران مجاز — مشترک بین پیام و کال‌بک (edit یا send) */
@@ -2646,6 +2774,12 @@ function buildBot(array $cfg, Store $store, string $TOKEN, int $owner, string $t
 {
     $spec = Manager::templateSpec($type);
     if ($spec === null) throw new Exception("نوع ربات نامعتبر است");
+    // گارد دوم: هیچ مسیری (دکمهٔ کهنه، API، کرون) نباید قالب غیر PHP را وارد
+    // چرخهٔ ساخت کند. حتی اگر newbot: قبلاً رد کرده باشد، اینجا هم می‌ایستیم تا
+    // پوشه/دیتابیس/وبهوکِ نیمه‌کاره ساخته نشود.
+    if (!Manager::isBuildable($type)) {
+        throw new Exception("قالب «{$type}» با این ربات‌ساز قابل ساخت نیست؛ باید جداگانه نصب شود.");
+    }
 
     // پیش‌بررسی نسخهٔ PHP — قبل از mkdir/دیتابیس تا هیچ منبعی ساخته نشود.
     // بدون این، ربات «موفقیت‌آمیز» ساخته می‌شود ولی صفحه‌هایش 500 می‌دهند.
@@ -2754,11 +2888,25 @@ function buildBot(array $cfg, Store $store, string $TOKEN, int $owner, string $t
         //   migrate   ⇒ مایگریشن درون‌فرایندی (پاسارگاد، چون SQLite است و table.php ندارد)
         $tableFile = (string)($spec['table'] ?? '');
         $schema = Manager::templateSchema($type);
+        $tableOk = null;
+        $webhookNote = '';
+        $webhookSet = false;
         if ($schema === 'http' && $tableFile !== '') {
-            $tableOk = Manager::triggerTable(
-                $baseUrl . '/' . $tableFile,
-                Manager::tableSecret($type, $plainToken)
-            );
+            $tableUrl = $baseUrl . '/' . $tableFile;
+            $tableSecret = Manager::tableSecret($type, $plainToken);
+            $tableOk = Manager::triggerTable($tableUrl, $tableSecret);
+            if (!$tableOk) {
+                // یک retry کوتاه برای خطای گذرای شبکه/وب‌سرور
+                usleep(500000);
+                $tableOk = Manager::triggerTable($tableUrl, $tableSecret);
+            }
+            if (!$tableOk) {
+                // شکست table.php یعنی ربات بدون جدول بالا می‌آید و در اولین اجرا ۵۰۰
+                // می‌دهد. قبلاً فقط یک هشدار در پیام نمایش داده می‌شد و ربات active
+                // ثبت می‌شد. حالا build شکست می‌خورد و rollback انجام می‌شود.
+                Logger::getInstance()->error('build', "table.php failed for {$slug}: " . Manager::tableLastError());
+                throw new Exception("ساخت جدول‌های ربات ناموفق بود؛ نصب لغو شد. لطفاً دسترسی table.php و HTTPS را بررسی کنید. " . Manager::tableLastError());
+            }
         } elseif ($schema === 'migrate') {
             $inst = Manager::installTemplateSchema($type, $botDir);
             if (!$inst['migrated']) {
@@ -2788,10 +2936,17 @@ function buildBot(array $cfg, Store $store, string $TOKEN, int $owner, string $t
         $secret = Manager::webhookSecret($type, $plainToken, $staticSecret);
         $webhook = Manager::webhookUrl($cfg, $slug, $type, $secret);
         $set = BotApi::setWebhook($plainToken, $webhook, $secret);
-        $webhookSet = true;
         if (empty($set['ok'])) {
-            $webhookNote = '⚠️ خطای وبهوک: ' . htmlspecialchars((string)($set['description'] ?? 'unknown'), ENT_QUOTES, 'UTF-8');
+            usleep(400000);
+            $set = BotApi::setWebhook($plainToken, $webhook, $secret);
         }
+        if (empty($set['ok'])) {
+            // اگر وبهوک ست نشود، ربات هیچ پیامی نمی‌گیرد؛ ثبت ربات «موفق» یعنی
+            // تحویل ربات مرده. قبلاً فقط در متن پیام هشدار داده می‌شد.
+            Logger::getInstance()->error('build', "setWebhook failed for {$slug}: " . (string)($set['description'] ?? 'unknown'));
+            throw new Exception("ست‌کردن وبهوک تلگرام ناموفق بود: " . (string)($set['description'] ?? 'unknown'));
+        }
+        $webhookSet = true;
 
         // ===== ۷) ثبت در دیتابیس =====
         $encToken = encryptToken($plainToken, $GLOBALS['secretKey'] ?? Manager::DEFAULT_SECRET_KEY);
@@ -2895,6 +3050,8 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
             || $data === Nav::CB_BACK_TYPE
             || $data === Nav::CB_MY_BOTS
             || str_starts_with($data, 'pay:')
+            // راهنمای قالب‌های «فهرست فقط» اطلاعاتی است و مجوز ساخت نمی‌خواهد
+            || str_starts_with($data, 'catalog:')
             || str_starts_with($data, 'newbot:');
         if ($openForUser) {
             if ($data === 'cancel' || $data === Nav::CB_BACK_MAIN || $data === 'menu') {
@@ -2984,6 +3141,11 @@ function handleCallback(array $cfg, Store $store, string $TOKEN, array $SUPERS, 
     // ===== ادمین: ویرایش متن‌های پویای ربات =====
     if (str_starts_with($data, 'texts:')) {
         handleTextsCallback($store, $TOKEN, $chatId, $msgId, $admin, $data, $user, $SUPERS);
+        return;
+    }
+
+    if (str_starts_with($data, 'catalog:')) {
+        showCatalogTemplate($TOKEN, $chatId, $msgId, substr($data, 8));
         return;
     }
 
@@ -3810,6 +3972,10 @@ function handlePayAdminCallback(array $cfg, Store $store, string $TOKEN, array $
     $parts = explode(':', $data);
     $sub = $parts[1] ?? '';
 
+    // کارت مقصد/درگاه/قیمت تنظیمات عملیاتی فروشگاه‌اند و هر ادمین می‌تواند
+    // آن‌ها را پیکربندی کند (در بالا فقط isAdmin چک شد؛ auth در bot.php هم
+    // غیرادمین را راه نمی‌دهد).
+
     // پنل اصلی
     if ($sub === 'panel' || $sub === '') { showPaymentsAdmin($store, $TOKEN, $chatId, $msgId); return; }
 
@@ -3896,7 +4062,9 @@ function handlePayAdminCallback(array $cfg, Store $store, string $TOKEN, array $
     // تأیید دستی (کارت‌به‌کارت)
     if ($sub === 'approve') {
         $pid = (int)($parts[2] ?? 0);
-        $p = $pid > 0 ? Payments::approveByAdmin($store, $pid) : null;
+        $p = $pid > 0 ? Payments::getPayment($store, $pid) : null;
+        if (!$p) { BotApi::send($TOKEN, $chatId, "⛔️ پرداخت یافت نشد یا قبلاً نهایی شده است."); return; }
+        $p = Payments::approveByAdmin($store, $pid);
         if (!$p) { BotApi::send($TOKEN, $chatId, "⛔️ پرداخت یافت نشد یا قبلاً نهایی شده است."); return; }
         $ownerId = (int)$p['user_id'];
         $note = (string)($p['grant_note'] ?? '');
@@ -4645,7 +4813,7 @@ function runTemplatesUpdate(string $TOKEN, $chatId): void
             . htmlspecialchars(mb_substr((string)$fetch['out'], -700), ENT_QUOTES, 'UTF-8') . "</pre>\n";
         // اگر هیچ مخزنی به‌روز نشد و اصلاً کلنی نداریم، ادامه معنی ندارد
         $anyClone = false;
-        foreach (array_keys(Manager::templates()) as $k) {
+        foreach (array_keys(Manager::buildableTypes()) as $k) {
             if (is_dir(SelfUpdate::templateCloneDir($k))) { $anyClone = true; break; }
         }
         if (!$anyClone && trim((string)$fetch['out']) !== '') {
@@ -4905,7 +5073,13 @@ function botAction(array $cfg, Store $store, string $TOKEN, array $SUPERS, array
         case 'webhook': {
             $tok = childToken($bot);
             $url = Manager::webhookUrlForBot($cfg, $bot);
-            $r = BotApi::setWebhook($tok, $url, Manager::resolveWebhookSecret($bot));
+            $secret = Manager::resolveWebhookSecret($bot);
+            $spec = Manager::templateSpec((string)($bot['type'] ?? ''));
+            if (is_array($spec) && (string)($spec['secret'] ?? '') === 'static' && $secret === '') {
+                BotApi::send($TOKEN, $chatId, "❌ secret وبهوک پیدا نشد؛ نمی‌توان وبهوک را بدون secret ست کرد.");
+                return;
+            }
+            $r = BotApi::setWebhook($tok, $url, $secret);
             if (!is_array($r) || empty($r['ok'])) {
                 BotApi::send($TOKEN, $chatId, "❌ <b>ست وبهوک ناموفق بود:</b>\n"
                     . Ui::quote(Ui::e((string)($r['description'] ?? 'پاسخی از تلگرام نرسید'))));
@@ -4919,20 +5093,16 @@ function botAction(array $cfg, Store $store, string $TOKEN, array $SUPERS, array
         }
         case 'toggle': {
             $new = $bot['status'] === 'active' ? 'disabled' : 'active';
-            $store->setBotStatus($bot['id'], $new);
-            if ($new === 'disabled') {
-                $delR = BotApi::deleteWebhook(childToken($bot));
-                // قبلاً نتیجه دور ریخته می‌شد؛ وبهوک که برنداشته شود رباتِ غیرفعال همچنان پینگ می‌گیرد
-                if (!is_array($delR) || empty($delR['ok'])) {
-                    Logger::getInstance()->warning('toggle', "deleteWebhook برای {$bot['folder']} ناموفق: " . (($delR['description'] ?? '') ?: 'no response'));
-                }
-            } else {
-                $tok = childToken($bot);
-                $url = Manager::webhookUrlForBot($cfg, $bot);
-                $setR = BotApi::setWebhook($tok, $url, Manager::resolveWebhookSecret($bot));
-                if (!is_array($setR) || empty($setR['ok'])) {
-                    Logger::getInstance()->warning('toggle', "setWebhook برای {$bot['folder']} ناموفق: " . (($setR['description'] ?? '') ?: 'no response'));
-                }
+            // یک منبع حقیقت مشترک با مینی‌اپ: وبهوک + وضعیت با هم و با retry.
+            $r = $new === 'disabled'
+                ? BotLifecycle::disable($cfg, $store, $bot)
+                : BotLifecycle::enable($cfg, $store, $bot);
+            if (empty($r['ok'])) {
+                BotApi::send($TOKEN, $chatId,
+                    "⚠️ تغییر وضعیت ربات انجام نشد:\n<code>"
+                    . htmlspecialchars((string)($r['error'] ?? 'خطای نامشخص'), ENT_QUOTES, 'UTF-8') . "</code>");
+                showBotPanel($cfg, $store, $TOKEN, $chatId, $msgId, $bot, '', isAdmin($user, $SUPERS));
+                return;
             }
             $bot['status'] = $new;
             showBotPanel($cfg, $store, $TOKEN, $chatId, $msgId, $bot, '', isAdmin($user, $SUPERS));
@@ -4964,50 +5134,27 @@ function botAction(array $cfg, Store $store, string $TOKEN, array $SUPERS, array
             return;
         }
         case 'delyes': {
-            $delR = BotApi::deleteWebhook(childToken($bot));
-            // قبلاً نتیجه دور ریخته می‌شد؛ وبهوک باقی‌مانده بعد از حذف، پینگ بی‌جهت می‌فرستد
-            if (!is_array($delR) || empty($delR['ok'])) {
-                Logger::getInstance()->warning('delete', "deleteWebhook برای {$bot['folder']} ناموفق: " . (($delR['description'] ?? '') ?: 'no response'));
+            // همان سرویس مشترک مینی‌اپ: وبهوک → بکاپ → DROP DB → پوشه → رکورد.
+            // اگر DROP دیتابیس شکست بخورد، رکورد و پوشه می‌مانند تا تلاش دوباره ممکن باشد.
+            $r = BotLifecycle::delete($cfg, $store, $bot);
+            if (empty($r['ok'])) {
+                BotApi::edit($TOKEN, $chatId, $msgId,
+                    "⚠️ حذف ربات انجام نشد:\n<code>"
+                    . htmlspecialchars((string)($r['error'] ?? 'خطای نامشخص'), ENT_QUOTES, 'UTF-8') . "</code>",
+                    ['reply_markup' => BotApi::ikb([
+                        [['text' => '🔁 تلاش دوباره', 'callback_data' => "act:delyes:{$bot['id']}"]],
+                        [['text' => '↩️ بازگشت', 'callback_data' => "mybot:{$bot['id']}"]],
+                    ])]);
+                return;
             }
-            $dir = Manager::childBotsDir() . '/' . $bot['folder'];
-            // ===== بکاپ قبل از حذف =====
-            $backupDir = dirname($dir) . '/backups/' . $bot['folder'] . '_' . time();
-            $backedUp = false;
-            if (is_dir($dir)) {
-                @mkdir($backupDir, 0755, true);
-                try {
-                    Manager::copyDir($dir, $backupDir . '/data', ['config.php', '.htaccess']);
-                    // config.php/.htaccess در پوشه‌های تو در تو هم نباید در بکاپ بمانند
-                    Manager::stripSensitiveFiles($backupDir . '/data', ['config.php', '.htaccess']);
-                    $backedUp = true;
-                } catch (Exception $e) { Logger::getInstance()->error('delete', "Backup failed for {$bot['folder']}: " . $e->getMessage()); }
+            $text = "🗑 ربات حذف شد.";
+            if (!empty($r['backup'])) {
+                $text .= "\n💾 بکاپ: <code>" . htmlspecialchars((string)$r['backup'], ENT_QUOTES, 'UTF-8') . "</code>";
             }
-            if (is_dir($dir)) {
-                $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($dir, RecursiveDirectoryIterator::SKIP_DOTS), RecursiveIteratorIterator::CHILD_FIRST);
-                foreach ($it as $f) $f->isDir() ? @rmdir($f->getPathname()) : @unlink($f->getPathname());
-                @rmdir($dir);
+            if (!empty($r['warnings'])) {
+                $text .= "\n⚠️ " . htmlspecialchars(implode(' | ', (array)$r['warnings']), ENT_QUOTES, 'UTF-8');
             }
-            // ===== حذف کامل دیتابیس =====
-            // اگر DROP ناموفق شود نباید بی‌صدا رکورد حذف شود — دیتابیس یتیم و نامرئی می‌ماند.
-            $dbDropFailed = false;
-            try {
-                if (!empty($bot['db_name'])) {
-                    $host = $cfg['db_host']; $port = $cfg['db_port'] ?? 3306;
-                    $serverPdo = new PDO("mysql:host={$host};port={$port};charset=utf8mb4", $cfg['db_user'], $cfg['db_pass'], [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
-                    $serverPdo->exec("DROP DATABASE IF EXISTS `{$bot['db_name']}`");
-                }
-            } catch (Exception $e) {
-                $dbDropFailed = true;
-                Logger::getInstance()->error('delete', "Failed to drop DB for {$bot['folder']}: " . $e->getMessage());
-            }
-            $store->deleteBot($bot['id']);
-            // ===== جلوگیری از رشد بی‌انتهای bots/backups/ =====
-            try { Manager::pruneBackups(dirname($dir) . '/backups', $bot['folder'], 5); }
-            catch (Exception $e) { Logger::getInstance()->warning('delete', "Backup prune failed: " . $e->getMessage()); }
-            $dbNote = ($dbDropFailed && !empty($bot['db_name']))
-                ? "\n⚠️ حذف دیتابیس ناموفق بود — دستی حذفش کنید: <code>{$bot['db_name']}</code>"
-                : '';
-            BotApi::edit($TOKEN, $chatId, $msgId, "🗑 ربات حذف شد." . $dbNote . ($backedUp ? "\n💾 بکاپ: <code>{$backupDir}</code>" : ""));
+            BotApi::edit($TOKEN, $chatId, $msgId, $text);
             return;
         }
 

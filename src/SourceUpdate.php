@@ -803,7 +803,7 @@ class SourceUpdate
         $log = Logger::getInstance();
         $out = [
             'ok' => false, 'error' => '', 'applied' => 0, 'failed' => 0, 'reverted' => 0,
-            'files' => [], 'backup' => [], 'notes' => [], 'skipped' => 0, 'obsolete' => 0,
+            'files' => [], 'failed_files' => [], 'backup' => [], 'notes' => [], 'skipped' => 0, 'obsolete' => 0,
             'config_new' => false, 'elapsed_ms' => 0,
         ];
         $started = microtime(true);
@@ -877,6 +877,7 @@ class SourceUpdate
                 }
                 if (!self::copyAtomic($src, $dst)) {
                     $out['failed']++;
+                    $out['failed_files'][] = $rel;
                     $log->warning('source', "{$folder}: copy failed for {$rel}");
                     continue;
                 }
@@ -894,9 +895,11 @@ class SourceUpdate
                     if (is_file($prev) && @copy($prev, $abs)) {
                         $out['reverted']++;
                         $out['applied'] = max(0, $out['applied'] - 1);
+                        $out['failed_files'][] = $rel;
                         $out['notes'][] = "خطای نحوی ⇒ نسخهٔ قبلی برگردانده شد: {$rel}";
                         $log->error('source', "{$folder}: lint failed, reverted {$rel}");
                     } else {
+                        $out['failed_files'][] = $rel;
                         $out['notes'][] = "⚠️ خطای نحوی و نسخهٔ قبلی هم نبود: {$rel}";
                         $log->error('source', "{$folder}: lint failed and no previous copy for {$rel}");
                     }
@@ -935,9 +938,11 @@ class SourceUpdate
             self::writeState($state);
             self::forget($type, $folder);
 
-            $out['ok'] = true;
-            $log->info('source', "update done for {$folder}: {$out['applied']} file(s), "
-                . "{$out['failed']} failed, {$out['reverted']} reverted");
+            // ok فقط وقتی true است که هیچ فایل failed/reverted و هیچ خطای کلی نبوده باشد.
+            // قبلاً همیشه true می‌شد و UI فکر می‌کرد همه‌چیز آپدیت شده است.
+            $out['ok'] = ($out['failed'] === 0 && $out['reverted'] === 0 && $out['error'] === '');
+            $log->info('source', "update " . ($out['ok'] ? 'done' : 'finished with errors') . " for {$folder}: "
+                . "{$out['applied']} file(s), {$out['failed']} failed, {$out['reverted']} reverted");
         } catch (Throwable $e) {
             $out['error'] = $e->getMessage();
             $log->error('source', "update crashed for {$folder}: " . $e->getMessage());

@@ -55,6 +55,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'fail2ban_check') {
 
 if (!empty($_POST['action']) && $_POST['action'] === 'bulk_delete') {
     $requestedIds = $_POST['ids'] ?? [];
+    if (!is_array($requestedIds)) $requestedIds = [];
     $deletedCount = fx_bulk_delete_ids($pdo, 'product', 'id', $requestedIds);
     fx_bulk_delete_redirect('product.php', count($requestedIds), $deletedCount);
 }
@@ -185,9 +186,11 @@ alert('محصول از قبل وجود دارد'); window.location.href='product
 }
 
 
-if (isset($_GET['oneproduct'], $_GET['toweproduct']) && $_GET['oneproduct'] !== '' && $_GET['toweproduct'] !== '') {
-    $id1 = intval($_GET['oneproduct']);
-    $id2 = intval($_GET['toweproduct']);
+if ($_SERVER['REQUEST_METHOD'] === 'POST'
+    && isset($_POST['oneproduct'], $_POST['toweproduct'])
+    && $_POST['oneproduct'] !== '' && $_POST['toweproduct'] !== '') {
+    $id1 = intval($_POST['oneproduct']);
+    $id2 = intval($_POST['toweproduct']);
     if ($id1 > 0 && $id2 > 0 && $id1 !== $id2) {
         try {
             $pdo->beginTransaction();
@@ -214,12 +217,20 @@ if (isset($_GET['oneproduct'], $_GET['toweproduct']) && $_GET['oneproduct'] !== 
 }
 
 
-if (isset($_GET['removeid']) && $_GET['removeid'] !== '') {
-    $stmt = $pdo->prepare("DELETE FROM product WHERE id = :id");
-    $stmt->bindParam(':id', $_GET['removeid']);
-    $stmt->execute();
+if ($_SERVER['REQUEST_METHOD'] === 'POST'
+    && (string)($_POST['_action'] ?? $_GET['_action'] ?? '') === 'product_delete') {
+    $delId = (int)($_POST['id'] ?? $_GET['id'] ?? 0);
+    if ($delId > 0) {
+        $stmt = $pdo->prepare("DELETE FROM product WHERE id = :id");
+        $stmt->execute([':id' => $delId]);
+    }
     header("Location: product.php");
     exit;
+}
+// حذف با GET ممنوع است (CSRF): لینک/تصویر می‌توانست محصول را حذف کند.
+if (isset($_GET['removeid'])) {
+    http_response_code(405);
+    exit('این عملیات فقط با POST مجاز است.');
 }
 ?>
 <!DOCTYPE html>
@@ -267,7 +278,6 @@ if (isset($_GET['removeid']) && $_GET['removeid'] !== '') {
             <div class="card">
                 <form method="POST" action="product.php" id="bulk-form">
                     <?php echo fx_csrf_field(); ?>
-                    <input type="hidden" name="action" value="bulk_delete">
                     <div class="table-wrap">
                     <table id="productsTable" class="display app-table app-table--summary" style="width:100%">
                         <thead>
@@ -338,10 +348,14 @@ if (isset($_GET['removeid']) && $_GET['removeid'] !== '') {
                                             ], JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS), ENT_QUOTES, 'UTF-8'); ?>)">
                                             <?php echo icon('copy', 'svg-icon'); ?>
                                         </button>
-                                        <a href="product.php?removeid=<?php echo $list['id']; ?>" class="btn btn-sm btn-soft-danger" title="حذف"
-                                           onclick="return confirm('آیا از حذف این محصول مطمئن هستید؟')">
-                                            <?php echo icon('trash', 'svg-icon'); ?>
-                                        </a>
+                                        <?php /* بدون فرم تودرتو: HTML فرم داخل فرم را نادیده می‌گیرد و دکمهٔ حذف
+                                                   به‌جای action خودش، فرم گروهی را می‌فرستاد. */ ?>
+                                        <button type="submit"
+                                                formaction="product.php?_action=product_delete&amp;id=<?php echo (int)$list['id']; ?>"
+                                                class="btn btn-sm btn-soft-danger" title="حذف"
+                                               onclick="return confirm('آیا از حذف این محصول مطمئن هستید؟')">
+                                                <?php echo icon('trash', 'svg-icon'); ?>
+                                        </button>
                                     </div>
                                 </td>
                             </tr>
@@ -351,7 +365,7 @@ if (isset($_GET['removeid']) && $_GET['removeid'] !== '') {
                     <?php echo fx_pager_html($pg['page'], $pg['pages'], $pg['total'], count($listinvoice), 'product.php', ['q' => $prodQ !== '' ? $prodQ : null]); ?>
                     </div>
                     <div style="padding:12px 0;">
-                        <button type="submit" class="btn btn-soft-danger btn-sm js-bulk-delete-btn" style="display:none;" onclick="return confirm('آیا از حذف محصولات انتخاب‌شده مطمئن هستید؟')">
+                        <button type="submit" name="action" value="bulk_delete" class="btn btn-soft-danger btn-sm js-bulk-delete-btn" style="display:none;" onclick="return confirm('آیا از حذف محصولات انتخاب‌شده مطمئن هستید؟')">
                             <?php echo icon('trash', 'svg-icon'); ?> حذف انتخاب‌شده‌ها
                         </button>
                     </div>
@@ -464,7 +478,8 @@ if (isset($_GET['removeid']) && $_GET['removeid'] !== '') {
             <span class="modal-head__title">جابجایی ردیف محصولات</span>
             <button class="modal-close" onclick="closeModal('modal-move-product')">&times;</button>
         </div>
-        <form action="product.php" method="GET">
+        <form action="product.php" method="POST">
+            <?php echo fx_csrf_field(); ?>
             <div class="form-group">
                 <label class="form-label">شناسه محصول اول</label>
                 <input type="number" name="oneproduct" class="form-control" required>

@@ -3,6 +3,7 @@ ini_set('session.cookie_samesite', 'Lax');
 ini_set('session.cookie_httponly', '1');
 session_start();
 require_once __DIR__ . '/../config.php';
+require_once __DIR__ . '/lib/csrf.php';
 
 function ensureXuiTableExists(PDO $pdo)
 {
@@ -79,6 +80,8 @@ if( !isset($_SESSION["user"]) || !$result ){
     header('Location: login.php');
     return;
 }
+
+fx_csrf_guard();
 
 $action = $_GET['action'] ?? '';
 $selectedPanelCode = '';
@@ -223,6 +226,7 @@ $settingsValueForTextarea = htmlspecialchars($settingsValue, ENT_NOQUOTES, 'UTF-
             </p>
 
             <form class="xui-form" role="form" method="POST" action="seeting_x_ui.php?action=change">
+                <?php echo fx_csrf_field(); ?>
               <div class="xui-field">
                 <label>نام پنل</label>
                 <select required name="namepanel" class="xui-select">
@@ -269,6 +273,7 @@ $settingsValueForTextarea = htmlspecialchars($settingsValue, ENT_NOQUOTES, 'UTF-
             </div>
 
             <form class="xui-form" role="form" method="POST" action="seeting_x_ui.php?action=save">
+                <?php echo fx_csrf_field(); ?>
               <div class="xui-field">
                 <label>تنظیمات (JSON)</label>
                 <textarea id="settings" name="settings" class="xui-textarea" rows="22"><?php echo $settingsValueForTextarea; ?></textarea>

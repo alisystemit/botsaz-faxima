@@ -167,9 +167,16 @@ class DbBackup
                 if (!preg_match('/^\d+:[\w\-]{20,}$/', $plainToken)) throw new Exception("توکن ربات معتبر نیست");
                 $stamp = date('Y-m-d H:i');
                 $caption = "نسخه پشتیبان دیتابیس\nربات: {$folder}\nدیتابیس: {$dbName}\nتاریخ: {$stamp}";
+                $kept = '';
                 if ($size > self::MAX_SEND_BYTES) {
                     // تلگرام قبول نمی‌کند — локально نگه دار و فقط خبر بده
                     $kept = self::keepLocal($file, $folder);
+                    $locallyKept = true;
+                    if ($kept === '') {
+                        // move/copy نشد؛ فایل موقت را دست‌کم نگه می‌داریم و پاک نمی‌کنیم
+                        $kept = $file;
+                        $log->warning('backup', "Bot {$folder}: could not move dump to data/backups; keeping temp file");
+                    }
                     BotApi::send($plainToken, $adminId, "⚠️ بکاپ دیتابیس {$folder} خیلی بزرگ شد (" . self::fmtSize($size) . ") و در تلگرام جا نشد.\nفایل در سرور نگه داشته شد: {$kept}\nتاریخ: {$stamp}");
                     $log->warning('backup', "Bot {$folder}: dump too big (" . self::fmtSize($size) . "), kept locally");
                     $out['failed'][$folder] = 'too big for Telegram, kept on server';
@@ -178,14 +185,15 @@ class DbBackup
                     if (empty($res['ok'])) throw new Exception("ارسال تلگرام ناموفق: " . ($res['description'] ?? 'unknown'));
                     $log->info('backup', "Bot {$folder}: backup sent to {$adminId} (" . self::fmtSize($size) . ")");
                     $out['sent'][] = "$folder → $adminId (" . self::fmtSize($size) . ")";
+                    $locallyKept = false;
                 }
                 $state[$folder] = [
                     'last_sent' => date('Y-m-d H:i'),
-                    'last_file' => basename($file),
+                    'last_file' => $kept !== '' ? basename($kept) : basename($file),
                     'last_size' => $size,
                 ];
                 self::writeState($state);
-                @unlink($file);
+                if (empty($locallyKept)) @unlink($file);
             } catch (Throwable $e) {
                 $log->error('backup', "Bot {$folder} backup failed: " . $e->getMessage());
                 $out['failed'][$folder] = $e->getMessage();
@@ -200,23 +208,34 @@ class DbBackup
         if (!preg_match('/^[A-Za-z0-9_]+$/', $dbName)) throw new Exception("نام دیتابیس نامعتبر است");
         $tmp = sys_get_temp_dir() . '/botsaz_backup';
         @mkdir($tmp, 0700, true);
-        $sql = $tmp . '/' . $folder . '_' . date('Y-m-d_H-i') . '.sql';
+        // نام تصادفی: دو بکاپ هم‌زمان (یا دو ربات با نام مشابه) نباید روی هم بنویسند.
+        $safeFolder = preg_replace('/[^A-Za-z0-9_.-]/', '_', $folder) ?: 'bot';
+        $sql = $tmp . '/' . $safeFolder . '_' . date('Y-m-d_H-i-s') . '_' . bin2hex(random_bytes(6)) . '.sql';
         if (!self::dumpViaMysqldump($cfg, $dbName, $sql)) {
             self::dumpViaPhp($cfg, $dbName, $sql); // fallback وقتی mysqldump نیست/بسته است
         }
+        @chmod($sql, 0600);
         $gz = $sql . '.gz';
         $in = @fopen($sql, 'rb');
-        if ($in === false) throw new Exception("خواندن دامپ ممکن نشد");
+        if ($in === false) { @unlink($sql); throw new Exception("خواندن دامپ ممکن نشد"); }
         $out = @gzopen($gz, 'wb9');
-        if ($out === false) { @fclose($in); throw new Exception("ساخت فایل gzip ممکن نشد"); }
+        if ($out === false) { @fclose($in); @unlink($sql); throw new Exception("ساخت فایل gzip ممکن نشد"); }
+        $writeOk = true;
         while (!feof($in)) {
             $chunk = fread($in, 1048576);
-            if ($chunk !== false && $chunk !== '') gzwrite($out, $chunk);
+            if ($chunk !== false && $chunk !== '') {
+                if (@gzwrite($out, $chunk) === false) { $writeOk = false; break; }
+            }
         }
         @fclose($in);
-        @gzclose($out);
+        $closeOk = @gzclose($out);
         @unlink($sql);
+        if (!$writeOk || $closeOk === false) {
+            @unlink($gz);
+            throw new Exception("نوشتن فایل gzip ناموفق بود (فضای دیسک؟)");
+        }
         if (!is_file($gz)) throw new Exception("فایل بکاپ ساخته نشد");
+        @chmod($gz, 0600);
         return $gz;
     }
 
@@ -287,48 +306,132 @@ class DbBackup
         $w = fn($s) => fwrite($fh, $s . "\n");
         $w("-- botsaz backup of `{$dbName}` at " . date('Y-m-d H:i:s'));
         $w("SET NAMES utf8mb4;");
-        $tables = $pdo->query("SHOW FULL TABLES IN `{$dbName}`")->fetchAll(PDO::FETCH_NUM);
-        foreach ($tables as [$name, $kind]) {
-            if (strtoupper((string)$kind) === 'VIEW') {
-                $row = $pdo->query("SHOW CREATE VIEW `{$dbName}`.`{$name}`")->fetch(PDO::FETCH_ASSOC);
-                $w("DROP VIEW IF EXISTS `{$name}`;");
-                $w(($row['Create View'] ?? '') . ";");
-                continue;
-            }
-            $row = $pdo->query("SHOW CREATE TABLE `{$dbName}`.`{$name}`")->fetch(PDO::FETCH_ASSOC);
-            $w("DROP TABLE IF EXISTS `{$name}`;");
-            $w(($row['Create Table'] ?? '') . ";");
-            $off = 0;
-            while (true) {
-                $rows = $pdo->query("SELECT * FROM `{$dbName}`.`{$name}` LIMIT 500 OFFSET {$off}")->fetchAll(PDO::FETCH_NUM);
-                if ($rows === []) break;
-                $vals = [];
-                foreach ($rows as $r) {
-                    $cells = [];
-                    foreach ($r as $c) {
-                        $cells[] = $c === null ? 'NULL' : $pdo->quote((string)$c);
-                    }
-                    $vals[] = '(' . implode(',', $cells) . ')';
-                }
-                $w("INSERT INTO `{$name}` VALUES " . implode(',', $vals) . ";");
-                $off += 500;
-            }
-        }
-        // تریگرها
+        $w("SET FOREIGN_KEY_CHECKS=0;");
         try {
-            foreach ($pdo->query("SHOW TRIGGERS IN `{$dbName}`")->fetchAll(PDO::FETCH_ASSOC) as $tr) {
-                $tname = $tr['Trigger'] ?? '';
-                if ($tname === '') continue;
-                $cr = $pdo->query("SHOW CREATE TRIGGER `{$dbName}`.`{$tname}`")->fetch(PDO::FETCH_ASSOC);
-                if (!empty($cr['SQL Original Statement'])) {
-                    $w("DROP TRIGGER IF EXISTS `{$tname}`;");
-                    $w($cr['SQL Original Statement'] . ";");
+            $tables = $pdo->query("SHOW FULL TABLES IN " . self::qid($dbName))->fetchAll(PDO::FETCH_NUM);
+            foreach ($tables as [$name, $kind]) {
+                $name = (string)$name;
+                $tq = self::qid($name);
+                if (strtoupper((string)$kind) === 'VIEW') {
+                    $row = $pdo->query("SHOW CREATE VIEW " . self::qid($dbName) . "." . $tq)->fetch(PDO::FETCH_ASSOC);
+                    $w("DROP VIEW IF EXISTS {$tq};");
+                    $w(((string)($row['Create View'] ?? '')) . ";");
+                    continue;
                 }
+                $row = $pdo->query("SHOW CREATE TABLE " . self::qid($dbName) . "." . $tq)->fetch(PDO::FETCH_ASSOC);
+                $w("DROP TABLE IF EXISTS {$tq};");
+                $w(((string)($row['Create Table'] ?? '')) . ";");
+                self::dumpTableRows($pdo, $dbName, $name, $w);
             }
+            // تریگرها
+            try {
+                foreach ($pdo->query("SHOW TRIGGERS IN " . self::qid($dbName))->fetchAll(PDO::FETCH_ASSOC) as $tr) {
+                    $tname = (string)($tr['Trigger'] ?? '');
+                    if ($tname === '') continue;
+                    $tq = self::qid($tname);
+                    $cr = $pdo->query("SHOW CREATE TRIGGER " . self::qid($dbName) . "." . $tq)->fetch(PDO::FETCH_ASSOC);
+                    if (!empty($cr['SQL Original Statement'])) {
+                        $w("DROP TRIGGER IF EXISTS {$tq};");
+                        $w($cr['SQL Original Statement'] . ";");
+                    }
+                }
+            } catch (Throwable $e) {
+                // دسترسی SHOW TRIGGER نباشد، از خیرش می‌گذریم
+            }
+            $w("SET FOREIGN_KEY_CHECKS=1;");
         } catch (Throwable $e) {
-            // دسترسی SHOW TRIGGER نباشد، از خیرش می‌گذریم
+            // دامپ ناقص نباید به‌عنوان بکاپ سالم فشرده/ارسال شود.
+            @fclose($fh);
+            @unlink($outFile);
+            throw $e;
         }
         @fclose($fh);
+    }
+
+    /** نقل‌قول امن نام جدول/ستون (backtick داخل نام را هم escape می‌کند) */
+    private static function qid(string $name): string
+    {
+        return '`' . str_replace('`', '``', $name) . '`';
+    }
+
+    /** ستون‌های کلید اصلی به ترتیب (خالی یعنی جدول PK ندارد) */
+    private static function primaryKeyColumns(PDO $pdo, string $db, string $table): array
+    {
+        try {
+            $st = $pdo->query("SHOW KEYS FROM " . self::qid($db) . "." . self::qid($table) . " WHERE Key_name = 'PRIMARY'");
+            $rows = $st->fetchAll(PDO::FETCH_ASSOC);
+        } catch (Throwable $e) {
+            return [];
+        }
+        usort($rows, fn($a, $b) => ((int)($a['Seq_in_index'] ?? 0)) <=> ((int)($b['Seq_in_index'] ?? 0)));
+        return array_values(array_filter(array_map(fn($r) => (string)($r['Column_name'] ?? ''), $rows)));
+    }
+
+    /**
+     * نوشتن ردیف‌های یک جدول.
+     *
+     * قبلاً `LIMIT 500 OFFSET n` بدون ORDER BY بود: ترتیب InnoDB تضمینی نیست و
+     * با نوشتن هم‌زمان ممکن بود ردیفی جا بیفتد یا تکرار شود. حالا اگر جدول یک
+     * PK داشته باشد از pagination کلیدی (`WHERE pk > last ORDER BY pk LIMIT`)
+     * استفاده می‌کنیم؛ وگرنه ترتیب صریح روی همهٔ ستون‌ها + OFFSET.
+     */
+    private static function dumpTableRows(PDO $pdo, string $db, string $table, callable $w): void
+    {
+        $base = "SELECT * FROM " . self::qid($db) . "." . self::qid($table);
+        $columns = [];
+        try {
+            foreach ($pdo->query("SHOW COLUMNS FROM " . self::qid($db) . "." . self::qid($table))->fetchAll(PDO::FETCH_ASSOC) as $c) {
+                $columns[] = (string)($c['Field'] ?? '');
+            }
+        } catch (Throwable $e) {
+            $columns = [];
+        }
+
+        $pk = self::primaryKeyColumns($pdo, $db, $table);
+        if (count($pk) === 1) {
+            $pkName = $pk[0];
+            $pkIdx = array_search($pkName, $columns, true);
+            if ($pkIdx !== false) {
+                $last = null;
+                while (true) {
+                    $sql = $base;
+                    if ($last !== null) {
+                        $sql .= " WHERE " . self::qid($pkName) . " > " . $pdo->quote((string)$last);
+                    }
+                    $sql .= " ORDER BY " . self::qid($pkName) . " LIMIT 500";
+                    $rows = $pdo->query($sql)->fetchAll(PDO::FETCH_NUM);
+                    if ($rows === []) break;
+                    $w(self::insertStatement($pdo, $table, $rows));
+                    $last = $rows[count($rows) - 1][$pkIdx] ?? null;
+                    if ($last === null) break; // PK نباید NULL باشد؛ محافظ برابر حلقهٔ بی‌نهایت
+                }
+                return;
+            }
+        }
+
+        $order = $columns !== []
+            ? implode(',', array_map([self::class, 'qid'], $columns))
+            : '1';
+        $off = 0;
+        while (true) {
+            $rows = $pdo->query($base . " ORDER BY {$order} LIMIT 500 OFFSET {$off}")->fetchAll(PDO::FETCH_NUM);
+            if ($rows === []) break;
+            $w(self::insertStatement($pdo, $table, $rows));
+            $off += 500;
+        }
+    }
+
+    private static function insertStatement(PDO $pdo, string $table, array $rows): string
+    {
+        $vals = [];
+        foreach ($rows as $r) {
+            $cells = [];
+            foreach ($r as $c) {
+                $cells[] = $c === null ? 'NULL' : $pdo->quote((string)$c);
+            }
+            $vals[] = '(' . implode(',', $cells) . ')';
+        }
+        return "INSERT INTO " . self::qid($table) . " VALUES " . implode(',', $vals) . ";";
     }
 
     /** فایل‌های بزرگ‌تر از سقف تلگرام: نگه‌داری локالی در data/backups/ */
@@ -336,12 +439,18 @@ class DbBackup
     {
         $dir = dirname(__DIR__) . '/data/backups';
         @mkdir($dir, 0755, true);
+        $safeFolder = preg_replace('/[^A-Za-z0-9_.-]/', '_', $folder) ?: 'bot';
         // قدیمی‌ها پاک شوند تا دیسک پر نشود (آخرین ۳ نسخه هر ربات)
-        $old = glob($dir . '/' . $folder . '_*.sql.gz') ?: [];
+        $old = glob($dir . '/' . $safeFolder . '_*.sql.gz') ?: [];
         rsort($old);
         foreach (array_slice($old, 2) as $o) @unlink($o);
         $dst = $dir . '/' . basename($file);
-        @rename($file, $dst);
+        if (!@rename($file, $dst)) {
+            // rename بین فایل‌سیستم‌ها/ویندوز ممکن است شکست بخورد؛ کپی امن.
+            if (!@copy($file, $dst)) return '';
+            @unlink($file);
+        }
+        @chmod($dst, 0600);
         return 'data/backups/' . basename($file);
     }
 

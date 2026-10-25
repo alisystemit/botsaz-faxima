@@ -53,15 +53,23 @@ if (!function_exists('childToken')) {
 section('رجیستری قالب‌ها');
 // ===================================================================
 $templates = Manager::templates();
-check('چهار قالب ثبت شده', count($templates) === 4, implode(',', array_keys($templates)));
+$buildable = Manager::buildableTypes();
+check('چهار قالب قابل ساخت ثبت شده', count($buildable) === 4, implode(',', array_keys($buildable)));
+check('PGClockBot در فهرست هست', isset($templates['pgclock']), implode(',', array_keys($templates)));
+check('PGClockBot ساختنی نیست (runtime غیر PHP)', !Manager::isBuildable('pgclock'));
+check('PGClockBot در catalogTypes هست', isset(Manager::catalogTypes()['pgclock']), implode(',', array_keys(Manager::catalogTypes())));
+check('قالب‌های PHP ساختنی‌اند', Manager::isBuildable('faxima') && Manager::isBuildable('pasargad'));
+check('کلید ناشناس ساختنی نیست', !Manager::isBuildable('nope-xyz'));
 
 // رگرسیون: validTypes() باید «کلید ⇒ برچسب» بدهد، نه «شماره ⇒ برچسب».
 // array_keys + array_map کلیدهای عددی را دور می‌ریخت و همه‌جا که با کلید قالب
 // کار می‌کند (isPaid، pay:buy:template:<type>) بی‌صدا هیچ قالبی نمی‌دید.
+// حالا فقط قالب‌های ساختنی را می‌دهد تا برای PGClockBot قیمت/مجوز فروخته نشود.
 $vt = Manager::validTypes();
-check('validTypes کلیدهای رشته‌ای برمی‌گرداند', array_keys($vt) === array_keys($templates), implode(',', array_keys($vt)));
+check('validTypes کلیدهای رشته‌ای برمی‌گرداند', array_keys($vt) === array_keys($buildable), implode(',', array_keys($vt)));
 check('validTypes برچسب فارسی می‌دهد', $vt['faxima'] === 'فاکسیما (فروش VPN)', $vt['faxima'] ?? '?');
 check('validTypes قالب تازه را هم دارد', isset($vt['uptime'], $vt['pasargad']));
+check('validTypes قالب فهرست‌فقط را ندارد', !isset($vt['pgclock']));
 foreach ($vt as $k => $lbl) {
     check("validTypes[{$k}] کلید نیست", is_string($k), (string)$k);
     check("validTypes[{$k}] غیرخالی", is_string($lbl) && $lbl !== '');
@@ -127,7 +135,10 @@ section('مسیر پوشهٔ قالب');
 // ===================================================================
 foreach (array_keys($templates) as $k) {
     $dir = Manager::templateDir($k);
-    check("پوشهٔ «{$k}» وجود دارد", is_dir($dir), $dir);
+    // قالب «فهرست فقط» (pgclock) عمداً پوشهٔ سورس PHP ندارد؛ نبودنش خطا نیست.
+    if (Manager::isBuildable($k)) {
+        check("پوشهٔ «{$k}» وجود دارد", is_dir($dir), $dir);
+    }
     check("پوشهٔ «{$k}» بیرون از templates/ نیست", strpos(str_replace('\\', '/', $dir), $rootPrefix) === 0, $dir);
 }
 // قالب پاسارگاد کلیدش با نام پوشه فرق دارد — همین باید کار کند
@@ -170,6 +181,10 @@ check('typeMenu دکمهٔ «newbot:» برای هر 4 قالب دارد', count
 check('typeMenu دکمهٔ برگشت دارد', in_array(Nav::CB_BACK_MAIN, $cbData, true));
 check('typeMenu دکمهٔ انصراف دارد', in_array(Nav::CB_CANCEL, $cbData, true));
 check('typeMenu هیچ «noop» ندارد (قالب مرده نمانده)', !in_array('noop', $cbData, true));
+// قالب فهرست‌فقط باید فقط دکمهٔ راهنما داشته باشد، نه دکمهٔ ساخت
+check('typeMenu برای PGClockBot دکمهٔ راهنما دارد', in_array('catalog:pgclock', $cbData, true), implode(',', $cbData));
+check('typeMenu برای PGClockBot دکمهٔ ساخت ندارد', !in_array('newbot:pgclock', $cbData, true));
+check('availableTypes قالب فهرست‌فقط را ندارد', !isset($avail['pgclock']));
 
 // ===================================================================
 section('فایل ورودی و رمز وبهوک');

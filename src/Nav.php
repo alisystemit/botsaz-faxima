@@ -67,6 +67,9 @@ class Nav
      * از رجیستری قالب‌ها ساخته می‌شود، پس افزودن قالب تازه فقط ویرایش
      * Manager::templates() است. قالبی که روی سرور نباشد اصلاً نشان داده نمی‌شود
      * (وگرنه کاربر دکمه می‌زند و با خطای «قالب روی سرور نیست» روبه‌رو می‌شود).
+     *
+     * قالب‌های «فهرست فقط» (runtime غیر PHP، مثل PGClockBot) با دکمهٔ راهنما
+     * می‌آیند، نه دکمهٔ ساخت: مدل نصب این ربات‌ساز برای آن‌ها کار نمی‌کند.
      */
     public static function typeMenu(): string
     {
@@ -75,6 +78,13 @@ class Nav
             $spec = Manager::templateSpec($key);
             $icon = (string)($spec['icon'] ?? '🤖');
             $rows[] = [['text' => $icon . ' ' . $label, 'callback_data' => 'newbot:' . $key]];
+        }
+        foreach (Manager::catalogTypes() as $key => $spec) {
+            $icon = (string)($spec['icon'] ?? '🧩');
+            $rows[] = [[
+                'text' => $icon . ' ' . (string)($spec['label'] ?? $key) . ' · راهنما',
+                'callback_data' => 'catalog:' . $key,
+            ]];
         }
         if ($rows === []) {
             $rows[] = [['text' => '⚠️ هیچ قالبی روی سرور نصب نیست', 'callback_data' => 'noop']];

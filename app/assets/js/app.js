@@ -40,8 +40,8 @@ try {
 } catch(e){}
 
 var API = window.__MINIAPP_API__ || 'api.php';
-var initData = (tg && tg.initData) ? tg.initData
-  : (new URLSearchParams(location.search).get('initData') || '');
+/* initData را هرگز در URL نمی‌گذاریم: در access log/Referer/تاریخچه می‌ماند. */
+var initData = (tg && tg.initData) ? tg.initData : '';
 
 function $(s){ return document.querySelector(s); }
 function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];}); }
@@ -51,15 +51,17 @@ function haptic(t){ try { tg && tg.HapticFeedback && tg.HapticFeedback.impactOcc
 function call(action, opts){
   opts = opts || {};
   var method = opts.method || 'GET';
-  var url = API + '?action=' + encodeURIComponent(action) + '&initData=' + encodeURIComponent(initData);
+  var url = API + '?action=' + encodeURIComponent(action);
   var body = null;
   if (method === 'POST') {
     body = new URLSearchParams(opts.data || {});
-    body.append('initData', initData);
   } else if (opts.data) {
     for (var k in opts.data) url += '&' + encodeURIComponent(k) + '=' + encodeURIComponent(opts.data[k]);
   }
-  return fetch(url, { method: method, body: body }).then(function(r){ return r.json(); });
+  var headers = {};
+  if (initData) headers['X-Telegram-Init-Data'] = initData;
+  return fetch(url, { method: method, body: body, headers: headers, credentials: 'same-origin' })
+    .then(function(r){ return r.json(); });
 }
 
 /* ===== Toast نوع‌دار ===== */
@@ -558,26 +560,32 @@ function vTemplates(){
     }
     var ready = 0;
     var rows = list.map(function(t){
-      var okk = t.installed !== false;
+      // قالب فهرست‌فقط (PGClockBot): آماده/نصب‌نشده معنا ندارد؛ جداگانه نصب می‌شود
+      var buildable = t.buildable !== false;
+      var okk = buildable && t.installed !== false;
       if (okk) ready++;
       return '<div class="tpl"><div class="avatar">' + esc(t.icon || '🧩') + '</div>' +
         '<div style="flex:1;min-width:0"><b>' + esc(t.label || t.type) + '</b>' +
         '<div class="s" style="color:var(--muted);font-size:11px;margin-top:3px">' +
           esc(t.type) +
           (t.db ? ' • ' + esc(String(t.db).toUpperCase()) : '') +
+          (t.runtime && t.runtime !== 'php' ? ' • ' + esc(String(t.runtime)) : '') +
           (t.min_php ? ' • PHP ' + esc(t.min_php) : '') +
           (t.cron ? ' • کرون' : '') +
         '</div></div>' +
-        '<span class="badge ' + (okk ? 'b-ok' : 'b-bad') + '">' + (okk ? 'آماده' : 'نصب نشده') + '</span>' +
+        (buildable
+          ? '<span class="badge ' + (okk ? 'b-ok' : 'b-bad') + '">' + (okk ? 'آماده' : 'نصب نشده') + '</span>'
+          : '<span class="badge b-bad">نصب جداگانه</span>') +
         '</div>';
     }).join('');
     $('#view').innerHTML =
-      '<div class="card"><h3>🧩 قالب‌ها (' + fmt(ready) + ' آماده از ' + fmt(list.length) + ')</h3>' + rows + '</div>' +
+      '<div class="card"><h3>🧩 قالب‌ها (' + fmt(ready) + ' آماده از ' + fmt(list.filter(function(t){return t.buildable !== false;}).length) + ')</h3>' + rows + '</div>' +
       '<div class="card"><h3>ℹ️ راهنما</h3>' +
         '<div class="kv"><b>هر قالب</b><span>یک ربات کامل مستقل</span></div>' +
         '<div class="kv"><b>آیکون + نام</b><span>همان‌طور که در منوی ربات دیده می‌شود</span></div>' +
         '<div class="kv"><b>SQLite / MySQL</b><span>نوع دیتابیس قالب</span></div>' +
         '<div class="kv"><b>«نصب نشده»</b><span>پوشهٔ قالب روی سرور نیست</span></div>' +
+        '<div class="kv"><b>«نصب جداگانه»</b><span>اپ غیر PHP است (مثل PGClockBot) و با این ربات‌ساز ساخته نمی‌شود</span></div>' +
       '</div>';
   }).catch(function(){ err('خطا در دریافت اطلاعات قالب‌ها'); });
 }

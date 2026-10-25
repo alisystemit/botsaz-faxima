@@ -13,6 +13,7 @@ require_once __DIR__ . '/../config.php';
 require_once __DIR__ . '/lib/icons.php';
 require_once __DIR__ . '/lib/remaining.php';
 require_once __DIR__ . '/lib/item_parser.php';
+require_once __DIR__ . '/lib/csrf.php';
 
 $query = $pdo->prepare("SELECT * FROM admin WHERE username=:username");
 $query->bindValue(":username", $_SESSION["user"] ?? '', PDO::PARAM_STR);
@@ -22,6 +23,8 @@ if (!isset($_SESSION["user"]) || !$adminRow) {
     header('Location: login.php');
     exit;
 }
+
+fx_csrf_guard();
 
 $tableMissing = true;
 try {

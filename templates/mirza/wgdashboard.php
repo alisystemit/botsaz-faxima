@@ -1,5 +1,6 @@
 <?php
 require_once 'config.php';
+require_once __DIR__ . '/ssl_verify.php';
 ini_set('error_log', 'error_log');
 
 
@@ -108,7 +109,8 @@ function addpear($namepanel, $usernameac)
         CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
         CURLOPT_CUSTOMREQUEST => 'POST',
         CURLOPT_POSTFIELDS => $configpanel,
-        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_SSL_VERIFYPEER => mirza_ssl_verify(),
+        CURLOPT_SSL_VERIFYHOST => mirza_ssl_verify() ? 2 : 0,
         CURLOPT_HTTPHEADER => array(
             'Accept: application/json',
             'Content-Type: application/json',
@@ -176,7 +178,8 @@ function updatepear($namepanel, array $config)
         CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
         CURLOPT_CUSTOMREQUEST => 'POST',
         CURLOPT_POSTFIELDS => $configpanel,
-        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_SSL_VERIFYPEER => mirza_ssl_verify(),
+        CURLOPT_SSL_VERIFYHOST => mirza_ssl_verify() ? 2 : 0,
         CURLOPT_HTTPHEADER => array(
             'Content-Type: application/json',
             'wg-dashboard-apikey: '.$marzban_list_get['password_panel']
@@ -205,7 +208,8 @@ function deletejob($namepanel, array $config)
         CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
         CURLOPT_CUSTOMREQUEST => 'POST',
         CURLOPT_POSTFIELDS => $configpanel,
-        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_SSL_VERIFYPEER => mirza_ssl_verify(),
+        CURLOPT_SSL_VERIFYHOST => mirza_ssl_verify() ? 2 : 0,
         CURLOPT_HTTPHEADER => array(
             'Content-Type: application/json',
             'wg-dashboard-apikey: '.$marzban_list_get['password_panel']
@@ -237,7 +241,8 @@ function ResetUserDataUsagewg($publickey, $namepanel)
         CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
         CURLOPT_CUSTOMREQUEST => 'POST',
         CURLOPT_POSTFIELDS => $configpanel,
-        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_SSL_VERIFYPEER => mirza_ssl_verify(),
+        CURLOPT_SSL_VERIFYHOST => mirza_ssl_verify() ? 2 : 0,
         CURLOPT_HTTPHEADER => array(
             'Content-Type: application/json',
             'wg-dashboard-apikey: '.$marzban_list_get['password_panel']

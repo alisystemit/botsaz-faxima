@@ -9,6 +9,8 @@ $ROOT = dirname(__DIR__);
 require_once $ROOT . '/src/Store.php';
 require_once $ROOT . '/src/SuperAdmins.php';
 require_once $ROOT . '/src/Manager.php';
+require_once $ROOT . '/src/BotApi.php';
+require_once $ROOT . '/src/BotLifecycle.php';
 require_once $ROOT . '/src/BuildSettings.php';
 require_once $ROOT . '/src/Payment/Payments.php';
 require_once $ROOT . '/src/Payment/Gateways.php';
@@ -17,6 +19,7 @@ require_once $ROOT . '/src/Payment/Pricing.php';
 require_once $ROOT . '/src/Payment/ZarinPal.php';
 require_once $ROOT . '/src/Payment/AqaPay.php';
 require_once $ROOT . '/src/Payment/NowPayments.php';
+require_once $ROOT . '/src/Payment/Limits.php';
 require_once $ROOT . '/src/SelfUpdate.php';
 require_once $ROOT . '/src/SourceUpdate.php';
 
@@ -26,20 +29,29 @@ if (!is_array($cfg)) {
 }
 $TOKEN  = (string)($cfg['main_token'] ?? '');
 
-$store = new Store((string)($cfg['manager_db'] ?? ($ROOT . '/data/botsaz.sqlite')), $cfg);
-// سوپرادمین‌های مؤثر = config.php + افزوده‌شده‌ها از پنل (settings.super_admins).
-// قبل از auth استفاده می‌شود تا سوپرادمینِ تازه‌اضافه‌شده هم بتواند وارد شود.
-$SUPERS = SuperAdmins::effective($cfg, $store);
+try {
+    $store = new Store((string)($cfg['manager_db'] ?? ($ROOT . '/data/botsaz.sqlite')), $cfg);
+    // سوپرادمین‌های مؤثر = config.php + افزوده‌شده‌ها از پنل (settings.super_admins).
+    // قبل از auth استفاده می‌شود تا سوپرادمینِ تازه‌اضافه‌شده هم بتواند وارد شود.
+    $SUPERS = SuperAdmins::effective($cfg, $store);
 
-$action = (string)($_REQUEST['action'] ?? '');
-$initData = (string)($_POST['initData'] ?? $_GET['initData'] ?? '');
+    $action = (string)($_REQUEST['action'] ?? '');
+    // initData فقط از هدر یا بدنهٔ POST خوانده می‌شود؛ NEVER از query string.
+    // در query، این رشتهٔ معتبر تا ۲۴ ساعت در access log/Referer/تاریخچهٔ مرورگر
+    // می‌ماند و هر کسی با دسترسی به لاگ می‌تواند نقش ادمین را replay کند.
+    $initData = (string)($_SERVER['HTTP_X_TELEGRAM_INIT_DATA'] ?? $_POST['initData'] ?? '');
 
-$uid = auth($initData, $TOKEN, $SUPERS, $store);
+    $uid = auth($initData, $TOKEN, $SUPERS, $store);
+} catch (Throwable $e) {
+    internalError($e, 'bootstrap');
+}
+// برای AuditLog و BotLifecycle؛ مقدار غیرحساس است.
+$GLOBALS['__botsaz_actor'] = $uid;
 
 try {
     switch ($action) {
         case 'me':
-            out(200, ['ok' => true, 'user_id' => $uid, 'is_super' => in_array($uid, $SUPERS, true)]);
+            out(200, ['ok' => true, 'user_id' => $uid, 'is_super' => isSuper($SUPERS, $uid)]);
 
         case 'dashboard': {
             $pdo = $store->getPdo();
@@ -76,21 +88,33 @@ try {
         case 'bot_status': {
             $id = (int)($_POST['id'] ?? 0);
             $status = (string)($_POST['status'] ?? 'active');
+            if ($id <= 0) out(400, ['ok' => false, 'msg' => 'شناسهٔ ربات نامعتبر است']);
             if (!in_array($status, ['active', 'disabled'], true)) out(400, ['ok' => false, 'msg' => 'وضعیت نامعتبر']);
-            $store->setBotStatus($id, $status);
+            $bot = $store->botById($id);
+            if (!$bot) out(404, ['ok' => false, 'msg' => 'ربات یافت نشد']);
+            if (!isSuper($SUPERS, $uid) && (int)($bot['owner_id'] ?? 0) !== $uid) {
+                out(403, ['ok' => false, 'msg' => 'فقط مالک ربات یا سوپرادمین می‌تواند وضعیت را تغییر دهد']);
+            }
+            $r = $status === 'disabled'
+                ? BotLifecycle::disable($cfg, $store, $bot)
+                : BotLifecycle::enable($cfg, $store, $bot);
+            audit('bot_status', ['id' => $id, 'status' => $status, 'ok' => $r['ok'] ?? false]);
+            if (empty($r['ok'])) out(502, ['ok' => false, 'msg' => (string)($r['error'] ?? 'تغییر وضعیت ناموفق بود')]);
             out(200, ['ok' => true]);
         }
 
         case 'bot_delete': {
             $id = (int)($_POST['id'] ?? 0);
+            if ($id <= 0) out(400, ['ok' => false, 'msg' => 'شناسهٔ ربات نامعتبر است']);
             $bot = $store->botById($id);
             if (!$bot) out(404, ['ok' => false, 'msg' => 'یافت نشد']);
-            try {
-                $dir = Manager::childBotsDir() . '/' . $bot['folder'];
-                if (is_dir($dir)) Manager::removeDir($dir);
-            } catch (Throwable $e) { /* پوشه شاید نباشد */ }
-            $store->deleteBot($id);
-            out(200, ['ok' => true]);
+            if (!isSuper($SUPERS, $uid) && (int)($bot['owner_id'] ?? 0) !== $uid) {
+                out(403, ['ok' => false, 'msg' => 'فقط مالک ربات یا سوپرادمین می‌تواند ربات را حذف کند']);
+            }
+            $r = BotLifecycle::delete($cfg, $store, $bot);
+            audit('bot_delete', ['id' => $id, 'folder' => (string)($bot['folder'] ?? ''), 'ok' => $r['ok'] ?? false]);
+            if (empty($r['ok'])) out(500, ['ok' => false, 'msg' => (string)($r['error'] ?? 'حذف ناموفق بود')]);
+            out(200, ['ok' => true, 'warnings' => $r['warnings'] ?? [], 'backup' => $r['backup'] ?? '']);
         }
 
         case 'users_list': {
@@ -121,20 +145,32 @@ try {
 
         case 'user_toggle_allow': {
             $uid2 = (int)($_POST['user_id'] ?? 0); $v = (int)($_POST['v'] ?? 0);
+            if ($uid2 <= 0) out(400, ['ok' => false, 'msg' => 'شناسهٔ کاربر نامعتبر است']);
+            if (!userExists($store, $uid2)) out(404, ['ok' => false, 'msg' => 'کاربر یافت نشد']);
             $store->setAllowed($uid2, $v ? 1 : 0);
+            audit('user_toggle_allow', ['user_id' => $uid2, 'v' => $v ? 1 : 0]);
             out(200, ['ok' => true]);
         }
 
         case 'user_toggle_admin': {
+            // تغییر نقش، یک عملیات حساس است؛ فقط سوپرادمین.
+            if (!isSuper($SUPERS, $uid)) out(403, ['ok' => false, 'msg' => 'فقط سوپرادمین می‌تواند نقش ادمین را تغییر دهد']);
             $uid2 = (int)($_POST['user_id'] ?? 0); $v = (int)($_POST['v'] ?? 0);
-            if (in_array($uid2, $SUPERS, true)) out(403, ['ok' => false, 'msg' => 'سوپرادمین قابل تغییر نیست']);
+            if ($uid2 <= 0) out(400, ['ok' => false, 'msg' => 'شناسهٔ کاربر نامعتبر است']);
+            if (isSuper($SUPERS, $uid2)) out(403, ['ok' => false, 'msg' => 'سوپرادمین قابل تغییر نیست']);
+            if (!userExists($store, $uid2)) out(404, ['ok' => false, 'msg' => 'کاربر یافت نشد']);
             $store->setAllowed($uid2, (int)($store->user($uid2)['is_allowed'] ?? 0), $v ? 1 : 0);
+            audit('user_toggle_admin', ['user_id' => $uid2, 'v' => $v ? 1 : 0]);
             out(200, ['ok' => true]);
         }
 
         case 'user_set_limit': {
+            // سقف ساخت کاربر، تنظیم عملیاتی است؛ هر ادمین می‌تواند آن را تغییر دهد.
             $uid2 = (int)($_POST['user_id'] ?? 0); $n = max(0, (int)($_POST['limit'] ?? 0));
+            if ($uid2 <= 0) out(400, ['ok' => false, 'msg' => 'شناسهٔ کاربر نامعتبر است']);
+            if (!userExists($store, $uid2)) out(404, ['ok' => false, 'msg' => 'کاربر یافت نشد']);
             Payments::setUserLimit($store, $uid2, $n);
+            audit('user_set_limit', ['user_id' => $uid2, 'limit' => $n]);
             out(200, ['ok' => true]);
         }
 
@@ -147,15 +183,18 @@ try {
         }
 
         case 'super_add': {
-            if (!in_array($uid, $SUPERS, true)) out(403, ['ok' => false, 'msg' => 'فقط سوپرادمین می‌تواند سوپرادمین اضافه کند']);
+            if (!isSuper($SUPERS, $uid)) out(403, ['ok' => false, 'msg' => 'فقط سوپرادمین می‌تواند سوپرادمین اضافه کند']);
             $uid2 = (int)($_POST['user_id'] ?? 0);
+            if ($uid2 <= 0) out(400, ['ok' => false, 'msg' => 'شناسهٔ کاربر نامعتبر است']);
+            // جلوگیری از اشتباه تایپی: کاربر باید حداقل یک‌بار ربات را شروع کرده باشد.
+            if (!userExists($store, $uid2)) out(404, ['ok' => false, 'msg' => 'کاربر یافت نشد؛ اول باید ربات را /start کند']);
             $r = SuperAdmins::add($cfg, $store, $uid2);
             if (!$r['ok']) out(400, ['ok' => false, 'msg' => $r['error']]);
             out(200, ['ok' => true]);
         }
 
         case 'super_remove': {
-            if (!in_array($uid, $SUPERS, true)) out(403, ['ok' => false, 'msg' => 'فقط سوپرادمین می‌تواند سوپرادمین حذف کند']);
+            if (!isSuper($SUPERS, $uid)) out(403, ['ok' => false, 'msg' => 'فقط سوپرادمین می‌تواند سوپرادمین حذف کند']);
             $uid2 = (int)($_POST['user_id'] ?? 0);
             $r = SuperAdmins::remove($cfg, $store, $uid2);
             if (!$r['ok']) out(400, ['ok' => false, 'msg' => $r['error']]);
@@ -199,7 +238,10 @@ try {
 
         case 'payment_approve': {
             $id = (int)($_POST['id'] ?? 0);
+            $pay = $id > 0 ? Payments::getPayment($store, $id) : null;
+            if (!$pay) out(404, ['ok' => false, 'msg' => 'پرداخت یافت نشد']);
             $p = Payments::approveByAdmin($store, $id);
+            audit('payment_approve', ['id' => $id, 'ok' => (bool)$p]);
             if (!$p) out(400, ['ok' => false, 'msg' => 'این پرداخت قابل تأیید نیست']);
             out(200, ['ok' => true, 'note' => $p['grant_note'] ?? '']);
         }
@@ -218,6 +260,13 @@ try {
             foreach (PaymentGateways::keys() as $k) {
                 $gateways[] = ['key' => $k, 'label' => PaymentGateways::label($k), 'enabled' => PaymentGateways::isEnabled($store, $k)];
             }
+            // کلیدهای درگاه فقط برای سوپرادمین کامل برگردانده می‌شوند.
+            // هر is_admin قبلاً می‌توانست nowpay_ipn را ببیند و با آن IPN جعلی بسازد.
+            $isSuper = isSuper($SUPERS, $uid);
+            $secret = function (string $v) use ($isSuper): string {
+                if ($isSuper) return $v;
+                return $v === '' ? '' : ('••••' . substr($v, -4));
+            };
             out(200, ['ok' => true,
                 'maintenance' => BuildSettings::maintenanceOn($store),
                 'maintenance_eta' => BuildSettings::maintenanceEta($store),
@@ -227,23 +276,43 @@ try {
                 'card_number' => PaymentCard::getCardNumber($store),
                 'card_owner' => PaymentCard::getCardOwner($store),
                 'gateways' => $gateways,
-                'zarin_merchant' => PaymentZarin::merchantId($store),
+                'is_super' => $isSuper,
+                'zarin_merchant' => $secret(PaymentZarin::merchantId($store)),
                 'zarin_sandbox' => PaymentZarin::isSandbox($store),
-                'aqaye_pin' => PaymentAqaye::pin($store),
+                'aqaye_pin' => $secret(PaymentAqaye::pin($store)),
                 'aqaye_sandbox' => PaymentAqaye::isSandbox($store),
-                'nowpay_key' => trim((string)($store->getSetting('pay_nowpay_api_key', '') ?? '')),
-                'nowpay_ipn' => trim((string)($store->getSetting('pay_nowpay_ipn_secret', '') ?? '')),
+                'nowpay_key' => $secret(trim((string)($store->getSetting('pay_nowpay_api_key', '') ?? ''))),
+                'nowpay_ipn' => $secret(trim((string)($store->getSetting('pay_nowpay_ipn_secret', '') ?? ''))),
             ]);
         }
 
         case 'settings_set': {
             $k = (string)($_POST['k'] ?? '');
             $v = (string)($_POST['v'] ?? '');
+            $secretKeys = ['zarin_merchant', 'aqaye_pin', 'nowpay_key', 'nowpay_ipn'];
+            // دسترسی به این endpoint از قبل از طریق auth() به ادمین‌ها/سوپرادمین‌ها
+            // محدود شده است. کارت مقصد/درگاه/قیمت تنظیمات عملیاتی فروشگاه‌اند،
+            // نه راز درجه‌یک؛ بنابراین هر ادمین می‌تواند آن‌ها را پیکربندی کند.
+            // (حفاظت باقی‌مانده: خواندن کلیدهای راز برای غیرسوپرادمین ماسک می‌شود و
+            // مقدار ماسک‌شده را نمی‌توان دوباره ذخیره کرد.)
+            if (in_array($k, $secretKeys, true)) {
+                if (strpos($v, '••••') !== false) {
+                    out(400, ['ok' => false, 'msg' => 'مقدار ماسک‌شده را نمی‌توان ذخیره کرد؛ کلید کامل را وارد کنید']);
+                }
+            }
             switch ($k) {
                 case 'maintenance':   BuildSettings::setMaintenance($store, $v === '1'); break;
                 case 'approval':      BuildSettings::setApprovalRequired($store, $v === '1'); break;
-                case 'maintenance_eta': BuildSettings::setMaintenanceEta($store, $v); break;
-                case 'limit_price':   $store->setSetting('pay_limit_price', $v); break;
+                case 'maintenance_eta':
+                    if (mb_strlen($v) > 200) out(400, ['ok' => false, 'msg' => 'متن زمان تعمیرات بیش از حد طولانی است']);
+                    BuildSettings::setMaintenanceEta($store, $v);
+                    break;
+                case 'limit_price': {
+                    $digits = preg_replace('/\D/', '', $v) ?? '';
+                    if ($digits === '') out(400, ['ok' => false, 'msg' => 'قیمت سقف باید عدد باشد']);
+                    $store->setSetting('pay_limit_price', (string)(int)$digits);
+                    break;
+                }
                 case 'card_number':   PaymentCard::setCard($store, $v, PaymentCard::getCardOwner($store)); break;
                 case 'card_owner':    PaymentCard::setCard($store, PaymentCard::getCardNumber($store), $v); break;
                 case 'gateway':
@@ -270,6 +339,7 @@ try {
                     break;
                 default: out(400, ['ok' => false, 'msg' => 'کلید نامعتبر']);
             }
+            if (in_array($k, $secretKeys, true)) audit('settings_secret_set', ['key' => $k]);
             out(200, ['ok' => true]);
         }
 
@@ -297,6 +367,12 @@ try {
                     'repo'      => (string)($spec['repo'] ?? ''),
                     'min_php'   => $minPhp[$type] ?? null,
                     'installed' => isset($installed[$type]),
+                    // قالب غیر PHP (PGClockBot) نه ساختنی است نه «نصب‌نشدهٔ معیوب»؛
+                    // UI باید «نصب جداگانه» نشان دهد، نه دکمهٔ نصب/آماده.
+                    'buildable' => Manager::isBuildable($type),
+                    'runtime'   => (string)($spec['runtime'] ?? 'php'),
+                    'requires'  => array_values((array)($spec['requires'] ?? [])),
+                    'docs'      => (string)($spec['docs'] ?? ''),
                 ];
             }
             out(200, ['ok' => true, 'templates' => $list, 'types' => $installed]);
@@ -341,6 +417,7 @@ try {
         }
 
         case 'logs_page': {
+            if (!isSuper($SUPERS, $uid)) out(403, ['ok' => false, 'msg' => 'فقط سوپرادمین']);
             // صفحه‌بندی لاگ: فقط یک پنجره از انتهای فایل خوانده می‌شود
             $dir = $ROOT . '/data/logs';
             $files = glob($dir . '/*.log') ?: [];
@@ -355,9 +432,15 @@ try {
             // برای صفحهٔ n حدود n*per خط از انتها لازم است
             $want = ($skip + $per + 1) * 200;
             $want = (int)min(max($want, 32 * 1024), max($size, 1));
-            fseek($fh, max(0, $size - $want));
+            $seek = max(0, $size - $want);
+            fseek($fh, $seek);
             $buf = (string)fread($fh, $want);
             fclose($fh);
+            // اگر از وسط یک خط شروع کرده‌ایم، بقیهٔ آن خط را دور بریز؛ وگرنه
+            // خط اولِ صفحه با کاراکترهای شکسته/ناقص UTF-8 نمایش داده می‌شود.
+            if ($seek > 0 && ($nl = strpos($buf, "\n")) !== false) {
+                $buf = substr($buf, $nl + 1);
+            }
             $all = array_values(array_filter(array_map('rtrim', explode("\n", $buf)), 'strlen'));
             $total = count($all);
             $start = max(0, $total - $skip - $per);
@@ -376,11 +459,18 @@ try {
         }
 
         case 'price_set': {
+            // قیمت‌گذاری تنظیم عملیاتی فروشگاه است؛ هر ادمین (auth قبلاً ادمین
+            // بودن را می‌سنجد) می‌تواند آن را تغییر دهد.
             require_once $ROOT . '/src/Payment/Pricing.php';
             $type = (string)($_POST['type'] ?? '');
             $v = max(0, (int)preg_replace('/\D/', '', (string)($_POST['v'] ?? '0')));
-            if ($type !== '') PaymentPricing::setTemplatePrice($store, $type, $v);
-            else PaymentPricing::setLimitUnitPrice($store, $v);
+            if ($type !== '') {
+                if (Manager::templateSpec($type) === null) out(400, ['ok' => false, 'msg' => 'قالب نامعتبر است']);
+                PaymentPricing::setTemplatePrice($store, $type, $v);
+            } else {
+                PaymentPricing::setLimitUnitPrice($store, $v);
+            }
+            audit('price_set', ['type' => $type, 'value' => $v]);
             out(200, ['ok' => true]);
         }
 
@@ -394,6 +484,7 @@ try {
         }
 
         case 'logs_tail': {
+            if (!isSuper($SUPERS, $uid)) out(403, ['ok' => false, 'msg' => 'فقط سوپرادمین']);
             $dir = $ROOT . '/data/logs';
             $files = glob($dir . '/*.log') ?: [];
             rsort($files);
@@ -403,10 +494,16 @@ try {
             if (!$fh) out(200, ['ok' => true, 'lines' => []]);
             $size = (int)filesize($files[0]);
             $chunk = 32 * 1024;
-            fseek($fh, max(0, $size - $chunk));
+            $seek = max(0, $size - $chunk);
+            fseek($fh, $seek);
             $buf = (string)fread($fh, $chunk);
             fclose($fh);
-            $tail = array_values(array_filter(array_slice(explode("\n", $buf), -50)));
+            // اگر از وسط خط/کاراکتر شروع شده‌ایم، خط ناقص اول را دور بریزیم؛
+            // وگرنه json_encode روی UTF-8 ناقص false می‌شود و پاسخ خالی می‌رسد.
+            if ($seek > 0 && ($nl = strpos($buf, "\n")) !== false) {
+                $buf = substr($buf, $nl + 1);
+            }
+            $tail = array_values(array_filter(array_slice(explode("\n", $buf), -50), 'strlen'));
             out(200, ['ok' => true, 'file' => basename($files[0]), 'lines' => array_map('rtrim', $tail)]);
         }
 
@@ -430,7 +527,7 @@ try {
                 out(200, ['ok' => true, 'rows' => $rows, 'behind' => (int)($st['behind'] ?? 0),
                           'branch' => (string)($st['branch'] ?? '?')]);
             } catch (Throwable $e) {
-                out(500, ['ok' => false, 'msg' => 'خطا در خواندن وضعیت: ' . $e->getMessage()]);
+                internalError($e, 'src_status');
             }
         }
 
@@ -445,7 +542,7 @@ try {
                           'out' => mb_substr(trim((string)($r['out'] ?? '')), -1200),
                           'queued' => !empty($r['queued'])]);
             } catch (Throwable $e) {
-                out(500, ['ok' => false, 'msg' => $e->getMessage()]);
+                internalError($e, 'src_update');
             }
         }
 
@@ -476,7 +573,7 @@ try {
                     ];
                 } catch (Throwable $e) {
                     $out[] = ['id' => (int)$bot['id'], 'folder' => $folder, 'ok' => false,
-                              'error' => $e->getMessage(), 'username' => (string)($bot['bot_username'] ?? '')];
+                              'error' => Manager::sanitizeDbError($e->getMessage()), 'username' => (string)($bot['bot_username'] ?? '')];
                 }
             }
             out(200, ['ok' => true, 'bots' => $out]);
@@ -501,9 +598,12 @@ try {
                           'msg' => mb_substr($note !== '' ? $note : (string)($res['error'] ?? ''), -600),
                           'applied' => (int)($res['applied'] ?? 0),
                           'skipped' => (int)($res['skipped'] ?? 0),
+                          'failed' => (int)($res['failed'] ?? 0),
+                          'reverted' => (int)($res['reverted'] ?? 0),
+                          'failed_files' => array_values((array)($res['failed_files'] ?? [])),
                           'config_new' => !empty($res['config_new'])]);
             } catch (Throwable $e) {
-                out(500, ['ok' => false, 'msg' => $e->getMessage()]);
+                internalError($e, 'bot_update');
             }
         }
 
@@ -514,13 +614,16 @@ try {
             foreach ($store->allBots() as $bot) {
                 try {
                     $plan = SourceUpdate::plan((string)$bot['type'], (string)$bot['folder']);
-                    if (empty($plan['ok'])) { $skip++; continue; }
+                    if (empty($plan['ok'])) {
+                        $errs[] = ($bot['folder'] ?? '?') . ': ' . (string)($plan['error'] ?? 'plan failed');
+                        continue;
+                    }
                     if (empty($plan['new']) && empty($plan['changed'])) { $skip++; continue; }
                     $res = SourceUpdate::apply($plan, $uid);
                     if (!empty($res['ok'])) $done++; else $errs[] = $bot['folder'];
-                } catch (Throwable $e) { $errs[] = ($bot['folder'] ?? '?') . ': ' . $e->getMessage(); }
+                } catch (Throwable $e) { $errs[] = ($bot['folder'] ?? '?') . ': ' . Manager::sanitizeDbError($e->getMessage()); }
             }
-            out(200, ['ok' => true, 'updated' => $done, 'skipped' => $skip, 'errors' => $errs]);
+            out(200, ['ok' => $errs === [], 'updated' => $done, 'skipped' => $skip, 'errors' => $errs]);
         }
 
         case 'system_status': {
@@ -552,7 +655,58 @@ try {
             out(404, ['ok' => false, 'msg' => 'action نامعتبر']);
     }
 } catch (Throwable $e) {
-    out(500, ['ok' => false, 'msg' => $e->getMessage()]);
+    internalError($e, $action);
+}
+
+/**
+ * خطای داخلی: جزئیات فقط در لاگ سرور، پاسخ عمومی با request_id.
+ * قبلاً $e->getMessage() مستقیم به کلاینت می‌رفت و می‌توانست DSN، مسیر فایل،
+ * نام کاربری دیتابیس یا Query را لو بدهد.
+ */
+function internalError(Throwable $e, string $where = ''): void
+{
+    $rid = bin2hex(random_bytes(6));
+    // action از ورودی کاربر می‌آید؛ قبل از لاگ، کاراکترهای کنترلی/خط جدید را
+    // حذف می‌کنیم تا کسی نتواند خط جعلی در audit/log تزریق کند.
+    $where = preg_replace('/[^A-Za-z0-9_.-]/', '', $where) ?: 'unknown';
+    try {
+        require_once dirname(__DIR__) . '/src/Logger.php';
+        Logger::getInstance()->error('miniapp', 'internal error [' . $rid . '] ' . $where . ': ' . $e->getMessage(), [
+            'file' => $e->getFile(),
+            'line' => $e->getLine(),
+        ]);
+    } catch (Throwable $ignored) {
+        error_log('[miniapp][' . $rid . '] ' . $where . ': ' . $e->getMessage());
+    }
+    out(500, ['ok' => false, 'code' => 'internal_error', 'request_id' => $rid,
+              'msg' => 'خطای داخلی سرور رخ داد. کد پیگیری: ' . $rid]);
+}
+
+function userExists(Store $store, int $uid): bool
+{
+    if ($uid <= 0) return false;
+    $st = $store->getPdo()->prepare('SELECT 1 FROM users WHERE user_id=? LIMIT 1');
+    $st->execute([$uid]);
+    return $st->fetchColumn() !== false;
+}
+
+/** ثبت سادهٔ Audit برای عملیات حساس (بدون هیچ مقدار محرمانه‌ای). */
+function audit(string $action, array $meta = []): void
+{
+    $uid = (int)($GLOBALS['__botsaz_actor'] ?? 0);
+    $line = json_encode([
+        'at' => date('c'),
+        'actor' => $uid,
+        'ip' => (string)($_SERVER['REMOTE_ADDR'] ?? ''),
+        'action' => $action,
+        'meta' => $meta,
+    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
+    if (!is_string($line)) return;
+    $dir = dirname(__DIR__) . '/data/logs';
+    if (!is_dir($dir)) @mkdir($dir, 0755, true);
+    $file = $dir . '/audit.log';
+    @file_put_contents($file, $line . "\n", FILE_APPEND | LOCK_EX);
+    @chmod($file, 0640);
 }
 
 function auth(string $initData, string $token, array $supers, Store $store): int
@@ -567,13 +721,20 @@ function auth(string $initData, string $token, array $supers, Store $store): int
     $secret = hash_hmac('sha256', $token, 'WebAppData', true);
     $calc = hash_hmac('sha256', implode("\n", $pairs), $secret);
     if (!hash_equals($calc, (string)$hash)) deny();
+    // auth_date اجباری است؛ بدون آن، initData قدیمی/بدون تاریخ قابل استفاده می‌شد.
+    if (!isset($p['auth_date'])) deny();
     // محدودیت زمانی سخت‌گیرانه‌تر: بیش از ۲۴ ساعت = رد (قبلاً ۷ روز بود)
-    if (isset($p['auth_date']) && (time() - (int)$p['auth_date'] > 86400 || (int)$p['auth_date'] > time() + 300)) deny();
+    if (time() - (int)$p['auth_date'] > 86400 || (int)$p['auth_date'] > time() + 300) deny();
     $user = json_decode($p['user'] ?? '{}', true);
     $uid = (int)($user['id'] ?? 0);
     if ($uid <= 0) deny();
-    $u = $store->user($uid);
-    if (in_array($uid, $supers, true) || (int)($u['is_admin'] ?? 0) === 1) return $uid;
+    // عمداً از Store::user() استفاده نمی‌کنیم: آن متد برای هر کاربر تلگرام یک
+    // رکورد می‌سازد، حتی اگر ادمین نباشد. مینی‌اپ فقط باید کاربران موجود را
+    // بخواند؛ سوپرادمین‌های config هم بدون رکورد مجازند.
+    $st = $store->getPdo()->prepare('SELECT is_admin FROM users WHERE user_id=? LIMIT 1');
+    $st->execute([$uid]);
+    $isAdminRow = $st->fetchColumn();
+    if (isSuper($supers, $uid) || (int)$isAdminRow === 1) return $uid;
     try { require_once dirname(__DIR__) . '/src/Logger.php'; Logger::getInstance()->error('miniapp', 'تلاش دسترسی غیرمجاز', ['uid' => $uid]); } catch (Throwable $e) {}
     deny();
 }
@@ -611,6 +772,6 @@ function out(int $code, array $payload): void
     http_response_code($code);
     header('Content-Type: application/json; charset=utf-8');
     header('Cache-Control: no-store');
-    echo json_encode($payload, JSON_UNESCAPED_UNICODE);
+    echo json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
     exit;
 }

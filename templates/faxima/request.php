@@ -84,7 +84,11 @@ class CurlRequest {
         curl_setopt($ch, CURLOPT_TCP_KEEPIDLE, 60);
         curl_setopt($ch, CURLOPT_TCP_KEEPINTVL, 30);
 
-        $verifyTls = defined('BOT_CURL_VERIFY_TLS') && BOT_CURL_VERIFY_TLS === true;
+        // پیش‌فرض امن: تأیید TLS روشن است. برای پنل self-signed می‌توان
+        // BOT_CURL_VERIFY_TLS=false یا FAOXIMA_SSL_INSECURE=1 را صریحاً تنظیم کرد.
+        $verifyTls = function_exists('faoxima_ssl_verify')
+            ? faoxima_ssl_verify()
+            : (!defined('BOT_CURL_VERIFY_TLS') || BOT_CURL_VERIFY_TLS !== false);
         if ($verifyTls) {
             curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
             curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 2);

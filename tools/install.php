@@ -58,7 +58,7 @@ if ($store->getSetting('pay_limit_price') === null) {
 }
 // از رجیستری قالب‌ها خوانده می‌شود، نه از آرایهٔ ثابت — تا قالب تازه خودکار
 // کلید قیمتش ساخته شود و در پنل «قیمت قالب» قابل تنظیم باشد.
-foreach (array_keys(Manager::templates()) as $_t) {
+foreach (array_keys(Manager::buildableTypes()) as $_t) {
     if ($store->getSetting(PaymentPricing::priceKey($_t)) === null) {
         $store->setSetting(PaymentPricing::priceKey($_t), (string)(int)(($payCfg['template_prices'][$_t] ?? 0)));
     }

@@ -10,6 +10,7 @@ require_once __DIR__ . '/lib/bulk_delete.php';
 require_once __DIR__ . '/lib/date_filter.php';
 require_once __DIR__ . '/lib/status_filter.php';
 require_once __DIR__ . '/lib/search_filter.php';
+require_once __DIR__ . '/lib/csrf.php';
 
 $query = $pdo->prepare("SELECT * FROM admin WHERE username=:username");
 $query->bindParam("username", $_SESSION["user"], PDO::PARAM_STR);
@@ -20,6 +21,8 @@ if (!isset($_SESSION["user"]) || !$result) {
     header('Location: login.php');
     return;
 }
+
+fx_csrf_guard();
 
 if (!empty($_POST['action']) && $_POST['action'] === 'bulk_delete') {
     $requestedIds = $_POST['ids'] ?? [];
@@ -112,6 +115,7 @@ $listservices = $query->fetchAll();
 
             <div class="card">
                 <form method="POST" action="service.php" id="bulk-form">
+                <input type="hidden" name="_csrf" value="<?php echo htmlspecialchars(fx_csrf_token(), ENT_QUOTES, 'UTF-8'); ?>">
                 <input type="hidden" name="action" value="bulk_delete">
                 <div class="table-wrap">
                     <table id="servicesTable" class="display app-table app-table--summary" style="width:100%">

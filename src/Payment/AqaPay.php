@@ -66,12 +66,19 @@ class PaymentAqaye
 
     // ---------- کمکیِ مبلغ ----------
 
-    /** مبلغ را به بازهٔ مجاز سرویس می‌آورد؛ اگر اصلاً نشد ⇒ null (فاکتور ساخته نشود) */
+    /**
+     * مبلغ را به بازهٔ مجاز سرویس می‌آورد؛ اگر اصلاً نشد ⇒ null (فاکتور ساخته نشود).
+     *
+     * قبلاً مبلغ‌های کمتر از ۱۰۰۰ بی‌صدا به ۱۰۰۰ «گرد» می‌شدند: فاکتور در
+     * دیتابیس ۵۰۰ تومان نشان می‌داد ولی درگاه ۱۰۰۰ می‌گرفت و verify هم با
+     * ۱۰۰۰ انجام می‌شد. این یک اضافه‌دریافت واقعی بود. حالا مبلغ کمتر از حداقل
+     * صریحاً رد می‌شود تا ادمین قیمت را اصلاح کند، نه اینکه کاربر بیشتر بپردازد.
+     */
     public static function clampAmount(int $toman): ?int
     {
         if ($toman <= 0) return null;
-        if ($toman < self::MIN_TOMAN) return self::MIN_TOMAN;
-        if ($toman > self::MAX_TOMAN) return self::MAX_TOMAN;
+        if ($toman < self::MIN_TOMAN) return null;
+        if ($toman > self::MAX_TOMAN) return null;
         return $toman;
     }
 
@@ -93,7 +100,8 @@ class PaymentAqaye
         }
         $amount = self::clampAmount($toman);
         if ($amount === null) {
-            return ['ok' => false, 'transid' => '', 'code' => '', 'error' => 'مبلغ نامعتبر است'];
+            return ['ok' => false, 'transid' => '', 'code' => '', 'error' =>
+                'مبلغ نامعتبر است؛ درگاه آقای پرداخت حداقل ' . number_format(self::MIN_TOMAN) . ' تومان و حداکثر ' . number_format(self::MAX_TOMAN) . ' تومان می‌پذیرد'];
         }
         $payload = [
             'pin'             => $pin,
@@ -128,7 +136,8 @@ class PaymentAqaye
         }
         $amount = self::clampAmount($toman);
         if ($amount === null) {
-            return ['ok' => false, 'paid' => false, 'code' => '', 'error' => 'مبلغ نامعتبر است'];
+            return ['ok' => false, 'paid' => false, 'code' => '', 'error' =>
+                'مبلغ فاکتور خارج از بازهٔ مجاز درگاه آقای پرداخت است'];
         }
         $res = self::http(self::API_V2 . '/verify', [
             'pin'     => $pin,

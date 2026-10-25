@@ -139,7 +139,15 @@ class Manager
         // داخل bots/<slug>/ می‌برد - پس همان را می‌سنجیم.
         $types = ($type !== null && self::templateSpec($type) !== null)
             ? [$type]
-            : array_keys(self::templates());
+            : array_keys(self::buildableTypes());
+        // قالب غیر PHP (مثل PGClockBot) اصلاً وارد این چرخه نمی‌شود: نه vendor
+        // دارد، نه config.php، نه وبهوک PHP. بررسی‌کردنش یعنی «قالب ناقص است» و
+        // بستنِ ساختِ بقیه؛ ساختنش هم یعنی ربات مرده. پس پیش‌نیاز نمی‌سنجیم.
+        if ($type !== null && self::templateSpec($type) !== null && !self::isBuildable($type)) {
+            $spec = self::templateSpec($type);
+            return "قالب «{$type}» با این ربات‌ساز قابل ساخت نیست (رانمایم "
+                . (string)($spec['runtime'] ?? '?') . "). این محصول باید جداگانه نصب شود.";
+        }
         foreach ($types as $_tpl) {
             $_spec = self::templateSpec($_tpl);
             $_dir = self::templateDir($_tpl);
@@ -461,7 +469,78 @@ class Manager
                 // و اگر نباشند یعنی نصب ناقص بوده. tools/dryrun.php هر دو را می‌سنجد.
                 'generated' => ['data/bot.sqlite', 'data/.migrate.lock', 'data/logs/'],
             ],
+            'pgclock' => [
+                // ===== قالب «فهرست فقط» — عمداً buildable=false =====
+                //
+                // PGClockBot یک اپ پایتون است (aiogram 3 + FastAPI + PostgreSQL)،
+                // نه یک endpoint PHP: به سرویس دائمی، پورت اختصاصی، venv و پنل وب
+                // روی ۹۰۰۰ نیاز دارد. مدل نصب این ربات‌ساز «کپی پوشهٔ قالب + پچ
+                // config.php + ست‌کردن وبهوک روی bots/<slug>/index.php» است.
+                //
+                // اگر این قالب buildable می‌بود، buildBot یک دیتابیس MySQL خالی
+                // می‌ساخت، config.php را با placeholderهای PHP پچ می‌کرد و
+                // وبهوک را روی فایلی که وجود ندارد ست می‌کرد — یعنی «✅ ربات ساخته
+                // شد» برای رباتی که هرگز بالا نمی‌آید. پس فقط در منو/راهنما دیده
+                // می‌شود و هیچ مسیر ساخت/قیمت‌گذاری/آپدیت سورس به آن نمی‌رسد.
+                'label' => 'پی‌جی‌کلاک (پاسارگارد)',
+                'icon' => '🕐',
+                'repo' => 'https://github.com/Mrclocks/PGClockBot',
+                'runtime' => 'python',
+                'buildable' => false,
+                'db' => 'postgresql',
+                'entry' => '',
+                'autoload' => 'requirements.txt',
+                'secret' => '',
+                'table' => null,
+                'tableSecret' => null,
+                'schema' => 'external',
+                'cron' => '',
+                'required' => ['run.py', 'requirements.txt'],
+                // برای نمایش در راهنمای داخل ربات — نه برای بررسی خودکار
+                'requires' => [
+                    'پایتون ۳٫۱۱ یا بالاتر (+ venv و pip)',
+                    'PostgreSQL و اجرای alembic migrate',
+                    'سرویس دائمی (systemd/uvicorn) روی یک پورت اختصاصی',
+                    'دسترسی پنل PasarGuard (PG_BASE_URL / PG_USERNAME / PG_PASSWORD)',
+                ],
+                'docs' => 'docs/PGCLOCKBOT.md',
+            ],
         ];
+    }
+
+    /**
+     * آیا این قالب با مدل «کپی سورس + پچ config.php + وبهوک PHP» ساختنی است؟
+     *
+     * تنها منبع تصمیم برای منو، قیمت‌گذاری، پیش‌نیازها و آپدیت سورس است.
+     * قالب غیر PHP (pgclock) و هر ورودی با buildable=false اینجا رد می‌شود تا
+     * هیچ‌جای دیگری مجبور نباشد خودش «نوع» را حدس بزند.
+     */
+    public static function isBuildable(string $type): bool
+    {
+        $spec = self::templateSpec($type);
+        if ($spec === null) return false;
+        if (($spec['buildable'] ?? true) === false) return false;
+        return (string)($spec['runtime'] ?? 'php') === 'php';
+    }
+
+    /** کلید ⇒ مشخصات قالب‌هایی که واقعاً قابل ساخت‌اند */
+    public static function buildableTypes(): array
+    {
+        $out = [];
+        foreach (self::templates() as $key => $spec) {
+            if (self::isBuildable($key)) $out[$key] = $spec;
+        }
+        return $out;
+    }
+
+    /** کلید ⇒ مشخصات قالب‌های «فهرست فقط» (نمایش راهنما، بدون امکان ساخت) */
+    public static function catalogTypes(): array
+    {
+        $out = [];
+        foreach (self::templates() as $key => $spec) {
+            if (!self::isBuildable($key)) $out[$key] = $spec;
+        }
+        return $out;
     }
 
     /** یک قالب یا null اگر نامعتبر بود */
@@ -528,6 +607,9 @@ class Manager
     {
         $out = [];
         foreach (self::templates() as $key => $spec) {
+            // قالب «فهرست فقط» (PGClockBot) هرگز در منوی ساخت نمی‌آید؛ حتی اگر
+            // سورسش روی سرور باشد، اجرای آن با وبهوک PHP ممکن نیست.
+            if (!self::isBuildable($key)) continue;
             if (is_dir(self::templateDir($key)) && is_file(self::templateDir($key) . '/' . ($spec['autoload'] ?? ''))) {
                 $out[$key] = (string)$spec['label'];
             }
@@ -536,7 +618,13 @@ class Manager
     }
 
     /**
- * نگاشت «کلید ⇒ برچسب» همهٔ قالب‌ها.
+ * نگاشت «کلید ⇒ برچسب» قالب‌های قابل ساخت.
+ *
+ * عمداً از buildableTypes می‌آید: این خروجی مبنای قیمت‌گذاری، فروش مجوز قالب و
+ * اعتبارسنجی `pay:buy:template:<type>` است. اگر قالب «فهرست فقط» (PGClockBot)
+ * اینجا بیاید، ادمین برای محصولی که ساختنی نیست قیمت می‌گذارد و کاربر پول
+ * می‌دهد و آخرش «قالب نامعتبر» می‌گیرد. برای دیدن همهٔ کلیدها (شامل فهرست)
+ * از Manager::templates() یا catalogTypes() استفاده کنید.
  *
  * نکتهٔ ریز ولی مهم: array_keys() روی آرایهٔ رشته‌ای، کلیدهای **عددی** برمی‌گرداند
  * و array_map هم با یک آرایه، کلید عددی را دور می‌ریزد. با
@@ -548,7 +636,7 @@ class Manager
 public static function validTypes(): array
     {
         $out = [];
-        foreach (self::templates() as $key => $spec) {
+        foreach (self::buildableTypes() as $key => $spec) {
             $out[$key] = (string)$spec['label'];
         }
         return $out;
@@ -645,11 +733,16 @@ public static function validTypes(): array
      *
      * @return string رشتهٔ خالی یعنی این قالب secret ندارد (میرزا)
      */
-    public static function resolveWebhookSecret(array $bot): string
+    public static function resolveWebhookSecret(array $bot, ?array $cfg = null): string
     {
         $type = (string)($bot['type'] ?? '');
         $token = '';
-        if (function_exists('childToken')) $token = childToken($bot);
+        if (function_exists('childToken')) {
+            $token = childToken($bot);
+        } elseif ($cfg !== null && !empty($bot['token'])) {
+            // در مینی‌اپ/سرویس چرخهٔ عمر، childToken در دسترس نیست؛ خودمان رمزگشایی می‌کنیم.
+            $token = self::decryptChildToken((string)$bot['token'], self::secretKey($cfg));
+        }
         $spec = self::templateSpec($type);
         $formula = is_array($spec) ? (string)($spec['secret'] ?? '') : '';
 
@@ -672,7 +765,7 @@ public static function validTypes(): array
     {
         $type = (string)($bot['type'] ?? '');
         $folder = (string)($bot['folder'] ?? '');
-        $secret = self::resolveWebhookSecret($bot);
+        $secret = self::resolveWebhookSecret($bot, $cfg);
         return self::webhookUrl($cfg, $folder, $type, $secret);
     }
 
@@ -685,34 +778,68 @@ public static function validTypes(): array
         // ===== Validate token format before patching =====
         // Telegram tokens: {8-10 digits}:{35+ alphanumeric with - or _}
         if (!preg_match('/^[0-9]{8,10}:[a-zA-Z0-9_-]{35,}$/', $token)) {
-            throw new Exception("توکن نامعتبر است (فرمت تلگرام): {$token}");
+            throw new Exception("توکن نامعتبر است (فرمت تلگرام)");
         }
         // Validate bot username
         if (!preg_match('/^[a-z0-9_]{3,32}$/i', $botUsername)) {
             throw new Exception("نام کاربری ربات نامعتبر است: {$botUsername}");
         }
-        
+        // نام دیتابیس/هاست را سخت‌گیرانه اعتبارسنجی می‌کنیم: این‌ها در کد PHP و
+        // داخل regex جای می‌گیرند و مقدار دلخواه (با کوتیشن/بک‌اسلش/$) می‌تواند
+        // config را خراب یا کد تزریق کند. نام دیتابیس در createDatabase ساخته
+        // می‌شود و همیشه با [a-z0-9_] سازگار است.
+        if (!preg_match('/^[A-Za-z0-9_]+$/', $dbName)) {
+            throw new Exception("نام دیتابیس میرزا نامعتبر است");
+        }
+        $dbHost = (string)($cfg['db_host'] ?? 'localhost');
+        $dbPort = (int)($cfg['db_port'] ?? 3306);
+        if (!preg_match('/^[A-Za-z0-9_.:\-]+$/', $dbHost)) {
+            throw new Exception("هاست دیتابیس نامعتبر است");
+        }
+        if ($dbPort < 1 || $dbPort > 65535) {
+            throw new Exception("پورت دیتابیس نامعتبر است");
+        }
+
         $file = $botDir . '/config.php';
         $raw = file_get_contents($file);
         if ($raw === false) throw new Exception("config.php میرزا پیدا نشد");
+        // همهٔ مقادیر رشته‌ای باید برای نشستن داخل رشتهٔ تک‌کوتیشنی PHP escape شوند.
+        // قبلاً db_pass/domainPath خام جای‌گذاری می‌شدند و یک رمز مثل p'a\s'sword
+        // باعث Parse error و رباتِ ۵۰۰ می‌شد (تست واقعی در docs/AUDIT_FA.md).
         $replacements = [
-            '{DATABASE_NAME}' => $dbName,
-            '{DATABASE_USERNAME}' => $cfg['db_user'],
-            '{DATABASE_PASSOWRD}' => $cfg['db_pass'],
-            '{DATABASE_PASSWORD}' => $cfg['db_pass'],
-            '{BOT_TOKEN}' => $token,
-            '{ADMIN_#ID}' => (string)$adminId,
-            '{DOMAIN.COM/PATH/BOT}' => $domainPath,
-            '{BOT_USERNAME}' => $botUsername,
+            '{DATABASE_NAME}' => self::phpEscape($dbName),
+            '{DATABASE_USERNAME}' => self::phpEscape((string)($cfg['db_user'] ?? '')),
+            '{DATABASE_PASSOWRD}' => self::phpEscape((string)($cfg['db_pass'] ?? '')),
+            '{DATABASE_PASSWORD}' => self::phpEscape((string)($cfg['db_pass'] ?? '')),
+            // این چهار مورد در config میرزا داخل رشتهٔ دابل‌کوتیشن می‌نشینند؛
+            // باید " و $ هم escape شوند، وگرنه interpolation یا Parse error.
+            '{BOT_TOKEN}' => self::phpDoubleEscape($token),
+            '{ADMIN_#ID}' => self::phpDoubleEscape((string)$adminId),
+            '{DOMAIN.COM/PATH/BOT}' => self::phpDoubleEscape($domainPath),
+            '{BOT_USERNAME}' => self::phpDoubleEscape($botUsername),
         ];
-        $new = str_replace(array_keys($replacements), array_values($replacements), $raw, $count);
-        if ($count === 0) throw new Exception("placeholderهای config میرزا پیدا نشد (نسخه ناسازگار؟)");
+        $new = strtr($raw, $replacements);
+        $found = false;
+        foreach (array_keys($replacements) as $ph) {
+            if (substr_count($raw, $ph) > 0) { $found = true; break; }
+        }
+        if (!$found) throw new Exception("placeholderهای config میرزا پیدا نشد (نسخه ناسازگار؟)");
+        // strtr یک‌مرحله‌ای است و مقادیر جای‌گذاری‌شده را دوباره اسکن نمی‌کند؛
+        // پس رمزی که مشروعاً شامل {BOT_TOKEN} باشد خراب نمی‌شود.
+        // placeholder ناشناخته را در «قالب خام» می‌سنجیم، نه در خروجی پچ‌شده؛
+        // وگرنه رمز دیتابیس یا دامنه‌ای که مشروعاً شامل {abc} است، ساخت را
+        // بی‌دلیل رد می‌کند.
+        if (preg_match_all('/\{[A-Z][A-Z0-9_#.\/-]*\}/', $raw, $unknownPh)) {
+            foreach ($unknownPh[0] as $ph) {
+                if (!array_key_exists($ph, $replacements)) {
+                    throw new Exception("placeholder ناشناخته در config میرزا: {$ph}");
+                }
+            }
+        }
         $afterPlaceholders = $new;
         // هاست دیتابیس میرزا هاردکد localhost است؛ با هاست/پورت واقعی جایگزین می‌کنیم.
         // پورت صریحاً به‌عنوان آرگومان پنجم mysqli_connect داده می‌شود («host:port» داخل آرگومان host
         // رسمی/پشتیبانی‌شده نیست و روی بعضی استک‌ها نادیده گرفته می‌شود).
-        $dbHost = $cfg['db_host'] ?? 'localhost';
-        $dbPort = (int)($cfg['db_port'] ?? 3306);
         // استفاده از regex برای انعطاف‌پذیری بیشتر
         $afterMysqli = preg_replace(
             '/mysqli_connect\s*\(\s*"localhost"\s*,\s*(\$[a-zA-Z_]+)\s*,\s*(\$[a-zA-Z_]+)\s*,\s*(\$[a-zA-Z_]+)\s*\)/',
@@ -735,7 +862,21 @@ public static function validTypes(): array
                 $new
             );
         }
-        if (file_put_contents($file, $new) === false) throw new Exception("خطا در نوشتن config.php میرزا");
+        // قبل از جای‌گزینی، خروجی را در فایل موقت می‌نویسیم و با php -l می‌سنجیم؛
+        // اگر کانفیگ خراب باشد، نسخهٔ سالم قبلی دست‌نخورده می‌ماند و build شکست می‌خورد.
+        $tmp = $file . '.botsaztmp-' . bin2hex(random_bytes(4));
+        if (file_put_contents($tmp, $new) === false) {
+            throw new Exception("خطا در نوشتن موقت config.php میرزا");
+        }
+        @chmod($tmp, 0640);
+        if (!self::lintPhpFile($tmp)) {
+            @unlink($tmp);
+            throw new Exception("config.php میرزا پس از پچ از نظر نحوی معتبر نیست");
+        }
+        if (!@rename($tmp, $file)) {
+            @unlink($tmp);
+            throw new Exception("خطا در جای‌گزینی config.php میرزا");
+        }
     }
 
     /** رمزگشایی توکن ذخیره‌شده ربات فرزند (سازگار با توکن‌های ساده قدیمی و کلید قدیمی) */
@@ -798,22 +939,36 @@ public static function validTypes(): array
         return '';
     }
 
+    /** آخرین خطای triggerTable (برای لاگ/پیام قابل‌اقدام؛ شامل secret نیست) */
+    private static string $tableLastError = '';
+
+    public static function tableLastError(): string
+    {
+        return self::$tableLastError;
+    }
+
     /** اجرای table.php از طریق HTTP (ساخت جدول‌ها) — مثل نصب‌کننده‌های رسمی */
     public static function triggerTable(string $tableUrl, string $secret = ''): bool
     {
+        self::$tableLastError = '';
         if ($secret !== '') {
             $tableUrl .= (strpos($tableUrl, '?') === false ? '?' : '&') . 'secret=' . rawurlencode($secret);
         }
         // تلاش اول: file_get_contents
         // تأیید TLS روشن: این آدرس همان base_url سایت خودمان است (همان گواهی که تلگرام برای وبهوک قبول دارد)
         $ctx = stream_context_create(['http' => ['timeout' => 60, 'ignore_errors' => true], 'ssl' => ['verify_peer' => true, 'verify_peer_name' => true]]);
+        $safeUrl = preg_replace('/secret=[^&]+/', 'secret=***', $tableUrl) ?? $tableUrl;
         $res = @file_get_contents($tableUrl, false, $ctx);
         if ($res !== false && isset($http_response_header[0])) {
             if (preg_match('{HTTP/\S*\s+(\d+)}', $http_response_header[0], $m)) {
-                return (int)$m[1] >= 200 && (int)$m[1] < 300;
+                $code = (int)$m[1];
+                $ok = $code >= 200 && $code < 300;
+                if (!$ok) self::$tableLastError = "HTTP {$code} از {$safeUrl}";
+                return $ok;
             }
         }
         if ($res !== false) return true;
+        self::$tableLastError = "عدم دریافت پاسخ از {$safeUrl}";
         // تلاش دوم: cURL fallback اگر file_get_contents غیرفعال باشد
         if (function_exists('curl_init')) {
             $ch = curl_init($tableUrl);
@@ -827,9 +982,15 @@ public static function validTypes(): array
                 CURLOPT_NOBODY => false,
             ]);
             $out = curl_exec($ch);
-            $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $err = (string)curl_error($ch);
             curl_close($ch);
-            return $code >= 200 && $code < 300;
+            if ($code >= 200 && $code < 300) {
+                self::$tableLastError = '';
+                return true;
+            }
+            self::$tableLastError = "HTTP {$code}" . ($err !== '' ? " ({$err})" : '') . " از {$safeUrl}";
+            return false;
         }
         return false;
     }
@@ -848,11 +1009,22 @@ public static function validTypes(): array
     {
         // ===== Validate token format before patching =====
         if (!preg_match('/^[0-9]{8,10}:[a-zA-Z0-9_-]{35,}$/', $token)) {
-            throw new Exception("توکن نامعتبر است (فرمت تلگرام): {$token}");
+            throw new Exception("توکن نامعتبر است (فرمت تلگرام)");
         }
         // Validate bot username
         if (!preg_match('/^[a-z0-9_]{3,32}$/i', $botUsername)) {
             throw new Exception("نام کاربری ربات نامعتبر است: {$botUsername}");
+        }
+        if (!preg_match('/^[A-Za-z0-9_]+$/', $dbName)) {
+            throw new Exception("نام دیتابیس فاکسیما نامعتبر است");
+        }
+        $dbHost = (string)($cfg['db_host'] ?? 'localhost');
+        if (!preg_match('/^[A-Za-z0-9_.:-]+$/', $dbHost)) {
+            throw new Exception("هاست دیتابیس فاکسیما نامعتبر است");
+        }
+        $dbPort = (int)($cfg['db_port'] ?? 3306);
+        if ($dbPort < 1 || $dbPort > 65535) {
+            throw new Exception("پورت دیتابیس فاکسیما نامعتبر است");
         }
         
         $file = $botDir . '/config.php';
@@ -861,12 +1033,10 @@ public static function validTypes(): array
         // ===== فیکس: host و port کاملاً جدا =====
         // قبلاً «host:port» داخل $dbhost می‌نشست که هم mysqli_connect (آرگومان host)
         // و هم DSN می‌شکست؛ حالا $dbhost فقط هاست است و پورت در $dbport می‌رود.
-        $dbHost = (string)($cfg['db_host'] ?? 'localhost');
-        $dbPort = (int)($cfg['db_port'] ?? 3306);
         $values = [
             'dbname' => $dbName,
-            'usernamedb' => $cfg['db_user'],
-            'passworddb' => $cfg['db_pass'],
+            'usernamedb' => (string)($cfg['db_user'] ?? ''),
+            'passworddb' => (string)($cfg['db_pass'] ?? ''),
             'dbhost' => $dbHost,
             'dbport' => (string)$dbPort,
             'APIKEY' => $token,
@@ -881,12 +1051,29 @@ public static function validTypes(): array
                 $count++;
                 $q = $m[2][0];
                 $v = str_replace('\\', '\\\\', $val);
-                $v = $q === "'" ? str_replace("'", "\\'", $v) : str_replace('"', '\\"', $v);
+                if ($q === "'") {
+                    $v = str_replace("'", "\\'", $v);
+                } else {
+                    // در رشتهٔ double-quote، $ هم باید escape شود؛ وگرنه متغیر
+                    // PHP داخل config تفسیر می‌شود و مقدار/کد را می‌شکند.
+                    $v = str_replace(['"', '$'], ['\\"', '\\$'], $v);
+                }
                 return $m[1] . $q . $v . $q . $m[3];
             }, $new, 1);
         }
         if ($count < count($values)) throw new Exception("پچ config فاکسیما ناقص ماند ({$count}/" . count($values) . ") — نسخه ناسازگار؟");
-        if (file_put_contents($file, $new) === false) throw new Exception("خطا در نوشتن config.php فاکسیما");
+        // نوشتن اتمیک + lint: config نیمه‌خراب نباید روی دیسک بماند.
+        $tmp = $file . '.tmp-' . bin2hex(random_bytes(4));
+        if (file_put_contents($tmp, $new) === false) throw new Exception("خطا در نوشتن config.php فاکسیما");
+        @chmod($tmp, 0640);
+        if (!self::lintPhpFile($tmp)) {
+            @unlink($tmp);
+            throw new Exception("config.php فاکسیما پس از پچ از نظر PHP معتبر نیست؛ تغییر اعمال نشد");
+        }
+        if (!@rename($tmp, $file)) {
+            @unlink($tmp);
+            throw new Exception("جایگزینی config.php فاکسیما ناموفق بود");
+        }
     }
 
     /**
@@ -1014,38 +1201,67 @@ public static function validTypes(): array
     ): void {
         // ===== Validate token format before patching =====
         if (!preg_match('/^[0-9]{8,10}:[a-zA-Z0-9_-]{35,}$/', $token)) {
-            throw new Exception("توکن نامعتبر است (فرمت تلگرام): {$token}");
+            throw new Exception("توکن نامعتبر است (فرمت تلگرام)");
         }
         // Validate bot username
         if (!preg_match('/^[a-z0-9_]{3,32}$/i', $botUsername)) {
             throw new Exception("نام کاربری ربات نامعتبر است: {$botUsername}");
         }
+        if (!preg_match('/^[A-Za-z0-9_]+$/', $dbName)) {
+            throw new Exception("نام دیتابیس آپ‌تایم نامعتبر است");
+        }
+        $dbHost = (string)($cfg['db_host'] ?? 'localhost');
+        if (!preg_match('/^[A-Za-z0-9_.:-]+$/', $dbHost)) {
+            throw new Exception("هاست دیتابیس آپ‌تایم نامعتبر است");
+        }
+        $dbPort = (int)($cfg['db_port'] ?? 3306);
+        if ($dbPort < 1 || $dbPort > 65535) {
+            throw new Exception("پورت دیتابیس آپ‌تایم نامعتبر است");
+        }
         
         $file = $botDir . '/config.php';
         $raw = is_file($file) ? file_get_contents($file) : null;
         if ($raw === false || $raw === null) throw new Exception("config.php آپ‌تایم پیدا نشد");
-        $new = str_replace(
-            ['{BOT_TOKEN}', '{ADMIN_#ID}', '{BOT_USERNAME}', '{DOMAIN.COM/PATH/BOT}', '{BASE_URL}',
-                '{DB_HOST}', '{DB_PORT}', '{DATABASE_NAME}', '{DATABASE_USERNAME}', '{DATABASE_PASSWORD}'],
-            [
-                self::phpEscape($token),
-                self::phpEscape((string)$adminId),
-                self::phpEscape($botUsername),
-                self::phpEscape($domainPath),
-                self::phpEscape($baseUrl),
-                self::phpEscape((string)($cfg['db_host'] ?? 'localhost')),
-                self::phpEscape((string)($cfg['db_port'] ?? 3306)),
-                self::phpEscape($dbName),
-                self::phpEscape((string)($cfg['db_user'] ?? '')),
-                self::phpEscape((string)($cfg['db_pass'] ?? '')),
-            ],
-            $raw
-        );
-        if ($new === $raw) throw new Exception("هیچ جای‌گذاری در config.php آپ‌تایم پیدا نشد (نسخه ناسازگار؟)");
-        if (preg_match('/\{[A-Z_#.\/]+\}/', $new, $m)) {
-            throw new Exception("جای‌گذار جا‌مانده در config.php آپ‌تایم: " . $m[0]);
+        $known = ['{BOT_TOKEN}', '{ADMIN_#ID}', '{BOT_USERNAME}', '{DOMAIN.COM/PATH/BOT}', '{BASE_URL}',
+            '{DB_HOST}', '{DB_PORT}', '{DATABASE_NAME}', '{DATABASE_USERNAME}', '{DATABASE_PASSWORD}'];
+        $map = array_combine($known, [
+            self::phpEscape($token),
+            self::phpEscape((string)$adminId),
+            self::phpEscape($botUsername),
+            self::phpEscape($domainPath),
+            self::phpEscape($baseUrl),
+            self::phpEscape($dbHost),
+            self::phpEscape((string)$dbPort),
+            self::phpEscape($dbName),
+            self::phpEscape((string)($cfg['db_user'] ?? '')),
+            self::phpEscape((string)($cfg['db_pass'] ?? '')),
+        ]);
+        $new = strtr($raw, $map);
+        $found = false;
+        foreach ($known as $ph) {
+            if (substr_count($raw, $ph) > 0) { $found = true; break; }
         }
-        if (file_put_contents($file, $new) === false) throw new Exception("خطا در نوشتن config.php آپ‌تایم");
+        if (!$found) throw new Exception("هیچ جای‌گذاری در config.php آپ‌تایم پیدا نشد (نسخه ناسازگار؟)");
+        // فقط قالب خام را برای placeholder ناشناخته می‌سنجیم؛ مقدار مشروعِ رمز
+        // ممکن است شبیه {ABC} باشد و نباید ساخت را رد کند.
+        if (preg_match_all('/\{[A-Z][A-Z0-9_#.\/-]*\}/', $raw, $unknownPh)) {
+            foreach ($unknownPh[0] as $ph) {
+                if (!in_array($ph, $known, true)) {
+                    throw new Exception("جای‌گذار ناشناخته در config.php آپ‌تایم: {$ph}");
+                }
+            }
+        }
+        $tmp = $file . '.tmp-' . bin2hex(random_bytes(4));
+        if (file_put_contents($tmp, $new) === false) throw new Exception("خطا در نوشتن config.php آپ‌تایم");
+        @chmod($tmp, 0640);
+        if (!self::lintPhpFile($tmp)) {
+            @unlink($tmp);
+            throw new Exception("config.php آپ‌تایم پس از پچ از نظر PHP معتبر نیست؛ تغییر اعمال نشد");
+        }
+        if (!@rename($tmp, $file)) {
+            @unlink($tmp);
+            throw new Exception("جایگزینی config.php آپ‌تایم ناموفق بود");
+        }
     }
 
     /**
@@ -1064,6 +1280,48 @@ public static function validTypes(): array
         $v = str_replace(["\r\n", "\r", "\n", "\0"], ' ', $v);
         $v = preg_replace('/[\x00-\x1F\x7F]/u', '', $v) ?? $v;
         return addcslashes($v, "'\\");
+    }
+
+    /** escape برای نشستن داخل رشتهٔ دابل‌کوتیشن PHP (بدون interpolation) */
+    private static function phpDoubleEscape(string $v): string
+    {
+        $v = str_replace(["\r\n", "\r", "\n", "\0"], ' ', $v);
+        $v = preg_replace('/[\x00-\x1F\x7F]/u', '', $v) ?? $v;
+        return addcslashes($v, "\"\\$");
+    }
+
+    /**
+     * بررسی نحوی یک فایل PHP با php -l.
+     * اگر این هاست اجازهٔ اجرای پروسه ندهد، true برمی‌گرداند (مانع ساخت نمی‌شویم).
+     */
+    private static function lintPhpFile(string $file): bool
+    {
+        if (!is_file($file)) return false;
+        $cmd = escapeshellarg(self::phpBinary()) . ' -l ' . escapeshellarg($file) . ' 2>&1';
+        try {
+            $out = '';
+            if (function_exists('exec')) {
+                $lines = [];
+                $rc = 1;
+                @exec($cmd, $lines, $rc);
+                $out = implode("\n", $lines);
+                if (stripos($out, 'No syntax errors') !== false) return true;
+            } elseif (function_exists('shell_exec')) {
+                $out = (string)@shell_exec($cmd);
+                if (stripos($out, 'No syntax errors') !== false) return true;
+            } else {
+                return true;
+            }
+            // اگر خروجی صریحاً Parse error دارد ⇒ خراب است. اگر php-fpm یا
+            // باینری دیگری بود و پیام نامرتبط داد، ساخت را بی‌دلیل نمی‌شکنیم.
+            if (stripos($out, 'Parse error') !== false || stripos($out, 'Errors parsing') !== false) {
+                return false;
+            }
+            return true;
+        } catch (Throwable $e) {
+            return true;
+        }
+        return true;
     }
 
     /**

@@ -5,7 +5,7 @@
 # error_log$ → فایل‌های error_log بدون پسوند که table.php و برخی کرون‌ها می‌سازند
 # (قبلاً قابل دانلود بودند چون فقط \.log$ پوشش می‌داد)
 # info/hash.txt/json/lock → صف‌های زمان‌اجرا (cron/users.json، cron/info، cron.lock، hash.txt)
-<FilesMatch "(^\.|config\.php$|error_log$|^hash\.txt$|^info$|\.log$|\.sqlite$|\.sql$|\.bak$|\.env$|\.json$|\.lock$)">
+<FilesMatch "(^\.|config\.php$|config\.php\.|error_log$|^hash\.txt$|^info$|\.log$|\.sqlite$|\.sqlite3$|\.db$|\.sql$|\.sql\.gz$|\.bak$|\.env$|\.json$|\.lock$|\.pem$|\.key$|\.crt$|\.p12$|\.pfx$|\.zip$|\.tar$|\.gz$|\.tgz$)">
     Require all denied
 </FilesMatch>
 

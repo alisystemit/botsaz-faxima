@@ -4,7 +4,7 @@
 Options -Indexes
 
 # مسدودسازی فایل‌های حساس ریشه
-<FilesMatch "^(\.env|\.git|README|composer\.(json|lock)|config\.example\.php)">
+<FilesMatch "^(\.env.*|\.git.*|README.*|composer\.(json|lock)|config\.example\.php|config\.php\..*|.*\.(bak|db|sqlite|sqlite3|sql|sql\.gz|log|lock|ini|dist|pem|key|crt|p12|pfx|zip|tar|gz|tgz))$">
     Require all denied
 </FilesMatch>
 

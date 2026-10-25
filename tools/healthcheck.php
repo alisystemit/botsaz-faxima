@@ -115,6 +115,9 @@ echo "[2] بررسی پوشه‌ها...\n";
 // و فایل «لازم برای اجرا» هم همان است که ربات‌ساز هنگام ساخت می‌سنجد.
 $dirs = ['bots', 'data'];
 foreach (Manager::templates() as $tplKey => $tplSpec) {
+    // قالب «فهرست فقط» (runtime غیر PHP) عمداً روی سرور نیست و نباید healthcheck
+    // را قرمز کند؛ ساخته‌شدنش هم با این ربات‌ساز ممکن نیست.
+    if (!Manager::isBuildable($tplKey)) continue;
     $rel = 'templates/' . basename(Manager::templateDir($tplKey));
     if (is_dir(__DIR__ . '/../' . $rel)) {
         $need = (string)($tplSpec['autoload'] ?? 'vendor/autoload.php');

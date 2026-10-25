@@ -14,6 +14,11 @@
 خودش را از رجیستری `Manager::templates()` می‌سازد، پس قالبی که روی سرور ناقص باشد اصلاً
 در منو ظاهر نمی‌شود (به‌جای ساخت رباتی که ۵۰۰ می‌دهد).
 
+> 🕐 **PGClockBot** هم در فهرست ثبت شده، ولی **ساخت خودکار ندارد**: اپ پایتون
+> (aiogram + FastAPI) با PostgreSQL و پنل وب است و با مدل «کپی قالب PHP + پچ
+> `config.php` + وبهوک PHP» اجرا نمی‌شود. در منوی ساخت فقط دکمهٔ **راهنما** می‌گیرد
+> و نصبش جداگانه روی VPS انجام می‌شود: [docs/PGCLOCKBOT.md](docs/PGCLOCKBOT.md).
+
 ---
 
 ## محتویات فهرست
@@ -108,6 +113,7 @@ templates/
   uptime-bot-telegram/     → سورس ربات آپ‌تایم (https://github.com/alisystemit/uptime-bot-telegram)
   Pasargad Representatives' Bot Telegram/
                            → سورس پنل نمایندگان پاسارگاد، SQLite (https://github.com/alisystemit/Pasargad-Representatives-Bot-Telegram)
+  (pgclock)                → فهرست فقط: PGClockBot، پایتون/PostgreSQL — بدون ساخت خودکار (docs/PGCLOCKBOT.md)
 bots/<slug>/               → ربات‌های ساخته‌شده (کرون با secret محافظت می‌شود)
   config.php               → کانفیگ هر ربات — هرگز توسط git تأثیر نمی‌شود
   cron/                    → کرون‌های ربات (users.json, info, etc.)
@@ -1160,6 +1166,12 @@ bash tools/install.sh
 **افزودن قالب تازه = یک ورودی در همین آرایه.** نه `bot.php` را دست می‌زنید، نه `Nav.php` را.
 قالبی که پوشه یا فایل لازمش روی سرور نباشد، خودش از منو حذف می‌شود
 (`Manager::availableTypes()`) تا کاربر به دکمهٔ مرده نخورد.
+
+> قالب‌هایی که با مدل نصب این ربات‌ساز **سازگار نیستند** (مثل PGClockBot که
+> پایتون/PostgreSQL است) با `'buildable' => false` و `'runtime' => 'python'` ثبت
+> می‌شوند: فقط در فهرست/راهنمای منو دیده می‌شوند (`Manager::catalogTypes()`) و هیچ
+> مسیر ساخت، قیمت‌گذاری یا آپدیت سورس به آن‌ها نمی‌رسد. جزئیات:
+> [docs/PGCLOCKBOT.md](docs/PGCLOCKBOT.md).
 
 ### آنچه هنگام ساخت انجام می‌شود
 

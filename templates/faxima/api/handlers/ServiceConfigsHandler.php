@@ -80,8 +80,8 @@ final class ServiceConfigsHandler extends BaseHandler
             CURLOPT_TIMEOUT        => 10,
             CURLOPT_CONNECTTIMEOUT => 5,
             CURLOPT_USERAGENT      => 'Faoxima-Mini/1.0',
-            CURLOPT_SSL_VERIFYPEER => false,
-            CURLOPT_SSL_VERIFYHOST => 0,
+            CURLOPT_SSL_VERIFYPEER => function_exists('faoxima_ssl_verify') ? faoxima_ssl_verify() : true,
+            CURLOPT_SSL_VERIFYHOST => (function_exists('faoxima_ssl_verify') ? faoxima_ssl_verify() : true) ? 2 : 0,
             CURLOPT_HTTPHEADER     => ['Accept: */*'],
         ]);
         $body = curl_exec($ch);

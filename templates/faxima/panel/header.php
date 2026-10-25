@@ -6,6 +6,9 @@ if (session_status() === PHP_SESSION_NONE) {
     ini_set('session.cookie_httponly', '1');
     session_start();
 }
+if (empty($_SESSION['csrf_token'])) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
 
 // Panel version (read from the project root `version` file). Displayed in the
 // sidebar footer on every page. Always shown with a leading "v".
@@ -562,7 +565,7 @@ if (isset($pdo) && $pdo instanceof PDO) {
                 try { localStorage.setItem('faoxima_notif_seen', String(orderLatest)); } catch (e) {}
                 if (ticketsUnseen) {
                     ticketsUnseen = false;
-                    try { fetch('tickets.php?ajax=mark_ticket_seen', { method: 'POST', credentials: 'same-origin' }); } catch (e) {}
+                    try { fetch('tickets.php?ajax=mark_ticket_seen', { method: 'POST', credentials: 'same-origin', headers: { 'X-CSRF-Token': <?php echo json_encode((string)($_SESSION['csrf_token'] ?? '')); ?> } }); } catch (e) {}
                 }
                 orderSeen = orderLatest;
                 orderUnseen = false;
@@ -693,6 +696,30 @@ if (isset($pdo) && $pdo instanceof PDO) {
             });
         }
     }
+})();
+
+/* CSRF: همهٔ فرم‌های POST که فیلد توکن ندارند، هنگام ارسال توکن می‌گیرند.
+   فرم‌های حساس به‌صورت صریح هم توکن دارند؛ این لایه برای فرم‌های قدیمی/
+   داینامیک است و بدون JavaScript، گارد same-origin در سمت سرور کار می‌کند. */
+(function () {
+    var token = <?php echo json_encode((string)($_SESSION['csrf_token'] ?? '')); ?>;
+    if (!token) return;
+    function ensure(f) {
+        if (!f || f.tagName !== 'FORM') return;
+        var method = (f.getAttribute('method') || 'get').toLowerCase();
+        if (method !== 'post') return;
+        if (f.querySelector('input[name="_csrf"]')) return;
+        var i = document.createElement('input');
+        i.type = 'hidden';
+        i.name = '_csrf';
+        i.value = token;
+        f.appendChild(i);
+    }
+    document.addEventListener('DOMContentLoaded', function () {
+        var forms = document.querySelectorAll('form');
+        for (var i = 0; i < forms.length; i++) ensure(forms[i]);
+    });
+    document.addEventListener('submit', function (ev) { ensure(ev.target); }, true);
 })();
 </script>
 

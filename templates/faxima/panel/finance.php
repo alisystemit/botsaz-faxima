@@ -18,6 +18,7 @@ header('Expires: 0');
 require_once __DIR__ . '/../config.php';
 require_once __DIR__ . '/lib/icons.php';
 require_once __DIR__ . '/lib/textbot_edge.php';
+require_once __DIR__ . '/lib/csrf.php';
 require_once __DIR__ . '/../re/rx/function/database_helpers_1.php';
 
 $query = $pdo->prepare("SELECT * FROM admin WHERE username=:username");
@@ -28,6 +29,8 @@ if (!isset($_SESSION["user"]) || !$adminRow) {
     header('Location: login.php');
     exit;
 }
+
+fx_csrf_guard();
 
 
 $FIN_GROUPS = [

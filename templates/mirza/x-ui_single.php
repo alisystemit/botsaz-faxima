@@ -1,5 +1,6 @@
 <?php
 require_once 'config.php';
+require_once __DIR__ . '/ssl_verify.php';
 
 function panel_login_cookie($code_panel)
 {
@@ -118,7 +119,8 @@ function addClient($namepanel, $usernameac, $Expire, $Total, $Uuid, $Flow, $subi
         CURLOPT_CUSTOMREQUEST => 'POST',
         CURLOPT_POSTFIELDS => $configpanel,
         CURLOPT_COOKIEFILE => 'cookie.txt',
-        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_SSL_VERIFYPEER => mirza_ssl_verify(),
+        CURLOPT_SSL_VERIFYHOST => mirza_ssl_verify() ? 2 : 0,
         CURLOPT_HTTPHEADER => array(
             'Accept: application/json',
             'Content-Type: application/json',
@@ -147,7 +149,8 @@ function updateClient($namepanel, array $config, $uuid)
         CURLOPT_CUSTOMREQUEST => 'POST',
         CURLOPT_POSTFIELDS => $configpanel,
         CURLOPT_COOKIEFILE => 'cookie.txt',
-        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_SSL_VERIFYPEER => mirza_ssl_verify(),
+        CURLOPT_SSL_VERIFYHOST => mirza_ssl_verify() ? 2 : 0,
         CURLOPT_HTTPHEADER => array(
             'Accept: application/json',
             'Content-Type: application/json',
@@ -177,7 +180,8 @@ function ResetUserDataUsagex_uisin($usernamepanel, $namepanel)
         CURLOPT_CUSTOMREQUEST => 'POST',
         CURLOPT_POSTFIELDS => array(),
         CURLOPT_COOKIEFILE => 'cookie.txt',
-        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_SSL_VERIFYPEER => mirza_ssl_verify(),
+        CURLOPT_SSL_VERIFYHOST => mirza_ssl_verify() ? 2 : 0,
         CURLOPT_HTTPHEADER => array(
             'Accept: application/json',
             'Content-Type: application/json',

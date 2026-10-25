@@ -10,6 +10,7 @@ require_once __DIR__ . '/lib/date_filter.php';
 require_once __DIR__ . '/lib/status_filter.php';
 require_once __DIR__ . '/lib/search_filter.php';
 require_once __DIR__ . '/../function.php';
+require_once __DIR__ . '/lib/csrf.php';
 
 $query = $pdo->prepare("SELECT * FROM admin WHERE username=:username");
 $query->bindParam("username", $_SESSION["user"], PDO::PARAM_STR);
@@ -20,6 +21,9 @@ if (!isset($_SESSION["user"]) || !$result) {
     header('Location: login.php');
     return;
 }
+
+// همهٔ POSTها (حذف گروهی/تکی) باید CSRF معتبر داشته باشند.
+fx_csrf_guard();
 
 /* ---------- helpers ---------- */
 function fx_table_has_col(PDO $pdo, string $table, string $col): bool {
@@ -124,32 +128,39 @@ function fx_req_delete_tokens(PDO $pdo, array $requestedTokens): int {
 
 if (!empty($_POST['action']) && $_POST['action'] === 'bulk_delete') {
     $requestedTokens = $_POST['ids'] ?? [];
-    $deletedCount = fx_req_delete_tokens($pdo, is_array($requestedTokens) ? $requestedTokens : []);
+    if (!is_array($requestedTokens)) $requestedTokens = [];
+    $deletedCount = fx_req_delete_tokens($pdo, $requestedTokens);
     fx_bulk_delete_redirect('cancelService.php', count($requestedTokens), $deletedCount);
 }
 
-/* ---------- delete actions ---------- */
-// legacy: delete a cancel_service row
-if (isset($_GET['removeid']) && $_GET['removeid'] !== '') {
-    try {
-        $stmt = $pdo->prepare("DELETE FROM cancel_service WHERE id = :id");
-        $stmt->execute([':id' => (int)$_GET['removeid']]);
-    } catch (\Throwable $e) {}
+/* ---------- delete actions (POST + CSRF) ---------- */
+if ($_SERVER['REQUEST_METHOD'] === 'POST'
+    && (string)($_POST['_action'] ?? $_GET['_action'] ?? '') === 'cancel_delete') {
+    $pk = (string)($_POST['pk'] ?? $_GET['pk'] ?? '');
+    [$kind, $rawId] = array_pad(explode(':', $pk, 2), 2, '');
+    $id = (int)$rawId;
+    if ($id > 0) {
+        try {
+            if ($kind === 'pr') {
+                // فقط رکوردهای resolve‌شده (reject/expire) قابل پاک‌سازی‌اند.
+                $cur = $pdo->prepare("SELECT payment_Status FROM Payment_report WHERE id = :id LIMIT 1");
+                $cur->execute([':id' => $id]);
+                $st = strtolower((string)$cur->fetchColumn());
+                if (in_array($st, ['reject','rejected','expire','expired'], true)) {
+                    $pdo->prepare("DELETE FROM Payment_report WHERE id = :id")->execute([':id' => $id]);
+                }
+            } elseif ($kind === 'cs') {
+                $pdo->prepare("DELETE FROM cancel_service WHERE id = :id")->execute([':id' => $id]);
+            }
+        } catch (\Throwable $e) {}
+    }
     header("Location: cancelService.php");
     exit;
 }
-// delete a resolved (reject/expire) payment request record (cleanup only)
-if (isset($_GET['delpr']) && $_GET['delpr'] !== '') {
-    try {
-        $cur = $pdo->prepare("SELECT payment_Status FROM Payment_report WHERE id = :id LIMIT 1");
-        $cur->execute([':id' => (int)$_GET['delpr']]);
-        $st = strtolower((string)$cur->fetchColumn());
-        if (in_array($st, ['reject','rejected','expire','expired'], true)) {
-            $pdo->prepare("DELETE FROM Payment_report WHERE id = :id")->execute([':id' => (int)$_GET['delpr']]);
-        }
-    } catch (\Throwable $e) {}
-    header("Location: cancelService.php");
-    exit;
+// لینک‌های قدیمی GET دیگر حذف نمی‌کنند.
+if (isset($_GET['removeid']) || isset($_GET['delpr'])) {
+    http_response_code(405);
+    exit('این عملیات فقط با POST مجاز است.');
 }
 
 /* ---------- aggregate all requests ---------- */
@@ -190,7 +201,7 @@ try {
             'amount'  => (int)($r['price'] ?? 0),
             'date'    => (string)($r['time'] ?? ''),
             'stLabel' => $stLabel, 'stClass' => $stClass, 'stKey' => $stKey,
-            'del'     => in_array($stKey, ['reject','expire'], true) ? ('cancelService.php?delpr=' . (int)($r['id'] ?? 0)) : '',
+            'del'     => in_array($stKey, ['reject','expire'], true) ? ('pr:' . (int)($r['id'] ?? 0)) : '',
             'pk'      => 'pr:' . (int)($r['id'] ?? 0),
             'fdok'    => in_array(strtolower((string)($r['payment_Status'] ?? '')), ['reject', 'rejected', 'expire', 'expired'], true),
         ];
@@ -218,7 +229,7 @@ try {
             'amount'  => 0,
             'date'    => '',
             'stLabel' => $stLabel, 'stClass' => $stClass, 'stKey' => $stKey,
-            'del'     => 'cancelService.php?removeid=' . (int)($r['id'] ?? 0),
+            'del'     => 'cs:' . (int)($r['id'] ?? 0),
             'pk'      => 'cs:' . (int)($r['id'] ?? 0),
             'fdok'    => true,
         ];
@@ -356,7 +367,7 @@ $rows = array_slice($rows, ($reqPage - 1) * $reqPerPage, $reqPerPage);
 
             <div class="card">
                 <form method="POST" action="cancelService.php" id="bulk-form">
-                <input type="hidden" name="action" value="bulk_delete">
+                <input type="hidden" name="_csrf" value="<?php echo htmlspecialchars(fx_csrf_token(), ENT_QUOTES, 'UTF-8'); ?>">
                 <div class="table-wrap">
                     <table id="requestsTable" class="display app-table app-table--summary" style="width:100%">
                         <thead>
@@ -399,9 +410,13 @@ $rows = array_slice($rows, ($reqPage - 1) * $reqPerPage, $reqPerPage);
                                 <td data-label="وضعیت" data-filter-value="<?php echo htmlspecialchars($row['stLabel'], ENT_QUOTES, 'UTF-8'); ?>" data-summary="1"><span class="badge <?php echo $row['stClass']; ?>"><?php echo htmlspecialchars($row['stLabel'], ENT_QUOTES, 'UTF-8'); ?></span></td>
                                 <td data-label="عملیات" class="cell-actions">
                                     <?php if ($row['del'] !== ''): ?>
-                                        <a href="<?php echo htmlspecialchars($row['del'], ENT_QUOTES, 'UTF-8'); ?>" class="btn btn-sm btn-soft-danger" onclick="return confirm('این درخواست حذف شود؟')">
+                                        <?php /* بدون فرم تودرتو؛ دکمه با formaction همان فرم گروهی را با
+                                                   action اختصاصی خودش می‌فرستد و CSRF فرم را همراه دارد. */ ?>
+                                        <button type="submit"
+                                                formaction="cancelService.php?_action=cancel_delete&amp;pk=<?php echo htmlspecialchars(urlencode((string)$row['del']), ENT_QUOTES, 'UTF-8'); ?>"
+                                                class="btn btn-sm btn-soft-danger" onclick="return confirm('این درخواست حذف شود؟')">
                                             <?php echo icon('trash', 'svg-icon'); ?> حذف
-                                        </a>
+                                        </button>
                                     <?php else: ?>
                                         <span style="color:var(--text-muted); font-size:11px;">—</span>
                                     <?php endif; ?>
@@ -419,7 +434,7 @@ $rows = array_slice($rows, ($reqPage - 1) * $reqPerPage, $reqPerPage);
                     ?>
                 </div>
                 <div style="padding:12px 0;">
-                    <button type="submit" class="btn btn-soft-danger btn-sm js-bulk-delete-btn" style="display:none;" onclick="return confirm('آیا از حذف درخواست‌های انتخاب‌شده مطمئن هستید؟')">
+                    <button type="submit" name="action" value="bulk_delete" class="btn btn-soft-danger btn-sm js-bulk-delete-btn" style="display:none;" onclick="return confirm('آیا از حذف درخواست‌های انتخاب‌شده مطمئن هستید؟')">
                         <?php echo icon('trash', 'svg-icon'); ?> حذف انتخاب‌شده‌ها
                     </button>
                 </div>

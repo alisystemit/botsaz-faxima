@@ -488,16 +488,21 @@ class Payments
     public static function approveByAdmin(Store $store, int $id): ?array
     {
         self::ensureSchema($store);
-        $now = self::nowSql($store);
-        $st = $store->getPdo()->prepare(
-            "UPDATE payments SET status=?, paid_at={$now}, handled_at={$now} WHERE id=? AND status IN (?,?)"
-        );
-        $st->execute([self::ST_PAID, $id, self::ST_AWAIT_ADMIN, self::ST_AWAIT_RECEIPT]);
-        if ($st->rowCount() === 0) return null;
-        $p = self::getPayment($store, $id);
-        if (!$p) return null;
-        $p['grant_note'] = self::grant($store, $p);
-        return $p;
+        // تغییر وضعیت و grant باید اتمیک باشند. اگر grant خطا بدهد و ما commit
+        // کرده باشیم، ردیف paid می‌شود ولی سقف/ووچر اعمال نمی‌شود و تأیید بعدی
+        // هم rowCount=0 می‌بیند و دیگر جبران نمی‌کند.
+        return self::atomic($store, function () use ($store, $id): ?array {
+            $now = self::nowSql($store);
+            $st = $store->getPdo()->prepare(
+                "UPDATE payments SET status=?, paid_at={$now}, handled_at={$now} WHERE id=? AND status IN (?,?)"
+            );
+            $st->execute([self::ST_PAID, $id, self::ST_AWAIT_ADMIN, self::ST_AWAIT_RECEIPT]);
+            if ($st->rowCount() === 0) return null;
+            $p = self::getPayment($store, $id);
+            if (!$p) throw new Exception("پرداخت پس از تغییر وضعیت پیدا نشد");
+            $p['grant_note'] = self::grant($store, $p);
+            return $p;
+        });
     }
 
     /**
@@ -509,21 +514,44 @@ class Payments
     public static function markCryptoPaid(Store $store, int $id): ?array
     {
         self::ensureSchema($store);
-        $now = self::nowSql($store);
-        $st = $store->getPdo()->prepare(
-            "UPDATE payments SET status=?, paid_at={$now}, handled_at={$now} WHERE id=? AND status IN (?,?)"
-        );
-        $st->execute([self::ST_PAID, $id, self::ST_AWAIT_PAY, self::ST_PENDING]);
-        if ($st->rowCount() === 0) {
-            // اگر قبلاً پرداخت شده، گزارش وضعیت نهایی را برمی‌گردانیم (idempotent)
+        return self::atomic($store, function () use ($store, $id): ?array {
+            $now = self::nowSql($store);
+            $st = $store->getPdo()->prepare(
+                "UPDATE payments SET status=?, paid_at={$now}, handled_at={$now} WHERE id=? AND status IN (?,?)"
+            );
+            $st->execute([self::ST_PAID, $id, self::ST_AWAIT_PAY, self::ST_PENDING]);
+            if ($st->rowCount() === 0) {
+                // اگر قبلاً پرداخت شده، گزارش وضعیت نهایی را برمی‌گردانیم (idempotent)
+                $p = self::getPayment($store, $id);
+                if ($p && in_array($p['status'], [self::ST_PAID, self::ST_USED], true)) return $p;
+                return null;
+            }
             $p = self::getPayment($store, $id);
-            if ($p && in_array($p['status'], [self::ST_PAID, self::ST_USED], true)) return $p;
-            return null;
+            if (!$p) throw new Exception("پرداخت پس از تغییر وضعیت پیدا نشد");
+            $p['grant_note'] = self::grant($store, $p);
+            return $p;
+        });
+    }
+
+    /**
+     * اجرای یک بلوک در تراکنش دیتابیس مدیریتی.
+     * اگر PDO از قبل تراکنش باز داشته باشد، همان را ادامه می‌دهیم (nested ساده).
+     */
+    private static function atomic(Store $store, callable $fn)
+    {
+        $pdo = $store->getPdo();
+        $own = !$pdo->inTransaction();
+        if ($own) $pdo->beginTransaction();
+        try {
+            $result = $fn();
+            if ($own) $pdo->commit();
+            return $result;
+        } catch (Throwable $e) {
+            if ($own && $pdo->inTransaction()) {
+                try { $pdo->rollBack(); } catch (Throwable $ignored) {}
+            }
+            throw $e;
         }
-        $p = self::getPayment($store, $id);
-        if (!$p) return null;
-        $p['grant_note'] = self::grant($store, $p);
-        return $p;
     }
 
     /**

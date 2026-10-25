@@ -42,7 +42,52 @@ $user_ip = $_SERVER['REMOTE_ADDR'] ?? '';
 $texterrr = "";
 $ip_denied = false;
 
-if (isset($_POST['login'])) {
+// ===== محدودیت نرخ تلاش ورود =====
+// بدون این، رمز عبور ادمین با brute-force قابل حدس بود. ۷ تلاش ناموفق در
+// ۱۵ دقیقه بر اساس IP یا نام کاربری، ورود را موقتاً می‌بندد.
+$loginBlocked = false;
+$loginAttemptsReady = false;
+try {
+    if ($pdo instanceof PDO) {
+        $driver = (string)$pdo->getAttribute(PDO::ATTR_DRIVER_NAME);
+        if ($driver === 'sqlite') {
+            $pdo->exec("CREATE TABLE IF NOT EXISTS admin_login_attempts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ip TEXT NOT NULL,
+                username TEXT NOT NULL,
+                attempted_at INTEGER NOT NULL
+            )");
+            $pdo->exec("CREATE INDEX IF NOT EXISTS idx_login_ip ON admin_login_attempts(ip)");
+            $pdo->exec("CREATE INDEX IF NOT EXISTS idx_login_user ON admin_login_attempts(username)");
+        } else {
+            $pdo->exec("CREATE TABLE IF NOT EXISTS admin_login_attempts (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                ip VARCHAR(45) NOT NULL,
+                username VARCHAR(100) NOT NULL,
+                attempted_at INT NOT NULL,
+                KEY idx_login_ip (ip),
+                KEY idx_login_user (username)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+        }
+        $loginAttemptsReady = true;
+        $windowStart = time() - 900;
+        $st = $pdo->prepare("SELECT COUNT(*) FROM admin_login_attempts WHERE attempted_at >= ? AND (ip = ? OR username = ?)");
+        $st->execute([$windowStart, (string)$user_ip, (string)($_POST['username'] ?? '')]);
+        if ((int)$st->fetchColumn() >= 7) {
+            $loginBlocked = true;
+            $texterrr = 'تلاش‌های ناموفق زیاد است. لطفاً ۱۵ دقیقه بعد دوباره تلاش کنید.';
+        }
+        // پاک‌سازی دوره‌ای رکوردهای قدیمی (بدون cron)
+        if (random_int(1, 50) === 1) {
+            $pdo->prepare("DELETE FROM admin_login_attempts WHERE attempted_at < ?")->execute([time() - 86400]);
+        }
+    }
+} catch (\Throwable $e) {
+    // اگر ساخت جدول ممکن نبود، ورود را قفل نمی‌کنیم.
+    $loginAttemptsReady = false;
+}
+
+if (isset($_POST['login']) && !$loginBlocked) {
     $username = isset($_POST['username']) ? trim((string)$_POST['username']) : '';
     $password = isset($_POST['password']) ? (string)$_POST['password'] : '';
 
@@ -99,6 +144,12 @@ if (isset($_POST['login'])) {
 
             session_regenerate_id(true);
             $_SESSION["user"] = $result["username"];
+            if ($loginAttemptsReady) {
+                try {
+                    $pdo->prepare("DELETE FROM admin_login_attempts WHERE ip = ? OR username = ?")
+                        ->execute([(string)$user_ip, (string)$username]);
+                } catch (\Throwable $e) { /* ورود نباید به‌خاطر پاک‌سازی fail شود */ }
+            }
 
 
             session_write_close();
@@ -143,6 +194,15 @@ if (isset($_POST['login'])) {
         }
     } else {
         $texterrr = 'نام کاربری یا رمز عبور خالی است.';
+    }
+
+    if ($texterrr !== '' && $loginAttemptsReady && !$ip_denied) {
+        try {
+            $pdo->prepare("INSERT INTO admin_login_attempts (ip, username, attempted_at) VALUES (?, ?, ?)")
+                ->execute([(string)$user_ip, (string)$username, time()]);
+            // تأخیر کوچک برای کند کردن brute-force (نه جایگزین محدودیت)
+            usleep(250000);
+        } catch (\Throwable $e) { /* ignore */ }
     }
 }
 ?>

@@ -1720,6 +1720,7 @@ if ($datain == "settimecornremove" && $adminrulecheck['rule'] == "administrator"
         $response = false;
         $httpCode = null;
 
+        $fxVerifyTls = function_exists('faoxima_ssl_verify') ? faoxima_ssl_verify() : true;
         if (function_exists('curl_init')) {
             $curlHandle = @curl_init($url);
             if ($curlHandle !== false) {
@@ -1728,8 +1729,8 @@ if ($datain == "settimecornremove" && $adminrulecheck['rule'] == "administrator"
                     CURLOPT_TIMEOUT => 20,
                     CURLOPT_CONNECTTIMEOUT => 10,
                     CURLOPT_FOLLOWLOCATION => true,
-                    CURLOPT_SSL_VERIFYPEER => false,
-                    CURLOPT_SSL_VERIFYHOST => false,
+                    CURLOPT_SSL_VERIFYPEER => $fxVerifyTls,
+                    CURLOPT_SSL_VERIFYHOST => $fxVerifyTls ? 2 : 0,
                 ]);
                 $response = curl_exec($curlHandle);
                 if ($response === false) {
@@ -1747,8 +1748,8 @@ if ($datain == "settimecornremove" && $adminrulecheck['rule'] == "administrator"
                     'timeout' => 20,
                 ],
                 'ssl' => [
-                    'verify_peer' => false,
-                    'verify_peer_name' => false,
+                    'verify_peer' => $fxVerifyTls,
+                    'verify_peer_name' => $fxVerifyTls,
                 ],
             ]);
             $response = @file_get_contents($url, false, $streamContext);

@@ -26,13 +26,21 @@ $store = new Store($cfg['manager_db'], $cfg);
 $args = array_slice($argv, 1);
 $all = in_array('--all', $args, true);
 $args = array_values(array_filter($args, fn($a) => $a !== '--all'));
-$types = $all ? array_keys(Manager::templates()) : [$args[0] ?? 'faxima'];
+$types = $all ? array_keys(Manager::buildableTypes()) : [$args[0] ?? 'faxima'];
 $slugArg = $all ? ($args[0] ?? null) : ($args[1] ?? null);
 
 $unknown = array_values(array_filter($types, fn($t) => Manager::templateSpec($t) === null));
 if (!empty($unknown)) {
     echo "❌ Unknown bot type(s): " . implode(', ', $unknown) . "\n";
-    echo "   Available: " . implode(', ', array_keys(Manager::templates())) . "\n";
+    echo "   Available: " . implode(', ', array_keys(Manager::buildableTypes())) . "\n";
+    exit(1);
+}
+// قالب «فهرست فقط» (PGClockBot) با این ربات‌ساز ساختنی نیست؛ شبیه‌سازی نصبش
+// فقط یک خطای گمراه‌کننده می‌دهد. صریح رد شود.
+$notBuildable = array_values(array_filter($types, fn($t) => !Manager::isBuildable($t)));
+if ($notBuildable !== []) {
+    echo "❌ Not buildable with this builder: " . implode(', ', $notBuildable) . "\n";
+    echo "   Buildable: " . implode(', ', array_keys(Manager::buildableTypes())) . "\n";
     exit(1);
 }
 
