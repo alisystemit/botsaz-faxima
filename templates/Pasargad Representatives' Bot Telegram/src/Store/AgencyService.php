@@ -107,29 +107,20 @@ final class AgencyService
      * بدون این اکانت، خرید «پنل نمایندگی» قابل اجرا نیست — ولی خرید
      * «شارژ پنل» کار می‌کند چون از اکانت خودِ نماینده استفاده می‌کند.
      *
-     * اولویت با **کلید پنلی است که خریدار وصل کرده**؛ اگر نداشت، با کلید
-     * سراسریِ ربات (`panel.api_key`) ساخته می‌شود تا خریدارِ بدون پنل هم
-     * بتواند بخرد. رمز عبور دیگر هیچ‌جا در این مسیر پذیرفته نمی‌شود.
+     * از API Keyای که سوپر ادمین در تنظیمات ربات ذخیره کرده استفاده می‌شود.
      *
      * @return array{0:string, 1:string}|null [authUsername, apiKey]
      */
     private function ownerCredentials(): ?array
     {
-        if ($this->creator !== null) {
-            $credentials = $this->access->credentialsOf($this->creator);
+        $botConfig = new BotConfig();
+        $apiKey = $botConfig->ownerApiKey();
 
-            if ($credentials === null) {
-                return null;
-            }
-
-            // در مسیر کلید، نام کاربری بی‌معنی است؛ خودِ کلید نقش را دارد و
-            // `panelClient()` آن را به‌عنوان توکن ثابت ست می‌کند.
-            return ['api', $credentials['credential']];
+        if (!empty($apiKey)) {
+            return ['api', $apiKey];
         }
 
-        $globalKey = trim((string) Config::str('panel.api_key', ''));
-
-        return $globalKey === '' ? null : ['api', $globalKey];
+        return null;
     }
 
     /**
@@ -143,21 +134,23 @@ final class AgencyService
             return ['ok' => true, 'message' => ''];
         }
 
-        if ($this->creator !== null) {
-            // کاربر پنل وصل کرده ولی اطلاعاتش ناقص است — پیام باید همان
-            // را بگوید، نه اینکه سراغ تنظیمات سراسری برود.
+        if (empty((new BotConfig())->ownerApiKey())) {
             return [
                 'ok'      => false,
-                'message' => 'پنلی که به حساب شما وصل است اطلاعات ورود کاملی ندارد. '
-                    . 'با دکمهٔ «➕ اتصال پنل جدید» دوباره آدرس و رمز یا کلید API را ثبت کنید.',
+                'message' => '⛔️🔧 خرید پنل نمایندگی موقتاً در دسترس نیست! 😔'
+                    . "\n\nکلید سازندهٔ پنل تنظیم نشده است."
+                    . "\n\nسوپر ادمین باید:"
+                    . "\n1️⃣ از منوی «⚙️ تنظیمات» → «🔧 تنظیمات Pasargad» وارد شود"
+                    . "\n2️⃣ گزینه «🔑 کلید سازندهٔ پنل» را انتخاب کند"
+                    . "\n3️⃣ کلید API پنل مرکزی را وارد و تست کند"
+                    . "\n\nپس از تأیید، سیستم آماده ساخت پنل نمایندگی خواهد بود! ✅",
             ];
         }
 
         return [
             'ok'      => false,
-            'message' => 'کلید سازندهٔ پنل تنظیم نشده است. یکی از این دو لازم است:'
-                . "\n• کاربر یک پنل را با کلید API به ربات وصل کند، یا"
-                . "\n• در <code>config.php</code> مقدار <code>panel.api_key</code> تنظیم شود.",
+            'message' => 'کلید API ذخیره شده معتبر نیست یا منقضی شده است.'
+                . "\nلطفاً سوپر ادمین دوباره کلید API را در تنظیمات به‌روزرسانی کند.",
         ];
     }
 
@@ -521,7 +514,7 @@ final class AgencyService
         // یک مرحلهٔ تازه و قابل‌شکست است، پس «ساخت شد ولی بعدش شکست خورد» به
         // مسیری تکرارشونده تبدیل شده که هر بار رمز را خراب می‌کرد.
         if ($recovered) {
-            $existing = $panels->findByPanelUsername($username);
+            $existing = $panels->findByPanelUsername($username, $createdOnBaseUrl);
             $stored   = $existing === null ? '' : $panels->plainPassword($existing);
 
             if ($stored !== '') {
@@ -534,7 +527,15 @@ final class AgencyService
             }
         }
 
-        $panelId = $panels->upsertFromPanel($userId, $username, $password, $admin, PanelRepository::SOURCE_BOT);
+        $panelId = $panels->upsertFromPanel(
+            $userId,
+            $username,
+            $password,
+            $admin,
+            PanelRepository::SOURCE_BOT,
+            [],
+            $createdOnBaseUrl
+        );
 
         $panels->update($panelId, [
             'granted_volume'   => $panelBytes,

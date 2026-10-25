@@ -30,11 +30,12 @@ final class Settings
 
     public function get(string $key, ?string $default = null): ?string
     {
-        if (self::$cache === null) {
-            $this->load();
-        }
+        // مستقیم از دیتابیس خوانده می‌شود تا مقدار همیشه به‌روز باشد.
+        // کش استاتیک قبلی باعث می‌شد بعد از set در یک درخواست، در
+        // درخواست بعدی مقدار قدیمی (خالی) برگردد.
+        $row = $this->db->first('SELECT value FROM settings WHERE key = ?', [$key]);
 
-        $value = self::$cache[$key] ?? null;
+        $value = $row['value'] ?? null;
 
         return $value === null ? $default : (string) $value;
     }
@@ -68,6 +69,15 @@ final class Settings
             $this->load();
         }
         self::$cache[$key] = $value;
+    }
+
+    public function delete(string $key): void
+    {
+        $this->db->run('DELETE FROM settings WHERE key = ?', [$key]);
+
+        if (self::$cache !== null) {
+            unset(self::$cache[$key]);
+        }
     }
 
     /**

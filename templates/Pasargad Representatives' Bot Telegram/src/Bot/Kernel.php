@@ -19,6 +19,7 @@ use Pasargad\Store\TicketRepository;
 use Pasargad\Store\TestConfigRepository;
 use Pasargad\Store\UserRepository;
 use Pasargad\Support\Config;
+use Pasargad\Support\Db;
 use Pasargad\Support\ErrorHandler;
 use Pasargad\Support\Invoice;
 use Pasargad\Support\Logger;
@@ -546,6 +547,14 @@ final class Kernel
         'admin_rules',
         'admin_broadcast',
         'admin_text',
+        'admin_payment_card',
+        'admin_payment_owner',
+        'admin_payment_bank',
+        'admin_autocard_api_url',
+        'admin_autocard_api_key',
+        'admin_autocard_card',
+        'admin_nowpayments_api_key',
+        'admin_nowpayments_ipn_secret',
         'admin_wallet',
         'admin_testconfig',
         'admin_panel_transfer',
@@ -1199,22 +1208,28 @@ final class Kernel
                 }
 
                 // رفع Race Condition: استفاده از transaction برای atomicity
+                //
+                // ⚠️ قبلاً `Db::instance()` بدون import به `Pasargad\Bot\Db` اشاره
+                // می‌کرد و متد `fetchOne()` هم وجود نداشت؛ نتیجه Fatal Error بود
+                // که با `catch (\Exception)` گرفته نمی‌شد. حالا هم کلاس درست
+                // import شده، هم متد `first()` استفاده می‌شود و هم خطای
+                // `\Throwable` گرفته می‌شود.
                 try {
                     $db = Db::instance();
-                    $db->transaction(function () use ($db, $configId, $seconds) {
+                    $db->transaction(function () use ($db, $configId, $seconds, $user): void {
                         // بررسی کنتورل: آیا کانفیگ توسط کاربر دیگری تغییر نیافته؟
-                        $config = $db->fetchOne(
+                        $config = $db->first(
                             'SELECT id, user_id, is_auto_delete FROM test_configs WHERE id = ?',
                             [$configId]
                         );
-                        
-                        if (!$config) {
-                            throw new \Exception('کانفیگ تست یافت نشد.');
+
+                        if ($config === null || (int) ($config['user_id'] ?? 0) !== (int) ($user['id'] ?? 0)) {
+                            throw new \RuntimeException('کانفیگ تست یافت نشد.');
                         }
-                        
+
                         // اگر قبلاً auto_delete فعال شده، دوباره set نشود
                         if ((int) ($config['is_auto_delete'] ?? 0) === 1) {
-                            throw new \Exception('این کانفیگ قبلاً برای حذف خودکار تنظیم شده است.');
+                            throw new \RuntimeException('این کانفیگ قبلاً برای حذف خودکار تنظیم شده است.');
                         }
 
                         $this->testRepo->update($configId, [
@@ -1222,7 +1237,7 @@ final class Kernel
                             'auto_delete_at' => time() + $seconds,
                         ]);
                     });
-                } catch (\Exception $e) {
+                } catch (\Throwable $e) {
                     $this->bot->sendMessage($chatId, '⚠️ خطا: ' . $e->getMessage());
                     return true;
                 }
@@ -1390,8 +1405,7 @@ final class Kernel
                 }
 
                 $this->sessions->clear($telegramId);
-                $settings = new \Pasargad\Store\Settings();
-                $settings->set('payment_card_number', $card);
+                (new \Pasargad\Store\BotConfig())->setCardNumber($card);
                 $this->bot->sendMessage($chatId, '✅ شماره کارت ذخیره شد: ' . \Pasargad\Support\Str::maskCardNumber($card));
                 return true;
 
@@ -1409,8 +1423,7 @@ final class Kernel
                 }
 
                 $this->sessions->clear($telegramId);
-                $settings = new \Pasargad\Store\Settings();
-                $settings->set('payment_card_owner', $owner);
+                (new \Pasargad\Store\BotConfig())->setCardOwner($owner);
                 $this->bot->sendMessage($chatId, '✅ نام صاحب کارت ذخیره شد.');
                 return true;
 
@@ -1428,9 +1441,98 @@ final class Kernel
                 }
 
                 $this->sessions->clear($telegramId);
-                $settings = new \Pasargad\Store\Settings();
-                $settings->set('payment_card_bank', $bank);
+                (new \Pasargad\Store\BotConfig())->setCardBank($bank);
                 $this->bot->sendMessage($chatId, '✅ نام بانک ذخیره شد.');
+                return true;
+
+            case 'admin_autocard_api_url':
+                if ($update->command() === 'cancel' || $update->command() === 'start') {
+                    $this->sessions->clear($telegramId);
+                    $this->bot->sendMessage($chatId, '❌ لغو شد.');
+                    return true;
+                }
+
+                $url = trim($text);
+                if ($url === '' || !filter_var($url, FILTER_VALIDATE_URL)) {
+                    $this->bot->sendMessage($chatId, '⚠️ آدرس API معتبر نیست. با https:// شروع کنید.');
+                    return true;
+                }
+
+                $this->sessions->clear($telegramId);
+                (new \Pasargad\Store\BotConfig())->setAutocardApiUrl($url);
+                $this->bot->sendMessage($chatId, '✅ آدرس API استعلام ذخیره شد.');
+                return true;
+
+            case 'admin_autocard_api_key':
+                if ($update->command() === 'cancel' || $update->command() === 'start') {
+                    $this->sessions->clear($telegramId);
+                    $this->bot->sendMessage($chatId, '❌ لغو شد.');
+                    return true;
+                }
+
+                $apiKey = trim($text);
+                if ($apiKey === '') {
+                    $this->bot->sendMessage($chatId, '⚠️ کلید API نمی‌تواند خالی باشد.');
+                    return true;
+                }
+
+                $this->sessions->clear($telegramId);
+                (new \Pasargad\Store\BotConfig())->setAutocardApiKey($apiKey);
+                $this->bot->sendMessage($chatId, '✅ کلید API ذخیره شد.');
+                return true;
+
+            case 'admin_autocard_card':
+                if ($update->command() === 'cancel' || $update->command() === 'start') {
+                    $this->sessions->clear($telegramId);
+                    $this->bot->sendMessage($chatId, '❌ لغو شد.');
+                    return true;
+                }
+
+                $card = preg_replace('/\D/', '', trim($text));
+                if ($card !== '' && strlen($card) !== 16) {
+                    $this->bot->sendMessage($chatId, '⚠️ شماره کارت باید ۱۶ رقم باشد (یا برای استفاده از کارت دستی، /cancel بزنید).');
+                    return true;
+                }
+
+                $this->sessions->clear($telegramId);
+                (new \Pasargad\Store\BotConfig())->setAutocardCardNumber($card);
+                $this->bot->sendMessage($chatId, '✅ شماره کارت خودکار ذخیره شد.');
+                return true;
+
+            case 'admin_nowpayments_api_key':
+                if ($update->command() === 'cancel' || $update->command() === 'start') {
+                    $this->sessions->clear($telegramId);
+                    $this->bot->sendMessage($chatId, '❌ لغو شد.');
+                    return true;
+                }
+
+                $apiKey = trim($text);
+                if ($apiKey === '') {
+                    $this->bot->sendMessage($chatId, '⚠️ کلید API نمی‌تواند خالی باشد.');
+                    return true;
+                }
+
+                $this->sessions->clear($telegramId);
+                (new \Pasargad\Store\BotConfig())->setNowpaymentsApiKey($apiKey);
+                $this->bot->sendMessage($chatId, '✅ کلید API NowPayments ذخیره شد.');
+                return true;
+
+            case 'admin_nowpayments_ipn_secret':
+                if ($update->command() === 'cancel' || $update->command() === 'start') {
+                    $this->sessions->clear($telegramId);
+                    $this->bot->sendMessage($chatId, '❌ لغو شد.');
+                    return true;
+                }
+
+                $secret = trim($text);
+                if ($secret === '') {
+                    $this->bot->sendMessage($chatId, '⚠️ IPN Secret نمی‌تواند خالی باشد.');
+                    return true;
+                }
+
+                $this->sessions->clear($telegramId);
+                (new \Pasargad\Store\BotConfig())->setNowpaymentsIpnSecret($secret);
+                $this->bot->sendMessage($chatId, '✅ IPN Secret ذخیره شد.');
                 return true;
 
             // ⚠️ مراحل `panel:username` و `panel:password` عمداً حذف شدند.
@@ -3327,7 +3429,7 @@ final class Kernel
         // حجم می‌گیرد — در حالی که max_per_user = 1 است.
         // ------------------------------------------------------------------
         try {
-            $this->orders->transaction(function () use ($user, $package, $resolvedPanelId, $discount, $listPrice, $finalPrice, &$order): void {
+            $this->orders->transaction(function () use ($user, $package, $resolvedPanelId, $discount, $listPrice, $finalPrice, $loyaltyExtra, $redeemPoints, &$order): void {
                 $maxPerUser = (int) $package['max_per_user'];
 
                 if ($maxPerUser > 0) {
@@ -3355,23 +3457,38 @@ final class Kernel
                     'discount_toman' => (int) $discount['discount'],
                     'coupon_code'   => $discount['code'] !== '' ? (string) $discount['code'] : null,
                     'referred_by'   => $discount['referral'] !== '' ? (string) $discount['referral'] : null,
+                    'loyalty_points_used' => $loyaltyExtra > 0 ? $redeemPoints : 0,
                     'panel_id'      => $resolvedPanelId > 0 ? $resolvedPanelId : null,
                     'status'        => OrderRepository::STATUS_CREATED,
                 ]);
 
                 // مصرف کد فقط حالا که سفارش واقعاً ساخته شد.
                 if ((int) $discount['discount'] > 0 && $discount['coupon_id'] > 0) {
-                    $this->discounts()->consumeCoupon(
+                    $consumed = $this->discounts()->consumeCoupon(
                         (int) $discount['coupon_id'],
                         (int) $user['id'],
                         (int) $order['id'],
                         (int) $discount['discount']
                     );
 
+                    // اگر بین quote و این لحظه ظرفیت/سقف کاربر پر شده باشد،
+                    // نباید سفارش با تخفیف ثبت شود. throw کل تراکنش را
+                    // برمی‌گرداند (شامل خود سفارش).
+                    if (!$consumed) {
+                        throw new ShopException('کد تخفیف دیگر قابل استفاده نیست؛ لطفاً دوباره تلاش کنید.');
+                    }
+
                     // کد تخفیف یک‌بارمصرف است (مگر per_user_limit بیشتر باشد)، پس
                     // بعد از مصرف از کاربر برداشته می‌شود تا روی خرید بعدی دوباره
                     // اعمال نشود.
                     $this->users->clearCouponCode((int) $user['id']);
+                }
+
+                // کسر امتیاز هم داخل همان تراکنش و به‌صورت شرطی انجام می‌شود؛
+                // وگرنه دو سفارش هم‌زمان هر دو تخفیف وفاداری می‌گرفتند.
+                if ($loyaltyExtra > 0
+                    && !$this->users->deductLoyaltyPoints((int) $user['id'], $redeemPoints)) {
+                    throw new ShopException('امتیاز وفاداری کافی نیست؛ لطفاً دوباره تلاش کنید.');
                 }
             });
         } catch (ShopException $e) {
@@ -3382,10 +3499,6 @@ final class Kernel
 
         if ($order === null) {
             return;
-        }
-
-        if ($loyaltyExtra > 0) {
-            $this->users->deductLoyaltyPoints((int) $user['id'], $redeemPoints);
         }
 
         $this->users->refreshOrderStats((int) $user['id']);
@@ -3413,13 +3526,14 @@ final class Kernel
             $quote = $this->discounts()->quote($code, $userId, $listPrice);
 
             if ($quote['ok'] ?? false) {
-                $bind = $this->discounts()->referrals()->findByReferee($userId);
-
+                // تخفیف معرفی اعمال نشده (کد تخفیف برنده است)، پس نباید
+                // `referred_by` پر شود؛ وگرنه تخفیف معرفی برای همیشه
+                // «مصرف‌شده» حساب می‌شود.
                 return [
                     'discount'  => (int) $quote['discount'],
                     'code'      => $code,
                     'coupon_id' => (int) $quote['coupon']['id'],
-                    'referral'  => $bind !== null ? (string) $bind['code'] : '',
+                    'referral'  => '',
                 ];
             }
 
@@ -3595,7 +3709,33 @@ final class Kernel
             return;
         }
 
-        $paid = $this->orders->markPaid((int) $order['id'], self::METHOD_WALLET, (string) $order['code']);
+        $paid = false;
+
+        try {
+            $paid = $this->orders->markPaid((int) $order['id'], self::METHOD_WALLET, (string) $order['code']);
+        } catch (\Throwable $e) {
+            Logger::error('Wallet payment markPaid threw', [
+                'order_id' => (int) $order['id'],
+                'error'    => $e->getMessage(),
+            ]);
+
+            $this->users->adjustWallet(
+                (int) $user['id'],
+                $price,
+                'بازگشت موجودی — خطا در ثبت پرداخت کیف پول',
+                0,
+                'manual'
+            );
+
+            $this->bot->sendMessage($chatId, implode("\n", [
+                '⚠️ <b>پرداخت ثبت نشد</b>',
+                '',
+                'موجودی کیف پول شما دست‌نخورده برگشت. لطفاً دوباره تلاش کنید یا با',
+                'پشتیبانی تماس بگیرید.',
+            ]));
+
+            return;
+        }
 
         if (!$paid) {
             // ⚠️ موجودی کم شد ولی سفارش پرداخت‌شده علامت نخورد ⇒ پول گم شده.
@@ -3620,11 +3760,23 @@ final class Kernel
 
         $this->users->refreshOrderStats((int) $user['id']);
 
-        $fresh  = $this->orders->find((int) $order['id']);
-        $result = $fresh === null
-            ? ['ok' => false, 'message' => 'سفارش یافت نشد.']
-            : $this->provisioner->provision($fresh);
+        // همان مسیر «پس از پرداخت»: اعلان کاربر، امتیاز وفاداری، هشدار خطای
+        // ادمین و احترام به `autoApply` فقط همان‌جا انجام می‌شود. قبلاً اینجا
+        // مستقیم `provision()` صدا زده می‌شد و همه دور زده می‌شدند.
+        $result = ['ok' => false, 'message' => 'سفارش یافت نشد.'];
 
+        try {
+            $result = $this->payments->applyAfterPayment((int) $order['id']);
+        } catch (\Throwable $e) {
+            Logger::error('Wallet payment applyAfterPayment threw', [
+                'order_id' => (int) $order['id'],
+                'error'    => $e->getMessage(),
+            ]);
+        }
+
+        // پیام نهایی همیشه فرستاده می‌شود چون موجودیِ باقی‌مانده را اعلام
+        // می‌کند؛ `applyAfterPayment` هم پیام «اجرا شد» را می‌فرستد، ولی این
+        // یکی اطلاعات کیف پول را دارد.
         $this->bot->sendMessage(
             $chatId,
             (($result['ok'] ?? false) ? '🎉 ' : '⏳ ')

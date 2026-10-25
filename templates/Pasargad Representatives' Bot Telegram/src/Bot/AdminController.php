@@ -269,7 +269,21 @@ final class AdminController
             case 'admin.settings.autocard':
                 // فقط صفحهٔ کارت خودکار؛ فراخوانی `showGateways` اینجا یعنی
                 // دو پیام پشت‌سرهم و دو کیبورد که آخری روی اولی می‌افتد.
-                (new PasarguardSettings($this->bot))->autocardSettings($chatId, (string) ($data['step'] ?? null));
+                (new PasarguardSettings($this->bot))->autocardSettings(
+                    $chatId,
+                    $update->userId(),
+                    $this->sessions,
+                    (string) ($data['step'] ?? null)
+                );
+                break;
+
+            case 'admin.settings.nowpayments':
+                (new PasarguardSettings($this->bot))->nowpaymentsSettings(
+                    $chatId,
+                    $update->userId(),
+                    $this->sessions,
+                    (string) ($data['step'] ?? null)
+                );
                 break;
 
             // ---------------- درگاه‌های پرداخت ----------------
@@ -2120,11 +2134,11 @@ final class AdminController
             $lines[] = ($isOn ? '🟢' : '🔴') . ' <b>' . Str::escape($gateway->title()) . '</b> ✨';
 
             if ($name === 'card2card') {
-                $card = Config::str('store.card_number');
+                $card = (new \Pasargad\Store\BotConfig())->cardNumber();
                 $lines[] = '   🏦 شماره کارت: ' . ($card !== '' ? '<code>' . Str::escape($card) . '</code> ✅' : '<i>⚠️ تنظیم نشده</i>');
             } elseif ($name === 'autocard') {
                 $card = \Pasargad\Payment\AutoCardGateway::cardNumber();
-                $api  = trim(Config::str('autocard.api_url', ''));
+                $api  = trim((new \Pasargad\Store\BotConfig())->autocardApiUrl());
                 $lines[] = '   🏦 شماره کارت: ' . ($card !== '' ? '<code>' . Str::escape($card) . '</code> ✅' : '<i>⚠️ تنظیم نشده</i>');
                 $lines[] = '   🔌 استعلام: ' . ($api !== '' ? '<code>' . Str::escape(Str::truncate($api, 40)) . '</code> ✅' : '<i>⚠️ api_url تنظیم نشده</i>');
                 $lines[] = '   💡 مبالغ یکتا + تأیید خودکار، بدون رسید دستی 🤖';
@@ -3718,7 +3732,6 @@ final class AdminController
         $keyboard = Keyboard::rows([
             [
                 ['text' => '🔄 بروزرسانی همه', 'data' => BotApi::encodeData('admin.bulk_ops.execute', ['op' => 'sync_all'])],
-                ['text' => '♻️ ریست وضعیت', 'data' => BotApi::encodeData('admin.bulk_ops.execute', ['op' => 'reset_status'])],
             ],
             Keyboard::back(BotApi::encodeData('admin.home'), '🛠 پنل مدیریت'),
         ]);
@@ -3730,28 +3743,30 @@ final class AdminController
 
     private function executeBulkOp(int $chatId, string $op): void
     {
-        $labels = [
-            'sync_all'     => '🔄 بروزرسانی همه',
-            'reset_status' => '♻️ ریست وضعیت',
-        ];
+        // ⚠️ هر عملیاتی که اینجا پیاده‌سازی نشده باشد باید صریحاً «انجام نشد»
+        // بگوید. قبلاً شاخهٔ else پیام «انجام شد» می‌فرستاد و ادمین فکر
+        // می‌کرد وضعیت‌ها ریست شده‌اند، در حالی که هیچ تغییری اعمال نشده بود.
+        if ($op !== 'sync_all') {
+            $this->bot->sendMessage(
+                $chatId,
+                '⚠️ این عملیات هنوز پیاده‌سازی نشده است.'
+            );
 
-        $label = $labels[$op] ?? $op;
-
-        $this->bot->sendMessage($chatId, '⏳ در حال اجرای عملیات: ' . $label . '...');
-
-        if ($op === 'sync_all') {
-            $count = 0;
-            $syncer = new PanelSyncer($this->panels, $this->panel());
-
-            foreach ($this->panels->listAll(500, 0) as $panel) {
-                $syncer->syncOne($panel);
-                $count++;
-            }
-
-            $this->bot->sendMessage($chatId, '✅ ' . Str::faNumber($count) . ' پنل بروزرسانی شد.');
-        } else {
-            $this->bot->sendMessage($chatId, '✅ عملیات «' . $label . '» انجام شد.');
+            $this->showBulkOps($chatId);
+            return;
         }
+
+        $this->bot->sendMessage($chatId, '⏳ در حال اجرای عملیات: 🔄 بروزرسانی همه...');
+
+        $count = 0;
+        $syncer = new PanelSyncer($this->panels, $this->panel());
+
+        foreach ($this->panels->listAll(500, 0) as $panel) {
+            $syncer->syncOne($panel);
+            $count++;
+        }
+
+        $this->bot->sendMessage($chatId, '✅ ' . Str::faNumber($count) . ' پنل بروزرسانی شد.');
 
         $this->showBulkOps($chatId);
     }

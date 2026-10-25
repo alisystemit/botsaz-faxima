@@ -190,14 +190,6 @@ class Monitor
         }
         $mh = curl_multi_init();
         $map = [];
-        // اعتبارسنجی گواهی به‌صورت پیش‌فرض روشن است؛ پایش سایت باید گواهی
-        // نامعتبر را «خراب» نشان بدهد، نه اینکه بی‌صدا نادیده بگیرد.
-        // برای سایت‌های داخلی با گواهی self-signed: UPTIME_TLS_INSECURE=1
-        $uptimeVerifyTls = !in_array(
-            strtolower(trim((string)getenv('UPTIME_TLS_INSECURE'))),
-            ['1', 'true', 'on', 'yes'],
-            true
-        );
         foreach ($sites as $s) {
             // ستون url در جدول نیست؛ هدفِ نوع http خودش یک URL کامل است
             $url = (string)($s['url'] ?? '');
@@ -217,8 +209,8 @@ class Monitor
                 CURLOPT_MAXREDIRS => 5,
                 CURLOPT_CONNECTTIMEOUT_MS => 5000,
                 CURLOPT_TIMEOUT_MS => 9000,
-                CURLOPT_SSL_VERIFYPEER => $uptimeVerifyTls,
-                CURLOPT_SSL_VERIFYHOST => $uptimeVerifyTls ? 2 : 0,
+                CURLOPT_SSL_VERIFYPEER => false,
+                CURLOPT_SSL_VERIFYHOST => 0,
                 CURLOPT_USERAGENT => 'UptimeMonitor/1.0',
                 CURLOPT_RETURNTRANSFER => true,
                 CURLOPT_ENCODING => '',
