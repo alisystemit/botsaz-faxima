@@ -2375,14 +2375,23 @@ ensure_composer() {
         return 0
     fi
     if can_apt && ask_yes "   Install Composer automatically with apt? (needed to build template dependencies)"; then
-        if apt_install_nr composer; then
-            hash -r 2>/dev/null || true
+        # سقف زمانی سخت: روی سرورهایی که به آینه‌های apt دسترسی ندارند
+        # apt-get update برای هر مخزن ۱۲۰ ثانیه منتظر می‌ماند و نصب را
+        # «هنگ» نشان می‌دهد. اگر از سقف گذشت، phar همراه پروژه ادامه می‌دهد.
+        apt_ok=1
+        if has_cmd timeout; then
+            timeout -k 10 180 bash -c \
+                "$SUDO apt-get update -qq && $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends -o DPkg::Lock::Timeout=20 -o Acquire::Retries=0 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 composer" \
+                || apt_ok=0
+        else
+            apt_install_nr composer || apt_ok=0
         fi
-        if has_cmd composer; then
+        hash -r 2>/dev/null || true
+        if [ "$apt_ok" -eq 1 ] && has_cmd composer; then
             echo "   Composer ✔ $(composer --version 2>/dev/null | head -n1)"
             return 0
         fi
-        echo "   ⚠️  apt could not install Composer - trying the bundled phar."
+        echo "   ⚠️  apt could not install Composer in time - trying the bundled phar."
     fi
     if [ -f "$ROOT_DIR/tools/composer.phar" ]; then
         echo "   ✔ Composer available via bundled tools/composer.phar"

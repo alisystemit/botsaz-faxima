@@ -312,36 +312,82 @@ grant_templates_write() {
 
 # ===== نصب Composer در صورت نبود =====
 # قالب‌های Composer-Based (مثل میرزا بات پرو) بدون vendor/ اجرا نمی‌شوند.
-# اول composer سراسری بررسی می‌شود؛ اگر نبود با apt نصب می‌شود. اگر apt
-# در دسترس نبود یا شکست خورد، composer.phar همراه پروژه جایگزین است تا
-# آپدیت هرگز به‌خاطر یک بستهٔ اضافی متوقف نشود. در dry-run هیچ بسته‌ای نصب نمی‌شود.
+#
+# چرا اول phar و بعد apt؟ چون «Step 4b» قبلاً روی سرورهایی که به آینه‌های
+# Ubuntu دسترسی ندارند دقیقاً همین‌جا می‌ماند: apt-get update برای هر مخزن
+# منتظر timeout پیش‌فرض (۱۲۰ ثانیه) می‌ماند و با چند مخزن، آپدیت ده‌ها دقیقه
+# بی‌حرکت می‌شد. اما tools/composer.phar همراه پروژه است و همان کار را
+# می‌کند؛ پس اگر phar سالم باشد، apt اصلاً اجرا نمی‌شود. اگر phar نبود،
+# apt با سقف زمانی سخت اجرا می‌شود و در هر حالتی آپدیت ادامه پیدا می‌کند.
+# برای اجبار به نصب سیستمی: BOTSAZ_FORCE_APT_COMPOSER=1
 ensure_composer() {
   if [ "$DRY_RUN" -eq 1 ]; then
-    info "DRY-RUN: would ensure Composer is installed (apt, fallback: tools/composer.phar)"
+    info "DRY-RUN: would ensure Composer is installed (bundled phar first, bounded apt fallback)"
     return 0
   fi
   if command -v composer >/dev/null 2>&1; then
-    info "Composer: $(composer --version 2>/dev/null | head -n1)"
+    # حتی یک composer نصب‌شده هم نباید بی‌نهایت منتظر بماند (wrapper خراب،
+    # قفل شبکه یا prompt تعاملی). ۱۰ ثانیه سقف است، بعد phar جایگزین می‌شود.
+    local _ver=""
+    if command -v timeout >/dev/null 2>&1; then
+      _ver="$(timeout -k 2 10 composer --version 2>/dev/null | head -n1 || true)"
+    else
+      _ver="$(composer --version 2>/dev/null | head -n1 || true)"
+    fi
+    if [ -n "$_ver" ]; then
+      info "Composer: $_ver"
+      return 0
+    fi
+    warn "composer did not answer within 10s — using the bundled tools/composer.phar"
+  fi
+
+  # ۱) composer.phar همراه پروژه — آفلاین، سریع و بدون apt
+  local _phar="" _cand
+  for _cand in "$LIVE_DIR/tools/composer.phar" "$SRC_DIR/tools/composer.phar"; do
+    [ -f "$_cand" ] || continue
+    if [ -n "${PHP_BIN:-}" ] && "$PHP_BIN" "$_cand" --version >/dev/null 2>&1; then
+      _phar="$_cand"
+      break
+    fi
+  done
+  if [ -n "$_phar" ] && [ "${BOTSAZ_FORCE_APT_COMPOSER:-0}" != "1" ]; then
+    ok "Composer via bundled tools/composer.phar — apt skipped (prevents the Step 4b hang)"
     return 0
   fi
+
+  # ۲) apt با سقف زمانی سخت؛ بدون update اولیه، و update فقط اگر لیست‌ها کهنه بود
   if [ "$(id -u)" -eq 0 ] && command -v apt-get >/dev/null 2>&1; then
-    info "Composer not found — installing via apt (this can take a minute)..."
-    _apt_cmd='apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y composer'
-    _apt_rc=1
+    info "Trying apt for Composer (hard limit ~90s; the update continues either way)..."
+    local _apt_log="$BACKUP_DIR/composer_apt.log" _apt_rc=1
+    # shellcheck disable=SC2086
+    local _apt_opts="-y -o DPkg::Lock::Timeout=20 -o Acquire::Retries=0 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
     if command -v timeout >/dev/null 2>&1; then
-      timeout 600 bash -c "$_apt_cmd" > "$BACKUP_DIR/composer_apt.log" 2>&1 && _apt_rc=0
+      # shellcheck disable=SC2086
+      timeout -k 10 90 env DEBIAN_FRONTEND=noninteractive apt-get install $_apt_opts composer \
+        > "$_apt_log" 2>&1 && _apt_rc=0
+      if [ "$_apt_rc" -ne 0 ] && grep -qiE 'unable to locate|no installation candidate' "$_apt_log" 2>/dev/null; then
+        info "Package lists are stale — refreshing (max 60s)..."
+        timeout -k 10 60 env DEBIAN_FRONTEND=noninteractive apt-get update \
+          -o Acquire::Retries=0 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 \
+          >> "$_apt_log" 2>&1 \
+          && timeout -k 10 90 env DEBIAN_FRONTEND=noninteractive apt-get install $_apt_opts composer \
+             >> "$_apt_log" 2>&1 && _apt_rc=0
+      fi
     else
-      bash -c "$_apt_cmd" > "$BACKUP_DIR/composer_apt.log" 2>&1 && _apt_rc=0
+      # timeout در دسترس نیست: همان apt معمولی، اما خروجی لاگ می‌شود
+      env DEBIAN_FRONTEND=noninteractive apt-get update -qq >> "$_apt_log" 2>&1 || true
+      env DEBIAN_FRONTEND=noninteractive apt-get install $_apt_opts composer >> "$_apt_log" 2>&1 && _apt_rc=0
     fi
     hash -r 2>/dev/null || true
     if [ "$_apt_rc" -eq 0 ] && command -v composer >/dev/null 2>&1; then
       ok "Composer installed with apt"
       return 0
     fi
-    warn "apt could not install Composer (see $BACKUP_DIR/composer_apt.log)"
+    warn "apt did not install Composer within the limit (see $_apt_log)"
   fi
-  if [ -f "$LIVE_DIR/tools/composer.phar" ] || [ -f "$SRC_DIR/tools/composer.phar" ]; then
-    ok "Composer available via bundled tools/composer.phar (no apt needed)"
+
+  if [ -n "$_phar" ] || [ -f "$LIVE_DIR/tools/composer.phar" ] || [ -f "$SRC_DIR/tools/composer.phar" ]; then
+    ok "Composer available via bundled tools/composer.phar"
     return 0
   fi
   warn "Composer is not available — template vendor installs will be queued to cron"
