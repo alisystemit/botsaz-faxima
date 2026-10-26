@@ -185,6 +185,12 @@ function dryRunOne(array $cfg, Store $store, string $type, ?string $slugArg): in
             case 'mirza':
                 Manager::patchMirzaConfig($botDir, $cfg, $fakeDb, '1234567890:FakeTokenFakeTokenFakeTokenFakeTokenFake1', 999001, 'testbot', $domainPath);
                 break;
+            case 'mirzapro':
+                Manager::patchMirzaProConfig($botDir, $cfg, $fakeDb, '1234567890:FakeTokenFakeTokenFakeTokenFakeTokenFake1', 999001, 'testbot', $domainPath);
+                // secret واقعی را table.php روی سرور می‌سازد؛ اینجا فقط شکل URL و
+                // قابلیت بازیابی رمز را با یک مقدار هم‌اندازه (۴۸ کاراکتر hex) می‌سنجیم.
+                $staticSecret = str_repeat('a1', 24);
+                break;
             case 'uptime':
                 Manager::patchUptimeConfig($botDir, $cfg, $fakeDb, '1234567890:FakeTokenFakeTokenFakeTokenFakeTokenFake1', 999001, 'testbot', $domainPath, $baseUrl);
                 break;
@@ -214,7 +220,12 @@ function dryRunOne(array $cfg, Store $store, string $type, ?string $slugArg): in
         Manager::removeDir($botDir);
         return 1;
     }
-    $placeholders = ['{DATABASE_', '{DB_', '{BOT_TOKEN}', '{ADMIN_', '{DOMAIN.', '{BOT_USER', '{BASE_URL}', 'PUT_BOT_TOKEN_HERE', 'CHANGE-THIS-RANDOM-SECRET'];
+    $placeholders = [
+        '{DATABASE_', '{DB_', '{BOT_TOKEN}', '{ADMIN_', '{DOMAIN.', '{BOT_USER', '{BASE_URL}',
+        // میرزا بات پرو (کلیدهای lowercase جداگانه)
+        '{database_', '{username_db}', '{password_db}', '{API_KEY}', '{admin_number}', '{domain_name}', '{username_bot}',
+        'PUT_BOT_TOKEN_HERE', 'CHANGE-THIS-RANDOM-SECRET',
+    ];
     $leftover = [];
     foreach ($placeholders as $ph) {
         if (str_contains($patchedConfig, $ph)) $leftover[] = $ph;
@@ -325,10 +336,13 @@ function dryRunOne(array $cfg, Store $store, string $type, ?string $slugArg): in
     $whSecret = Manager::webhookSecret($type, $tok, $staticSecret);
     $tableFile = (string)($spec['table'] ?? '');
     $tableSecret = $tableFile !== '' ? Manager::tableSecret($type, $tok) : '';
+    // بعضی table.phpها (میرزا بات پرو) اصلاً secret نمی‌خواهند؛ فقط وقتی باید
+    // هشدار داد که خودِ رجیستری فرمول secret تعریف کرده باشد.
+    $tableNeedsSecret = (string)($spec['tableSecret'] ?? '') !== '';
     $whUrl = Manager::webhookUrl($cfg, $slug, $type, $whSecret);
     $problems = [];
     if (str_contains($whUrl, 'FakeToken')) $problems[] = 'توکن نشت کرده در URL وبهوک';
-    if ($tableFile !== '' && $tableSecret === '') $problems[] = 'رمز table.php خالی است ولی table.php دارد';
+    if ($tableFile !== '' && $tableNeedsSecret && $tableSecret === '') $problems[] = 'رمز table.php خالی است ولی رجیستری فرمول secret دارد';
     // قالبی که رمز تصادفی می‌سازد باید همان رمز در URL باشد؛ رمز خالی یعنی
     // بعداً «ست مجدد وبهوک» رمز را از رکورد نمی‌خواند و ربات ۴۰۳ می‌دهد.
     if (Manager::templateSpec($type)['secret'] === 'static' && $whSecret === '') {

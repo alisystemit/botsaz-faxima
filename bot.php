@@ -1273,7 +1273,7 @@ function botDbLabel(array $bot): string
 function botHasUserTable(array $bot): bool
 {
     $type = (string)($bot['type'] ?? '');
-    return $type === 'faxima' || $type === 'mirza';
+    return $type === 'faxima' || $type === 'mirza' || $type === 'mirzapro';
 }
 
 /** متن پنل یک ربات (مشترک بین edit و send) */
@@ -2865,6 +2865,9 @@ function buildBot(array $cfg, Store $store, string $TOKEN, int $owner, string $t
             case 'mirza':
                 Manager::patchMirzaConfig($botDir, $cfg, $dbName, $plainToken, $adminId, $botUsername, $domainPath);
                 break;
+            case 'mirzapro':
+                Manager::patchMirzaProConfig($botDir, $cfg, $dbName, $plainToken, $adminId, $botUsername, $domainPath);
+                break;
             case 'uptime':
                 Manager::patchUptimeConfig($botDir, $cfg, $dbName, $plainToken, $adminId, $botUsername, $domainPath, $baseUrl);
                 break;
@@ -2915,6 +2918,21 @@ function buildBot(array $cfg, Store $store, string $TOKEN, int $owner, string $t
             if ($inst['note'] !== '') $notes[] = $inst['note'];
         } elseif ($schema !== 'none') {
             throw new Exception("روش نصب جدول برای قالب «{$type}» ناشناخته است: {$schema}");
+        }
+
+        // ===== ۴ب) secret وبهوکِ ساخته‌شده توسط خود قالب =====
+        // میرزا بات پرو secret را (مثل نصّاب رسمی) تصادفی می‌سازد و در جدول
+        // setting نگه می‌دارد. table.php بالاتر اجرا شد و secret را نوشت؛ اگر
+        // همین را در آدرس وبهوک نگذاریم، index.php هر پیام تلگرام را با
+        // «Unauthorized access» رد می‌کند. webhook_url هم باید همین secret را
+        // داشته باشد تا «ست‌کردن مجدد وبهوک» بعداً ربات را نمیراند.
+        if ($type === 'mirzapro') {
+            $staticSecret = Manager::readChildWebhookSecret($cfg, $dbName);
+            if ($staticSecret === '') {
+                throw new Exception(
+                    "secret وبهوک ربات از دیتابیس خوانده نشد؛ نصب لغو شد تا رباتی ساخته نشود که همهٔ پیام‌ها را «Unauthorized» رد می‌کند."
+                );
+            }
         }
 
         // ===== ۵) پاکسازی فایل‌های اضافی (بدون دست‌زدن به vendor/) =====

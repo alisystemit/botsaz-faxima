@@ -155,14 +155,36 @@ foreach ($activeBots as $bot) {
         // کرون‌های هر ربات از پوشه خود همان ربات اجرا می‌شوند (نه قالب)
         $cronDir = $botDir . '/cron/';
 
-        if (!is_dir($cronDir)) {
-            // کرون ندارد
-            $log->debug('cron', "No cron directory for {$type}: {$bot['folder']}");
-            continue;
-        }
-
         // توکن ذخیره‌شده رمزنگاری است؛ برای اسکریپت فرزند رمزگشایی کن
         $plainToken = Manager::decryptChildToken($bot['token'] ?? '', Manager::secretKey($cfg));
+
+        // ===== رانر یکپارچهٔ کرون (قبل از بررسی cron/) =====
+        // بعضی قالب‌ها (میرزا بات پرو) به‌جای چند فایل cron/*.php یک اسکریپت
+        // زمان‌بند دارند که خودش jobها را طبق ساعت اجرا می‌کند. اگر فقط
+        // cron/*.php را glob کنیم، کرون چنین رباتی هیچ‌وقت اجرا نمی‌شود.
+        // رانر برای هر ربات فقط یک بار در هر اجرای دیسپچر صدا زده می‌شود؛
+        // قفل داخلی خودش از اجرای هم‌زمان جلوگیری می‌کند.
+        $runner = (string)((array)(Manager::templateSpec($type) ?? [])['cron_runner'] ?? '');
+        $runnerRan = false;
+        if ($runner !== '') {
+            $runnerPath = $botDir . '/' . ltrim($runner, '/');
+            if (is_file($runnerPath)) {
+                $cmd = cronCmd($cfg, $runnerPath, ['BOT_TOKEN' => $plainToken, 'BOT_FOLDER' => $bot['folder']]);
+                runAsync($cmd, $isWindows);
+                $runnerRan = true;
+                $log->debug('cron', "Executed runner {$runner} for {$bot['folder']}");
+            } else {
+                $log->warning('cron', "Cron runner missing for {$type}: {$bot['folder']} ({$runner})");
+            }
+        }
+
+        if (!is_dir($cronDir)) {
+            // رانر اجرا شده یا این قالب اصلاً کرون ندارد
+            if (!$runnerRan) {
+                $log->debug('cron', "No cron directory for {$type}: {$bot['folder']}");
+            }
+            continue;
+        }
 
         // اجرای هر فایل کرون (توکن از طریق env داده می‌شود، نه argv — در لوگ/ps لو نمی‌رود)
         $cronFiles = glob($cronDir . '*.php');

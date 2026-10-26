@@ -408,6 +408,41 @@ class Manager
                 'exclude' => ['docker/', 'docker-compose.yml', '.env.example', 'vpnbot/', 'install.sh', 'images.jpeg', 'composer.json', 'composer.lock', 'installer/'],
                 'cleanup' => ['installer/'],
             ],
+            'mirzapro' => [
+                // نسخهٔ Pro پروژهٔ Mirza (mahdiMGF2/mirzabot) — ریپوی جدا از
+                // «mirza» قدیمی. پوشهٔ سورس با کلید رجیستری فرق دارد.
+                'dir' => 'mirzabot',
+                'label' => 'میرزا بات پرو (فروش VPN)',
+                'icon' => '💎',
+                'repo' => 'https://github.com/mahdiMGF2/mirzabot',
+                'db' => 'mysql',
+                'entry' => 'index.php',
+                'autoload' => 'vendor/autoload.php',
+                // secret وبهوک را خودِ table.php در جدول setting می‌سازد.
+                // buildBot بعد از نصب جدول‌ها همان را می‌خواند و در آدرس
+                // وبهوک می‌گذارد؛ 'static' یعنی «از webhook_url بازیابی کن».
+                'secret' => 'static',
+                'table' => 'table.php',
+                'tableSecret' => null,
+                'schema' => 'http',
+                'cron' => 'cronbot/run.php',
+                // رانر یکپارچهٔ کرون؛ به‌جای glob کردن cron/*.php اجرا می‌شود.
+                'cron_runner' => 'cronbot/run.php',
+                'required' => [
+                    'index.php', 'config.php', 'table.php', 'botapi.php', 'function.php',
+                    'db/bootstrap.php', 'panels/bootstrap.php', 'vendor/autoload.php',
+                    'cronbot/run.php',
+                ],
+                // install/ نصّاب وبِ خودِ قالب است: روی هاست اشتراکی قابل اجرا
+                // نیست، بعد از نصب باید حذف شود و اگر بماند index.php ربات را
+                // متوقف می‌کند. جدول‌ها را table.php می‌سازد.
+                'exclude' => [
+                    'install/', 'install.sh', 'composer.json', 'composer.lock',
+                    'README.md', 'docs/', 'error_log',
+                    'cronbot/.run.lock', 'storage/cron_status.json',
+                ],
+                'cleanup' => ['install/'],
+            ],
             'uptime' => [
                 // نام پوشهٔ سورس با کلید رجیستری فرق دارد
                 'dir' => 'uptime-bot-telegram',
@@ -879,6 +914,124 @@ public static function validTypes(): array
         }
     }
 
+    /**
+     * پچ config.php «میرزا بات پرو» (mahdiMGF2/mirzabot).
+     *
+     * قالب پرو کلیدهای رجیستری جداگانه‌ای دارد (`{database_url}`، `{API_KEY}` و…)
+     * که با نسخهٔ قدیمی میرزا (`{DATABASE_NAME}`، `{BOT_TOKEN}`) یکی نیست؛
+     * برای همین patchMirzaConfig روی آن هیچ جای‌گذاری‌ای نمی‌خورد و باید مسیر
+     * جدا داشته باشد. همهٔ مقادیر در config پرو داخل رشتهٔ تک‌کوتیشنی می‌نشینند.
+     *
+     * نکتهٔ DSN: قالب آدرس اتصال را از `$dbhost` می‌سازد
+     * (`mysql:host=$dbhost;dbname=…`). PDO پورت را از host جدا می‌خواهد
+     * (برخلاف mysqli که `host:port` را می‌فهمد)، پس پورت را صریحاً به DSN اضافه
+     * می‌کنیم؛ وگرنه ربات روی هاستی با پورت غیر ۳۳۰۶ به دیتابیس وصل نمی‌شود.
+     */
+    public static function patchMirzaProConfig(string $botDir, array $cfg, string $dbName, string $token, int $adminId, string $botUsername, string $domainPath): void
+    {
+        if (!preg_match('/^[0-9]{8,10}:[a-zA-Z0-9_-]{35,}$/', $token)) {
+            throw new Exception("توکن نامعتبر است (فرمت تلگرام)");
+        }
+        if (!preg_match('/^[a-z0-9_]{3,32}$/i', $botUsername)) {
+            throw new Exception("نام کاربری ربات نامعتبر است: {$botUsername}");
+        }
+        if (!preg_match('/^[A-Za-z0-9_]+$/', $dbName)) {
+            throw new Exception("نام دیتابیس میرزا بات پرو نامعتبر است");
+        }
+        $dbHost = (string)($cfg['db_host'] ?? 'localhost');
+        $dbPort = (int)($cfg['db_port'] ?? 3306);
+        if (!preg_match('/^[A-Za-z0-9_.:\-]+$/', $dbHost)) {
+            throw new Exception("هاست دیتابیس نامعتبر است");
+        }
+        if ($dbPort < 1 || $dbPort > 65535) {
+            throw new Exception("پورت دیتابیس نامعتبر است");
+        }
+
+        $file = $botDir . '/config.php';
+        $raw = is_file($file) ? file_get_contents($file) : false;
+        if ($raw === false) throw new Exception("config.php میرزا بات پرو پیدا نشد");
+
+        $replacements = [
+            '{database_url}' => self::phpEscape($dbHost),
+            '{database_name}' => self::phpEscape($dbName),
+            '{username_db}' => self::phpEscape((string)($cfg['db_user'] ?? '')),
+            '{password_db}' => self::phpEscape((string)($cfg['db_pass'] ?? '')),
+            '{API_KEY}' => self::phpEscape($token),
+            '{admin_number}' => self::phpEscape((string)$adminId),
+            '{domain_name}' => self::phpEscape($domainPath),
+            '{username_bot}' => self::phpEscape($botUsername),
+            // پورت در قالب داخل DSN نیست؛ همین رشته در config پرو یکتا است.
+            'mysql:host=$dbhost;dbname=$dbname;charset=utf8mb4'
+                => 'mysql:host=$dbhost;port=' . $dbPort . ';dbname=$dbname;charset=utf8mb4',
+        ];
+
+        $found = false;
+        foreach (array_keys($replacements) as $ph) {
+            if (substr_count($raw, $ph) > 0) { $found = true; break; }
+        }
+        if (!$found) throw new Exception("placeholderهای config میرزا بات پرو پیدا نشد (نسخه ناسازگار؟)");
+
+        // فقط قالب خام سنجیده می‌شود؛ مقدار مشروعِ رمز ممکن است شبیه {ABC} باشد.
+        if (preg_match_all('/\{[A-Za-z][A-Za-z0-9_#.\/-]*\}/', $raw, $unknownPh)) {
+            foreach ($unknownPh[0] as $ph) {
+                if (!array_key_exists($ph, $replacements)) {
+                    throw new Exception("placeholder ناشناخته در config میرزا بات پرو: {$ph}");
+                }
+            }
+        }
+
+        $new = strtr($raw, $replacements);
+        if ($dbPort !== 3306 && strpos($raw, 'mysql:host=$dbhost;dbname=$dbname;charset=utf8mb4') === false) {
+            // DSN تغییر کرده و پورت هم غیر پیش‌فرض است؛ بی‌صدا ساختن رباتی که
+            // به دیتابیس وصل نمی‌شود بدتر از شکست صریح ساخت است.
+            throw new Exception("الگوی DSN در config میرزا بات پرو پیدا نشد؛ پورت غیرپیش‌فرض قابل اعمال نیست");
+        }
+
+        $tmp = $file . '.botsaztmp-' . bin2hex(random_bytes(4));
+        if (file_put_contents($tmp, $new) === false) {
+            throw new Exception("خطا در نوشتن موقت config.php میرزا بات پرو");
+        }
+        @chmod($tmp, 0640);
+        if (!self::lintPhpFile($tmp)) {
+            @unlink($tmp);
+            throw new Exception("config.php میرزا بات پرو پس از پچ از نظر نحوی معتبر نیست");
+        }
+        if (!@rename($tmp, $file)) {
+            @unlink($tmp);
+            throw new Exception("خطا در جای‌گزینی config.php میرزا بات پرو");
+        }
+    }
+
+    /**
+     * خواندن secret وبهوک که خود قالب (table.php) در جدول `setting` ساخته است.
+     *
+     * میرزا بات پرو مثل پاسارگاد secret تصادفی دارد، ولی برخلاف پاسارگاد آن را
+     * در config.php نمی‌نویسد؛ در دیتابیس ربات نگه می‌دارد. اگر buildBot آدرس
+     * وبهوک را بدون همین secret ثبت کند، اولین پیام تلگرام با «Unauthorized
+     * access» رد می‌شود. خطای اتصال اینجا استثنا نمی‌دهد؛ فراخوان باید مقدار
+     * خالی را «secret ساخته نشد» تلقی کند.
+     */
+    public static function readChildWebhookSecret(array $cfg, string $dbName): string
+    {
+        if ($dbName === '' || !preg_match('/^[A-Za-z0-9_]+$/', $dbName)) return '';
+        $host = (string)($cfg['db_host'] ?? 'localhost');
+        $port = (int)($cfg['db_port'] ?? 3306);
+        if ($port < 1 || $port > 65535) $port = 3306;
+        try {
+            $pdo = new PDO(
+                "mysql:host={$host};port={$port};dbname={$dbName};charset=utf8mb4",
+                (string)($cfg['db_user'] ?? ''),
+                (string)($cfg['db_pass'] ?? ''),
+                [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_TIMEOUT => 5]
+            );
+            $st = $pdo->query('SELECT webhook_secret FROM setting LIMIT 1');
+            $v = $st === false ? '' : $st->fetchColumn();
+            return is_string($v) ? trim($v) : '';
+        } catch (Throwable $e) {
+            return '';
+        }
+    }
+
     /** رمزگشایی توکن ذخیره‌شده ربات فرزند (سازگار با توکن‌های ساده قدیمی و کلید قدیمی) */
     public static function decryptChildToken(string $stored, string $key): string
     {
@@ -1107,6 +1260,9 @@ public static function validTypes(): array
         switch ($type) {
             case 'faxima':
             case 'mirza':
+            // config میرزا بات پرو هم همان نام‌متغیرهای میرزا را دارد ولی
+            // کلید رجیستری/SourceUpdate جداست؛ اینجا فقط نگاشت مهم است.
+            case 'mirzapro':
                 $varMap = ['APIKEY' => $token, 'adminnumber' => (string)$adminId, 'usernamebot' => $botUsername];
                 break;
             case 'uptime':

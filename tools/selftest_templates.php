@@ -54,7 +54,11 @@ section('رجیستری قالب‌ها');
 // ===================================================================
 $templates = Manager::templates();
 $buildable = Manager::buildableTypes();
-check('چهار قالب قابل ساخت ثبت شده', count($buildable) === 4, implode(',', array_keys($buildable)));
+check(
+    'قالب‌های قابل ساخت ثبت شده‌اند',
+    isset($buildable['faxima'], $buildable['mirza'], $buildable['mirzapro'], $buildable['uptime'], $buildable['pasargad']),
+    implode(',', array_keys($buildable))
+);
 check('PGClockBot در فهرست هست', isset($templates['pgclock']), implode(',', array_keys($templates)));
 check('PGClockBot ساختنی نیست (runtime غیر PHP)', !Manager::isBuildable('pgclock'));
 check('PGClockBot در catalogTypes هست', isset(Manager::catalogTypes()['pgclock']), implode(',', array_keys(Manager::catalogTypes())));
@@ -75,7 +79,7 @@ foreach ($vt as $k => $lbl) {
     check("validTypes[{$k}] غیرخالی", is_string($lbl) && $lbl !== '');
 }
 
-$expected = ['faxima' => 'mysql', 'mirza' => 'mysql', 'uptime' => 'mysql', 'pasargad' => 'sqlite'];
+$expected = ['faxima' => 'mysql', 'mirza' => 'mysql', 'mirzapro' => 'mysql', 'uptime' => 'mysql', 'pasargad' => 'sqlite'];
 foreach ($expected as $k => $db) {
     check("قالب «{$k}» دیتابیسش {$db} است", Manager::templateDb($k) === $db);
     check("قالب «{$k}» در رجیستری هست", Manager::templateSpec($k) !== null);
@@ -162,7 +166,14 @@ check('نام خالی ⇒ templates/ + قالب پیش‌فرض', strpos(str_re
 section('availableTypes و منوی انتخاب نوع');
 // ===================================================================
 $avail = Manager::availableTypes();
-check('همهٔ ۴ قالب در دسترس‌اند', count($avail) === 4, implode(',', array_keys($avail)));
+// انتظار از خود رجیستری ساخته می‌شود، نه عدد ثابت؛ با افزودن قالب تازه
+// این تست نباید بشکند، فقط نباید قالبی که سورسش نصب است از منو بیفتد.
+$expectedAvail = [];
+foreach ($buildable as $k => $spec) {
+    $d = Manager::templateDir($k);
+    if (is_dir($d) && is_file($d . '/' . ($spec['autoload'] ?? ''))) $expectedAvail[] = $k;
+}
+check('همهٔ قالب‌های نصب‌شده در دسترس‌اند', array_keys($avail) === $expectedAvail, implode(',', array_keys($avail)));
 foreach (array_keys($avail) as $k) {
     $dir = Manager::templateDir($k);
     $spec = Manager::templateSpec($k);
@@ -177,7 +188,7 @@ $cbData = [];
 foreach ($rows as $row) {
     foreach ($row as $btn) $cbData[] = $btn['callback_data'];
 }
-check('typeMenu دکمهٔ «newbot:» برای هر 4 قالب دارد', count(array_filter($cbData, fn($d) => str_starts_with($d, 'newbot:'))) === 4, implode(',', $cbData));
+check('typeMenu برای هر قالب در دسترس دکمهٔ «newbot:» دارد', count(array_filter($cbData, fn($d) => str_starts_with($d, 'newbot:'))) === count($avail), implode(',', $cbData));
 check('typeMenu دکمهٔ برگشت دارد', in_array(Nav::CB_BACK_MAIN, $cbData, true));
 check('typeMenu دکمهٔ انصراف دارد', in_array(Nav::CB_CANCEL, $cbData, true));
 check('typeMenu هیچ «noop» ندارد (قالب مرده نمانده)', !in_array('noop', $cbData, true));
