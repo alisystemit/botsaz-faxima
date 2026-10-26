@@ -397,7 +397,9 @@ class SelfUpdate
     {
         $env = getenv();
         if (!is_array($env)) $env = [];
-        $env['PATH'] = dirname(PHP_BINARY) . PATH_SEPARATOR . ($env['PATH'] ?? '');
+        // زیر Apache/FPM مقدار PHP_BINARY خودِ وب‌سرور است، نه PHP؛ PATH را از
+        // مسیر CLI واقعی بساز تا git و ابزارهای فرزند پیدا شوند.
+        $env['PATH'] = dirname(Manager::phpBinary()) . PATH_SEPARATOR . ($env['PATH'] ?? '');
         $env['GIT_CONFIG_COUNT'] = '1';
         $env['GIT_CONFIG_KEY_0'] = 'safe.directory';
         $env['GIT_CONFIG_VALUE_0'] = '*';
@@ -908,7 +910,7 @@ class SelfUpdate
         $gitEnv = 'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=' . escapeshellarg($src);
         $bash = is_executable('/usr/bin/bash') ? '/usr/bin/bash' : (is_executable('/bin/bash') ? '/bin/bash' : 'bash');
         $runner = Manager::runnerAvailable();
-        $pathGuess = dirname(PHP_BINARY);
+        $pathGuess = dirname(Manager::phpBinary());
         $ownerPrefix = self::asOwnerPrefix($src);
         $inner = 'cd ' . escapeshellarg($src)
             . ' && PATH="' . $pathGuess . ':/usr/local/bin:/usr/bin:/bin:$PATH" ' . $gitEnv

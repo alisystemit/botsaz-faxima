@@ -1091,6 +1091,66 @@ public static function validTypes(): array
     }
 
     /**
+     * آیا کاربر جاری واقعاً می‌تواند در پوشهٔ قالب فایل بسازد؟
+     * فقط is_writable کافی نیست؛ یک فایل موقت می‌سازیم تا ACL/read-only mount
+     * هم مشخص شود. قبل از تلاش برای نصب Composer این بررسی انجام می‌شود تا
+     * اگر دسترسی نیست، کار به‌جای شکست خوردن به کرون سپرده شود.
+     */
+    public static function templateDirWritable(string $type): bool
+    {
+        $dir = self::templateDir($type);
+        if (!is_dir($dir) || !is_writable($dir)) return false;
+        $probe = $dir . '/.botsaz_write_probe_' . bin2hex(random_bytes(4));
+        $h = @fopen($probe, 'x');
+        if (!is_resource($h)) return false;
+        @fclose($h);
+        @unlink($probe);
+        return true;
+    }
+
+    /** آیا برای این قالب درخواست نصب وابستگی در نوبت کرون ثبت شده است؟ */
+    public static function templateVendorQueued(string $type): bool
+    {
+        $file = self::vendorPendingFile();
+        if (!is_file($file)) return false;
+        $raw = json_decode((string)@file_get_contents($file), true);
+        if (!is_array($raw)) return false;
+        $list = $raw['types'] ?? $raw;
+        if (!is_array($list)) return false;
+        $list = array_map('strval', $list);
+        return in_array($type, $list, true) || in_array('all', $list, true);
+    }
+
+    /** زمان ثبت درخواست کرون برای این قالب (برای نمایش در UI)، یا رشتهٔ خالی */
+    public static function templateVendorQueuedAt(string $type): string
+    {
+        $file = self::vendorPendingFile();
+        if (!is_file($file)) return '';
+        $raw = json_decode((string)@file_get_contents($file), true);
+        if (!is_array($raw)) return '';
+        $list = $raw['types'] ?? $raw;
+        if (!is_array($list)) return '';
+        $list = array_map('strval', $list);
+        if (!in_array($type, $list, true) && !in_array('all', $list, true)) return '';
+        return (string)($raw['at'] ?? '');
+    }
+
+    /** حذف این قالب از صف نصب vendor (بعد از موفقیت یا وقتی دیگر لازم نیست) */
+    public static function clearTemplateVendorQueue(string $type): void
+    {
+        $file = self::vendorPendingFile();
+        if (!is_file($file)) return;
+        $raw = json_decode((string)@file_get_contents($file), true);
+        if (!is_array($raw)) { @unlink($file); return; }
+        $list = $raw['types'] ?? $raw;
+        if (!is_array($list)) { @unlink($file); return; }
+        $list = array_values(array_filter(array_map('strval', $list), static fn($t) => $t !== $type));
+        if ($list === []) { @unlink($file); return; }
+        $payload = ['types' => $list, 'at' => date('Y-m-d H:i:s'), 'ts' => time()];
+        @file_put_contents($file, json_encode($payload, JSON_UNESCAPED_UNICODE), LOCK_EX);
+    }
+
+    /**
      * دستور پایهٔ Composer — composer.phar داخل پروژه مقدم است چون روی
      * هاست‌های اشتراکی معمولاً composer سراسری نصب نیست.
      *
@@ -1151,37 +1211,63 @@ public static function validTypes(): array
     }
 
     /**
+     * نتیجهٔ «نمی‌توان از داخل وب نصب کرد»: درخواست به کرون سپرده می‌شود.
+     *
+     * @return array{ok:bool,queued:bool,note:string,output:string}
+     */
+    private static function vendorQueuedResult(string $type, string $reason): array
+    {
+        $queued = self::queueTemplateVendor($type);
+        $note = $reason . ' ';
+        $note .= $queued
+            ? 'درخواست نصب خودکار برای کرون ثبت شد؛ اگر کرونِ ربات‌ساز فعال باشد در نوبت بعدی آن را نصب می‌کند.'
+            : 'ثبت درخواست برای کرون هم ممکن نشد (مجوز نوشتن data/؟).';
+        $note .= " برای انجام فوری روی سرور اجرا کنید: php tools/ensure_template_vendor.php {$type}";
+        return ['ok' => false, 'queued' => $queued, 'note' => $note, 'output' => ''];
+    }
+
+    /**
      * اجرای composer install برای یک قالب (اگر لازم باشد).
+     *
+     * ترتیب کار: اول چک می‌کند خودِ وابستگی‌ها آماده‌اند؟ بعد آیا کاربر وب
+     * واقعاً اجازهٔ نوشتن در پوشهٔ قالب و اجرای Composer را دارد؟ اگر هر
+     * کدام نبود، به‌جای شکست خوردن، درخواست را برای کرون ثبت می‌کند.
      *
      * @return array{ok:bool,note:string,output:string,queued?:bool}
      */
     public static function ensureTemplateVendor(string $type, int $timeoutSec = 240): array
     {
         if (self::templateVendorReady($type)) {
+            // اگر درخواست قبلی در صف کرون مانده ولی vendor حالا آماده است،
+            // صف را پاک کن تا کرون دوباره بی‌دلیل نصب را تکرار نکند.
+            self::clearTemplateVendorQueue($type);
             return ['ok' => true, 'note' => 'وابستگی‌های Composer از قبل نصب‌اند.', 'output' => ''];
         }
         if (!self::templateHasComposer($type)) {
             return ['ok' => false, 'note' => 'این قالب composer.json ندارد؛ vendor باید همراه سورس باشد.', 'output' => ''];
         }
-        $dir = self::templateDir($type);
-        if (!is_writable($dir)) {
-            $queued = self::queueTemplateVendor($type);
-            $note = $queued
-                ? "پوشهٔ قالب با کاربر وب قابل نوشتن نیست (احتمالاً مالکش root است). درخواست نصب خودکار ثبت شد؛ "
-                  . "اگر کرونِ ربات‌ساز فعال باشد در نوبت بعدی آن را انجام می‌دهد. برای انجام فوری روی سرور اجرا کنید: "
-                  . "php tools/ensure_template_vendor.php {$type}"
-                : "پوشهٔ قالب نه برای کاربر وب قابل نوشتن است و نه ثبت درخواست نصب خودکار ممکن شد. "
-                  . "روی سرور با کاربر مالک اجرا کنید: php tools/ensure_template_vendor.php {$type}";
-            return ['ok' => false, 'queued' => $queued, 'note' => $note, 'output' => ''];
+        if (!self::templateDirWritable($type)) {
+            return self::vendorQueuedResult($type, 'پوشهٔ قالب برای کاربر وب قابل نوشتن نیست (احتمالاً مالکش root است).');
+        }
+        // اگر بستهٔ آماده داریم و packagist از این سرور در دسترس نیست،
+        // همان اول از بسته استفاده می‌کنیم تا کاربر ۵ دقیقه منتظر timeout
+        // Composer نماند. اگر packagist در دسترس بود، نصب تازه ترجیح دارد.
+        if (self::bundledVendorZip($type) !== '' && !self::packagistReachable()) {
+            $bundled = self::tryBundledVendorResult($type, 'سرور به packagist.org دسترسی ندارد؛');
+            if ($bundled !== null) return $bundled;
         }
         $composer = self::composerCommand();
         if ($composer === []) {
-            return [
-                'ok' => false,
-                'note' => 'Composer روی سرور پیدا نشد. فایل composer.phar را در ریشهٔ ربات‌ساز بگذارید یا composer را نصب کنید (apt install composer).',
-                'output' => '',
-            ];
+            $bundled = self::tryBundledVendorResult($type, 'Composer روی این سرور پیدا نشد؛');
+            if ($bundled !== null) return $bundled;
+            return self::vendorQueuedResult($type, 'Composer برای کاربر وب روی این سرور پیدا نشد.');
         }
+        if (!function_exists('proc_open')) {
+            $bundled = self::tryBundledVendorResult($type, 'اجرای فرمان (proc_open) غیرفعال است؛');
+            if ($bundled !== null) return $bundled;
+            return self::vendorQueuedResult($type, 'اجرای فرمان (proc_open) برای کاربر وب غیرفعال است.');
+        }
+        $dir = self::templateDir($type);
 
         // دو ساخت هم‌زمان نباید یک vendor را هم‌زمان بسازند.
         $lockPath = dirname(__DIR__) . '/data/template_vendor.lock';
@@ -1196,30 +1282,233 @@ public static function validTypes(): array
         }
 
         try {
+            $env = getenv();
+            if (!is_array($env)) $env = [];
+            // زیر Apache/FPM ممکن است محیط تقریباً خالی باشد؛ بدون PATH،
+            // ابزارهای کمکیِ Composer (unzip/git) پیدا نمی‌شوند و نصب با
+            // خطای مبهم شکست می‌خورد. HOME هم برای کش لازم است.
+            if (empty($env['PATH'])) {
+                $env['PATH'] = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
+            }
+            $env['COMPOSER_HOME'] = dirname(__DIR__) . '/data/composer';
+            $env['COMPOSER_ALLOW_SUPERUSER'] = '1';
+            $env['COMPOSER_NO_INTERACTION'] = '1';
+            $env['HOME'] = $env['HOME'] ?? $env['COMPOSER_HOME'];
+            @mkdir($env['COMPOSER_HOME'], 0755, true);
+
+            // قبل از اجرای Composer مطمئن شویم باینری PHPِ انتخاب‌شده واقعاً
+            // خط فرمان است. زیر وب‌سرور، PHP_BINARY می‌تواند apache2 یا
+            // php-fpm باشد و آن‌ها composer.phar را اجرا نمی‌کنند؛ نتیجه فقط
+            // یک شکست مبهم بود. این‌جا سریع تشخیص می‌دهیم.
+            $phpProbe = self::runProcess([self::phpBinary(), '-r', 'echo PHP_VERSION;'], $dir, $env, 10);
+            if ($phpProbe['rc'] !== 0 || trim($phpProbe['out']) === '') {
+                $bundled = self::tryBundledVendorResult($type, 'PHP خط فرمان در دسترس نیست؛');
+                if ($bundled !== null) return $bundled;
+                return self::vendorQueuedResult(
+                    $type,
+                    'PHP خط فرمان روی این سرور اجرا نشد (' . self::phpBinary() . ').'
+                );
+            }
+
             $cmd = array_merge($composer, [
                 'install', '--no-dev', '--no-interaction', '--no-progress',
                 '--prefer-dist', '--no-scripts', '--optimize-autoloader',
             ]);
-            $env = getenv();
-            if (!is_array($env)) $env = [];
-            $env['COMPOSER_HOME'] = dirname(__DIR__) . '/data/composer';
-            $env['COMPOSER_ALLOW_SUPERUSER'] = '1';
-            $env['COMPOSER_NO_INTERACTION'] = '1';
-            @mkdir($env['COMPOSER_HOME'], 0755, true);
-
             $run = self::runProcess($cmd, $dir, $env, $timeoutSec);
             $output = self::sanitizeDbError(mb_substr($run['out'] . "\n" . $run['err'], -4000));
+            self::logTemplateVendorRun($type, $cmd, $dir, $run, $output);
             if (self::templateVendorReady($type)) {
+                self::clearTemplateVendorQueue($type);
                 return ['ok' => true, 'note' => 'وابستگی‌های Composer با موفقیت نصب شدند.', 'output' => $output];
             }
             $note = !empty($run['timeout'])
                 ? "نصب وابستگی بیش از {$timeoutSec} ثانیه طول کشید و متوقف شد."
-                : 'composer install ناموفق بود (کد ' . (int)$run['rc'] . '). خروجی را ببینید.';
+                : 'composer install ناموفق بود (کد ' . (int)$run['rc'] . ').';
+            $hint = self::composerFailureHint($output);
+            if ($hint !== '') $note .= ' ' . $hint;
+
+            // پشتیبان آفلاین: روی سرورهایی که به packagist/GitHub دسترسی ندارند
+            // (فیلتر، DNS یا فایروال) Composer هرگز موفق نمی‌شود. یک بستهٔ
+            // vendor آمادهٔ همراهِ ربات‌ساز همان وابستگی‌ها را بدون اینترنت
+            // نصب می‌کند تا قالب در هر شرایطی قابل استفاده باشد.
+            $bundle = self::installBundledVendor($type);
+            if (!empty($bundle['ok'])) {
+                self::clearTemplateVendorQueue($type);
+                return [
+                    'ok' => true,
+                    'note' => 'Composer در دسترس/موفق نبود؛ وابستگی‌ها از بستهٔ آمادهٔ همراه پروژه نصب شدند (بدون نیاز به اینترنت).',
+                    'output' => trim($output . "\n" . (string)$bundle['note']),
+                ];
+            }
+            if (!empty($bundle['note'])) $note .= ' ' . $bundle['note'];
+            $note .= ' جزئیات کامل در data/logs/template_vendor.log';
             return ['ok' => false, 'note' => $note, 'output' => $output];
         } finally {
             @flock($lock, LOCK_UN);
             @fclose($lock);
         }
+    }
+
+    /**
+     * تلاش برای نصب از بستهٔ آماده؛ null یعنی بسته‌ای نیست/نصب نشد و
+     * فراخوان باید مسیر قبلی (کرون/خطا) را ادامه دهد.
+     *
+     * @return array{ok:bool,note:string,output:string}|null
+     */
+    private static function tryBundledVendorResult(string $type, string $reason): ?array
+    {
+        $b = self::installBundledVendor($type);
+        if (empty($b['ok'])) return null;
+        self::clearTemplateVendorQueue($type);
+        return [
+            'ok' => true,
+            'note' => $reason . ' وابستگی‌ها از بستهٔ آمادهٔ همراه پروژه نصب شدند (بدون نیاز به اینترنت).',
+            'output' => (string)$b['note'],
+        ];
+    }
+
+    /** آیا سرور می‌تواند به packagist وصل شود؟ (کش می‌شود تا هر کلیک دوباره تست نکند) */
+    private static function packagistReachable(): bool
+    {
+        static $ok = null;
+        if ($ok !== null) return $ok;
+        if (!function_exists('fsockopen')) return $ok = true; // نمی‌توانیم تست کنیم ⇒ Composer را امتحان کن
+        $fp = @fsockopen('repo.packagist.org', 443, $errno, $errstr, 2);
+        if (is_resource($fp)) {
+            @fclose($fp);
+            return $ok = true;
+        }
+        return $ok = false;
+    }
+
+    /** مسیر بستهٔ آمادهٔ vendor (اگر برای این قالب همراه پروژه هست) */
+    public static function bundledVendorZip(string $type): string
+    {
+        $safe = preg_replace('/[^A-Za-z0-9._-]+/', '-', $type) ?? '';
+        if ($safe === '' || str_contains($safe, '..')) return '';
+        $file = dirname(__DIR__) . '/tools/vendor_cache/' . $safe . '.zip';
+        return is_file($file) ? $file : '';
+    }
+
+    /**
+     * استخراج بستهٔ آمادهٔ vendor بدون Composer/اینترنت.
+     *
+     * @return array{ok:bool,note:string}
+     */
+    private static function installBundledVendor(string $type): array
+    {
+        $zipPath = self::bundledVendorZip($type);
+        if ($zipPath === '') {
+            return ['ok' => false, 'note' => ''];
+        }
+        if (!class_exists('ZipArchive')) {
+            return ['ok' => false, 'note' => 'افزونهٔ zip در PHP فعال نیست؛ بستهٔ آماده قابل استخراج نیست.'];
+        }
+        $dir = self::templateDir($type);
+        $tmp = $dir . '/.vendor_tmp_' . bin2hex(random_bytes(4));
+        if (!@mkdir($tmp, 0755, true)) {
+            return ['ok' => false, 'note' => 'ساخت پوشهٔ موقت برای بستهٔ آماده ممکن نشد.'];
+        }
+        $zip = new ZipArchive();
+        if ($zip->open($zipPath) !== true) {
+            self::removeDir($tmp);
+            return ['ok' => false, 'note' => 'باز کردن بستهٔ آمادهٔ vendor ناموفق بود.'];
+        }
+        $extracted = $zip->extractTo($tmp);
+        $zip->close();
+        if (!$extracted || !is_file($tmp . '/vendor/autoload.php')) {
+            self::removeDir($tmp);
+            return ['ok' => false, 'note' => 'محتوای بستهٔ آمادهٔ vendor ناقص است.'];
+        }
+
+        // جایگزینی اتمیک تا vendor نیمه‌کاره باقی نماند.
+        $target = $dir . '/vendor';
+        $old = '';
+        if (is_dir($target)) {
+            $old = $dir . '/.vendor_old_' . bin2hex(random_bytes(4));
+            if (!@rename($target, $old)) {
+                self::removeDir($tmp);
+                return ['ok' => false, 'note' => 'vendor قبلی قابل جابه‌جایی نبود.'];
+            }
+        }
+        if (!@rename($tmp . '/vendor', $target)) {
+            if ($old !== '') @rename($old, $target);
+            self::removeDir($tmp);
+            return ['ok' => false, 'note' => 'نصب vendor از بستهٔ آماده ناموفق بود.'];
+        }
+        self::removeDir($tmp);
+        if ($old !== '') self::removeDir($old);
+        self::chmodTreeForWeb($target, $dir);
+        return self::templateVendorReady($type)
+            ? ['ok' => true, 'note' => 'از بستهٔ آماده: ' . basename($zipPath)]
+            : ['ok' => false, 'note' => 'بستهٔ آماده استخراج شد ولی autoload.php ساخته نشد.'];
+    }
+
+    /** گروه‌نویسیِ درخت vendor تا کاربر وب هم بتواند آن را بخواند/آپدیت کند */
+    private static function chmodTreeForWeb(string $tree, string $parent): void
+    {
+        $gid = @filegroup($parent);
+        $it = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($tree, FilesystemIterator::SKIP_DOTS),
+            RecursiveIteratorIterator::SELF_FIRST
+        );
+        @chmod($tree, 02775);
+        if ($gid !== false) @chgrp($tree, $gid);
+        foreach ($it as $f) {
+            $p = $f->getPathname();
+            if ($f->isDir()) {
+                @chmod($p, 02775);
+            } else {
+                @chmod($p, 0664);
+            }
+            if ($gid !== false) @chgrp($p, $gid);
+        }
+    }
+
+    /** ثبت خروجی هر اجرای Composer برای عیب‌یابی از راه دور (بدون رمز/توکن) */
+    private static function logTemplateVendorRun(string $type, array $cmd, string $cwd, array $run, string $output): void
+    {
+        $log = dirname(__DIR__) . '/data/logs/template_vendor.log';
+        @mkdir(dirname($log), 0755, true);
+        $user = 'cli';
+        if (function_exists('posix_geteuid')) {
+            $pw = @posix_getpwuid(posix_geteuid());
+            if (is_array($pw) && isset($pw['name'])) $user = (string)$pw['name'];
+        }
+        $entry = '===== ' . date('Y-m-d H:i:s') . " type={$type} user={$user}\n"
+            . 'cmd=' . implode(' ', array_map(static fn($a) => str_contains((string)$a, ' ') ? '"' . $a . '"' : (string)$a, $cmd)) . "\n"
+            . 'cwd=' . $cwd . ' php=' . self::phpBinary()
+            . ' rc=' . (int)($run['rc'] ?? -1) . ' timeout=' . (!empty($run['timeout']) ? '1' : '0') . "\n"
+            . $output . "\n";
+        @file_put_contents($log, $entry, FILE_APPEND | LOCK_EX);
+        // اگر کرون (root) اول فایل را ساخته باشد، کاربر وب هم باید بتواند بنویسد.
+        @chmod($log, 0666);
+    }
+
+    /** حدسِ خوانا از خروجی Composer برای اینکه کاربر بداند مشکل چیست */
+    private static function composerFailureHint(string $output): string
+    {
+        $o = mb_strtolower($output);
+        if ($o === '') return '';
+        if (preg_match('/could not resolve host|connection timed out|curl error|failed to open stream|network is unreachable|ssl certificate/', $o)) {
+            return 'علت احتمالی: سرور به packagist.org دسترسی ندارد (فیلتر/فایروال یا DNS).';
+        }
+        if (preg_match('/requires php|your php version|platform requirement|php >=/', $o)) {
+            return 'علت احتمالی: نسخهٔ PHP خط فرمان با نیاز composer.json هم‌خوان نیست.';
+        }
+        if (preg_match('/ext-[a-z0-9]+.*(missing|required)|requires ext-/', $o)) {
+            return 'علت احتمالی: یکی از افزونه‌های PHP (مثل zip/curl/mbstring) در CLI نصب نیست.';
+        }
+        if (preg_match('/allowed memory size|out of memory/', $o)) {
+            return 'علت احتمالی: حافظهٔ PHP برای Composer کافی نیست (memory_limit).';
+        }
+        if (preg_match('/permission denied|not writable/', $o)) {
+            return 'علت احتمالی: دسترسی نوشتن در پوشهٔ قالب یا کش Composer.';
+        }
+        if (preg_match('/composer\.lock.*not up to date|lock file errors/', $o)) {
+            return 'علت احتمالی: composer.lock با composer.json هم‌خوان نیست.';
+        }
+        return '';
     }
 
     /**
@@ -1904,10 +2193,53 @@ public static function validTypes(): array
     }
 
     /** باینری PHP برای اجرای اسکریپت‌های CLI فرزند */
+    /**
+     * مسیر باینری PHPِ خط فرمان.
+     *
+     * چرا فقط PHP_BINARY کافی نیست: زیر Apache/mod_php مقدار PHP_BINARY خودِ
+     * باینری وب‌سرور است (مثلاً /usr/sbin/apache2) و زیر php-fpm هم php-fpm.
+     * اجرای `composer.phar` یا `php -l` با آن‌ها نه خطای واضح می‌دهد و نه کار
+     * می‌کند؛ نتیجهٔ معمولش «composer install ناموفق بود (کد ۱)» یا یک
+     * timeout است. پس اول CLI واقعی را از PHP_BINDIR پیدا می‌کنیم و فقط وقتی
+     * هیچ CLI‌ای نبود به PHP_BINARY برمی‌گردیم.
+     */
     public static function phpBinary(): string
     {
-        if (defined('PHP_BINARY') && PHP_BINARY !== '') return PHP_BINARY;
-        return 'php';
+        static $cached = null;
+        if ($cached !== null) return $cached;
+
+        $isPhp = static function (string $p): bool {
+            $b = strtolower(basename($p));
+            return $b === 'php' || $b === 'php.exe'
+                || preg_match('/^php\d+(?:\.\d+)?(?:\.exe)?$/', $b) === 1;
+        };
+
+        $candidates = [];
+        if (defined('PHP_BINDIR') && PHP_BINDIR !== '') {
+            $isWin = DIRECTORY_SEPARATOR === '\\';
+            $candidates[] = PHP_BINDIR . DIRECTORY_SEPARATOR . ($isWin ? 'php.exe' : 'php');
+            $candidates[] = PHP_BINDIR . DIRECTORY_SEPARATOR . 'php' . PHP_MAJOR_VERSION . '.' . PHP_MINOR_VERSION
+                . ($isWin ? '.exe' : '');
+        }
+        if (defined('PHP_BINARY') && PHP_BINARY !== '' && $isPhp(PHP_BINARY)) {
+            $candidates[] = PHP_BINARY;
+        }
+        foreach ($candidates as $p) {
+            if ($p !== '' && @is_file($p) && @is_executable($p)) return $cached = $p;
+        }
+
+        if (function_exists('shell_exec')) {
+            $find = DIRECTORY_SEPARATOR === '\\' ? 'where php 2>NUL' : 'command -v php 2>/dev/null';
+            $out = @shell_exec($find);
+            if (is_string($out)) {
+                foreach (preg_split('/\r\n|\r|\n/', trim($out)) ?: [] as $line) {
+                    $line = trim($line);
+                    if ($line !== '' && $isPhp($line) && @is_file($line)) return $cached = $line;
+                }
+            }
+        }
+        if (defined('PHP_BINARY') && PHP_BINARY !== '') return $cached = PHP_BINARY;
+        return $cached = 'php';
     }
 
     /**

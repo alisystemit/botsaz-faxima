@@ -98,6 +98,21 @@ function askConfirm(title, desc, onYes){
   });
 }
 
+/* ===== دیالوگ جزئیات (خروجی خطا/لاگ) ===== */
+function detailsDialog(title, body){
+  var wrap = document.createElement('div');
+  wrap.className = 'dlg';
+  wrap.innerHTML =
+    '<div class="dlg-box"><h4>' + esc(title) + '</h4>' +
+    '<pre style="max-height:45vh;overflow:auto;direction:ltr;text-align:left;font-size:11px;white-space:pre-wrap;margin:8px 0">' + esc(String(body || '')) + '</pre>' +
+    '<div class="dlg-acts"><button class="btn btn-ghost" data-x="no">بستن</button></div>' +
+    '</div>';
+  document.body.appendChild(wrap);
+  wrap.addEventListener('click', function(e){
+    if (e.target === wrap || (e.target.getAttribute && e.target.getAttribute('data-x') === 'no')) wrap.remove();
+  });
+}
+
 /* ===== کپی در کلیپ‌بورد ===== */
 function copyText(text, label){
   function fallback(){
@@ -566,6 +581,9 @@ function vTemplates(){
       // پوشه هست ولی vendor/ ندارد (مثل میرزا بات پرو که vendor را در گیت
       // ندارد) — این «نصب نشده»ی ساده نیست؛ یک کلیک نصب خودکار کافی است.
       var needVendor = buildable && !okk && t.needs_vendor === true;
+      // نصب وابستگی به کرون سپرده شده و هنوز اجرا نشده است
+      var vendorQueued = needVendor && t.vendor_queued === true;
+      var queuedAt = vendorQueued ? String(t.vendor_queued_at || '') : '';
       if (okk) ready++;
       return '<div class="tpl"><div class="avatar">' + esc(t.icon || '🧩') + '</div>' +
         '<div style="flex:1;min-width:0"><b>' + esc(t.label || t.type) + '</b>' +
@@ -580,7 +598,10 @@ function vTemplates(){
           ? (okk
               ? '<span class="badge b-ok">آماده</span>'
               : (needVendor
-                  ? '<button class="btn btn-acc btn-sm" onclick="MX.tplVendor(\'' + esc(t.type) + '\')">🔧 نصب وابستگی</button>'
+                  ? (vendorQueued
+                      ? '<span class="badge b-warn" title="' + esc(queuedAt ? ('ثبت: ' + queuedAt) : '') + '">⏳ در نوبت کرون</span>' +
+                        '<button class="btn btn-ghost btn-sm" style="margin-inline-start:6px" onclick="MX.tplVendor(\'' + esc(t.type) + '\')">تلاش دوباره</button>'
+                      : '<button class="btn btn-acc btn-sm" onclick="MX.tplVendor(\'' + esc(t.type) + '\')">🔧 نصب وابستگی</button>')
                   : '<span class="badge b-bad">نصب نشده</span>'))
           : '<span class="badge b-bad">نصب جداگانه</span>') +
         '</div>';
@@ -592,8 +613,9 @@ function vTemplates(){
         '<div class="kv"><b>آیکون + نام</b><span>همان‌طور که در منوی ربات دیده می‌شود</span></div>' +
         '<div class="kv"><b>SQLite / MySQL</b><span>نوع دیتابیس قالب</span></div>' +
         '<div class="kv"><b>«نصب نشده»</b><span>پوشهٔ قالب روی سرور نیست</span></div>' +
-        '<div class="kv"><b>«نصب وابستگی»</b><span>پوشهٔ قالب هست ولی vendor/ ندارد؛ با یک کلیک Composer نصبش می‌کند. اگر پوشه مالک root باشد، درخواست به کرون سپرده می‌شود</span></div>' +
+        '<div class="kv"><b>«نصب وابستگی»</b><span>پوشهٔ قالب هست ولی vendor/ ندارد؛ اول اجازهٔ نوشتن بررسی می‌شود. اگر دسترسی باشد همان‌جا Composer نصب می‌کند، وگرنه درخواست به کرون سپرده می‌شود</span></div>' +
         '<div class="kv"><b>«نصب جداگانه»</b><span>اپ غیر PHP است (مثل PGClockBot) و با این ربات‌ساز ساخته نمی‌شود</span></div>' +
+        '<div class="kv"><b>نصب بدون اینترنت</b><span>اگر Composer نصب نباشد یا سرور به packagist دسترسی نداشته باشد، وابستگی‌ها از بستهٔ آمادهٔ همراه ربات‌ساز نصب می‌شوند؛ خروجی خطا هم در همان لحظه نمایش داده می‌شود</span></div>' +
       '</div>';
   }).catch(function(){ err('خطا در دریافت اطلاعات قالب‌ها'); });
 }
@@ -846,11 +868,16 @@ function logInit(){
 /* ---------- اکشن‌ها ---------- */
 window.MX = {
   tplVendor: function(type){
-    toast('در حال نصب وابستگی‌ها… ممکن است چند لحظه طول بکشد');
+    toast('در حال بررسی دسترسی و نصب وابستگی‌ها… ممکن است چند لحظه طول بکشد');
     call('template_vendor', {method:'POST', data:{type:type}}).then(function(d){
       if (d && d.ok) { ok('وابستگی‌ها نصب شد؛ قالب آماده است ✅'); render(); }
       else if (d && d.queued) { toast(d.msg || 'درخواست نصب ثبت شد؛ کرون در نوبت بعدی انجام می‌دهد'); render(); }
-      else { bad((d && d.msg) || 'نصب وابستگی ناموفق بود'); }
+      else {
+        bad((d && d.msg) || 'نصب وابستگی ناموفق بود');
+        // خروجی Composer تنها جایی است که علت واقعی معلوم می‌شود؛ قبلاً پنهان بود.
+        var detail = (d && d.output) ? String(d.output) : '';
+        if (detail) detailsDialog('جزئیات نصب وابستگی (Composer)', detail.slice(-6000));
+      }
     }).catch(function(){ bad('خطا در نصب وابستگی'); });
   },
   setStatus: function(id, s){ call('bot_status', {method:'POST', data:{id:id,status:s}}).then(function(d){ toast(d.ok?'انجام شد ✅':(d.msg||'خطا')); haptic(); render(); }); },

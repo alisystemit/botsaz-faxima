@@ -310,6 +310,44 @@ grant_templates_write() {
   fi
 }
 
+# ===== نصب Composer در صورت نبود =====
+# قالب‌های Composer-Based (مثل میرزا بات پرو) بدون vendor/ اجرا نمی‌شوند.
+# اول composer سراسری بررسی می‌شود؛ اگر نبود با apt نصب می‌شود. اگر apt
+# در دسترس نبود یا شکست خورد، composer.phar همراه پروژه جایگزین است تا
+# آپدیت هرگز به‌خاطر یک بستهٔ اضافی متوقف نشود. در dry-run هیچ بسته‌ای نصب نمی‌شود.
+ensure_composer() {
+  if [ "$DRY_RUN" -eq 1 ]; then
+    info "DRY-RUN: would ensure Composer is installed (apt, fallback: tools/composer.phar)"
+    return 0
+  fi
+  if command -v composer >/dev/null 2>&1; then
+    info "Composer: $(composer --version 2>/dev/null | head -n1)"
+    return 0
+  fi
+  if [ "$(id -u)" -eq 0 ] && command -v apt-get >/dev/null 2>&1; then
+    info "Composer not found — installing via apt (this can take a minute)..."
+    _apt_cmd='apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y composer'
+    _apt_rc=1
+    if command -v timeout >/dev/null 2>&1; then
+      timeout 600 bash -c "$_apt_cmd" > "$BACKUP_DIR/composer_apt.log" 2>&1 && _apt_rc=0
+    else
+      bash -c "$_apt_cmd" > "$BACKUP_DIR/composer_apt.log" 2>&1 && _apt_rc=0
+    fi
+    hash -r 2>/dev/null || true
+    if [ "$_apt_rc" -eq 0 ] && command -v composer >/dev/null 2>&1; then
+      ok "Composer installed with apt"
+      return 0
+    fi
+    warn "apt could not install Composer (see $BACKUP_DIR/composer_apt.log)"
+  fi
+  if [ -f "$LIVE_DIR/tools/composer.phar" ] || [ -f "$SRC_DIR/tools/composer.phar" ]; then
+    ok "Composer available via bundled tools/composer.phar (no apt needed)"
+    return 0
+  fi
+  warn "Composer is not available — template vendor installs will be queued to cron"
+  return 1
+}
+
 # همهٔ DocumentRoot/root هایی که به این پروژه تعلق دارند
 candidate_docroots() {
   local c d
@@ -864,6 +902,10 @@ fi
 else
   info "--templates-only: config merge and database checks skipped (no app code is deployed)"
 fi  # end of: not --templates-only
+
+# ===== ۴-ب. تضمین نصب Composer (لازم برای vendor قالب‌ها) =====
+step "Step 4b: Ensure Composer (apt / bundled phar)"
+ensure_composer
 
 # ===== ۵. کپی کد از سورس → زنده (فقط فایل‌های ردیابی‌شدهٔ گیت) =====
 step "Step 5: Deploy code from $SRC_DIR → $LIVE_DIR"

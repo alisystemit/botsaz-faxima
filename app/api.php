@@ -395,6 +395,9 @@ try {
                     // «نصب نشده»ی ساده گمراه‌کننده است؛ UI دکمهٔ نصب خودکار می‌دهد.
                     'vendor_ready' => Manager::templateVendorReady($type),
                     'needs_vendor' => Manager::templateVendorNeeded($type),
+                    // درخواست نصب در نوبت کرون است (کاربر وب دسترسی نوشتن ندارد)
+                    'vendor_queued' => Manager::templateVendorQueued($type),
+                    'vendor_queued_at' => Manager::templateVendorQueuedAt($type),
                     // قالب غیر PHP (PGClockBot) نه ساختنی است نه «نصب‌نشدهٔ معیوب»؛
                     // UI باید «نصب جداگانه» نشان دهد، نه دکمهٔ نصب/آماده.
                     'buildable' => Manager::isBuildable($type),

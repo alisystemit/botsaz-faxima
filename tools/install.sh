@@ -2362,6 +2362,38 @@ if [ -n "$missing_pkgs" ]; then
 fi
 echo "   Extensions ✔ (curl, mbstring, pdo_mysql, mysqli, sqlite3)"
 
+# ---------- 0) prerequisite: Composer (template vendor/) ----------
+# Composer-based templates (mirzapro, ...) ignore vendor/ in git, so the panel
+# has to build it. A system Composer makes that work for both root and the web
+# user; without it the panel can only fall back to tools/composer.phar or queue
+# the build to cron. Install with apt when possible, then fall back to the
+# bundled phar - this step must never abort the installation.
+echo "✅ Checking Composer..."
+ensure_composer() {
+    if has_cmd composer; then
+        echo "   Composer ✔ $(composer --version 2>/dev/null | head -n1)"
+        return 0
+    fi
+    if can_apt && ask_yes "   Install Composer automatically with apt? (needed to build template dependencies)"; then
+        if apt_install_nr composer; then
+            hash -r 2>/dev/null || true
+        fi
+        if has_cmd composer; then
+            echo "   Composer ✔ $(composer --version 2>/dev/null | head -n1)"
+            return 0
+        fi
+        echo "   ⚠️  apt could not install Composer - trying the bundled phar."
+    fi
+    if [ -f "$ROOT_DIR/tools/composer.phar" ]; then
+        echo "   ✔ Composer available via bundled tools/composer.phar"
+        return 0
+    fi
+    echo "   ⚠️  Composer is not available; template dependencies will be queued to cron."
+    echo "      Install it later with: sudo apt install composer"
+    return 0
+}
+ensure_composer
+
 # ---------- 0) prerequisite: the PHP module for the chosen web server ----------
 # The extensions above only help the CLI. Without the matching SAPI the web
 # server hands .php files to the browser as plain text, so the webhook URL
