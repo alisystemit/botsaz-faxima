@@ -283,6 +283,33 @@ detect_web_user() {
   return 1
 }
 
+# ===== دسترسی نوشتن templates/ برای کاربر وب =====
+# نصب vendor/ (مثل میرزا بات پرو) و سینک سورس از داخل پنل، داخل خود پوشهٔ
+# قالب می‌نویسند. اگر templates/ با کاربر root کلون شده باشد، www-data اجازهٔ
+# نوشتن ندارد و Composer با «پوشهٔ قالب برای نوشتن قابل دسترسی نیست» متوقف
+# می‌شود. مالکیت کد را root نگه می‌داریم و فقط گروه وب را rw می‌کنیم؛ setgid
+# و ACL پیش‌فرض هم باعث می‌شوند فایل‌های تازهٔ آپدیت‌های بعدی همان دسترسی را
+# بگیرند (وگرنه umask روت دوباره g-w می‌سازد).
+grant_templates_write() {
+  local _dir="${1:-$LIVE_DIR/templates}" _grp
+  [ -d "$_dir" ] || return 0
+  [ -n "${WEB_USER:-}" ] || return 0
+  [ "$(id -u)" -eq 0 ] || return 0
+  _grp="$(id -gn "$WEB_USER" 2>/dev/null || true)"
+  [ -n "$_grp" ] || _grp="$WEB_USER"
+  if chgrp -R "$_grp" "$_dir" 2>/dev/null; then
+    chmod -R g+rwX "$_dir" 2>/dev/null || true
+    find "$_dir" -type d -exec chmod g+s {} + 2>/dev/null || true
+    if command -v setfacl >/dev/null 2>&1; then
+      setfacl -R -m "g:${_grp}:rwX" "$_dir" 2>/dev/null || true
+      find "$_dir" -type d -exec setfacl -m "d:g:${_grp}:rwX" {} + 2>/dev/null || true
+    fi
+    ok "Permissions: templates/ writable by $WEB_USER ($_grp) — vendor install & source sync need no sudo"
+  else
+    warn "Could not chgrp templates/ to $_grp — run: chgrp -R $_grp '$_dir' && chmod -R g+rwX '$_dir'"
+  fi
+}
+
 # همهٔ DocumentRoot/root هایی که به این پروژه تعلق دارند
 candidate_docroots() {
   local c d
@@ -892,6 +919,9 @@ if [ "$TPL_ONLY" -eq 1 ]; then
     else
       fail "templates sync failed"
     fi
+    # فایل‌های تازه/بازنویسی‌شده مالک root و 644 هستند؛ پیش از پایان، گروه وب
+    # را rw می‌کنیم تا نصب vendor و سینک بعدی از پنل بدون خطای دسترسی انجام شود.
+    grant_templates_write "$LIVE_DIR/templates"
   fi
 elif [ "$LIVE_DIR" = "$SRC_DIR" ]; then
   if [ "$DRY_RUN" -eq 1 ]; then
@@ -996,6 +1026,8 @@ if [ "$TPL_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
   else
     warn "templates sync failed – live keeps the previous templates"
   fi
+  # سینک با کاربر root فایل‌های 644 می‌سازد؛ دسترسی گروه وب را برگردان.
+  grant_templates_write "$LIVE_DIR/templates"
 fi
 
 # ===== ۶. تنظیم وی‌هوست (Apache/Nginx) → اشاره به LIVE_DIR =====
@@ -1119,6 +1151,27 @@ elif [ -f "$LIVE_DIR/config.php" ] && have_php; then
   fi
 else
   info "Skipping webhook (no config.php or no PHP CLI)"
+fi
+
+# ===== ۷-ب. آماده‌سازی وابستگی‌های قالب‌ها =====
+# سینک مرحلهٔ ۵/۵ب قالب‌ها را به‌روز می‌کند و خودش هم vendor را می‌سازد؛ این
+# مرحله idempotent است و مطمئن می‌شود همهٔ قالب‌های Composer-Based پیش از
+# healthcheck آماده‌اند (اگر سینک رد شده یا نیمه‌کاره مانده باشد هم ترمیم می‌کند).
+step "Step 7b: Prepare template dependencies (Composer vendor)"
+if [ "$DRY_RUN" -eq 1 ]; then
+  info "DRY-RUN: would run $PHP_BIN tools/ensure_template_vendor.php all"
+elif [ -f "$LIVE_DIR/tools/ensure_template_vendor.php" ] && have_php; then
+  # umask 002: فایل‌های vendor برای گروه وب قابل نوشتن بمانند (setgid هم فعال است)
+  if ( umask 002; "$PHP_BIN" "$LIVE_DIR/tools/ensure_template_vendor.php" all > "$BACKUP_DIR/template_vendor.log" 2>&1 ); then
+    ok "Template dependencies ready (vendor/ + compatibility patches)"
+  else
+    warn "Some template dependencies are not ready:"
+    grep -aE "✘|⚠️" "$BACKUP_DIR/template_vendor.log" 2>/dev/null | head -5 | sed 's/^/   /'
+    info "full log: $BACKUP_DIR/template_vendor.log"
+    info "fix manually: $PHP_BIN $LIVE_DIR/tools/ensure_template_vendor.php all"
+  fi
+else
+  info "ensure_template_vendor.php or PHP CLI missing — skipped"
 fi
 
 # ===== ۸. بررسی نیازهای توسعه + مایگریشن‌ها + healthcheck (داخل LIVE_DIR) =====

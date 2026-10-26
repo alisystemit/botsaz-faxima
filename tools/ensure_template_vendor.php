@@ -7,6 +7,7 @@
 //
 // استفاده:
 //   php tools/ensure_template_vendor.php mirzapro
+//   php tools/ensure_template_vendor.php mirzapro,faxima
 //   php tools/ensure_template_vendor.php all
 //
 // خروجی: کد ۰ یعنی همهٔ قالب‌های درخواستی آماده‌اند؛ ۱ یعنی دست‌کم یکی نصب نشد.
@@ -18,11 +19,15 @@ $targets = [];
 if ($type === '' || $type === 'all') {
     foreach (Manager::buildableTypes() as $key => $spec) $targets[] = (string)$key;
 } else {
-    if (Manager::templateSpec($type) === null) {
-        fwrite(STDERR, "قالب نامعتبر: {$type}\n");
-        exit(2);
+    // امکان «mirzapro,faxima» برای درخواست‌های تجمیعی کرون
+    foreach (array_filter(array_map('trim', explode(',', $type))) as $one) {
+        if (Manager::templateSpec($one) === null) {
+            fwrite(STDERR, "قالب نامعتبر: {$one}\n");
+            exit(2);
+        }
+        $targets[] = $one;
     }
-    $targets[] = $type;
+    $targets = array_values(array_unique($targets));
 }
 
 $failed = 0;

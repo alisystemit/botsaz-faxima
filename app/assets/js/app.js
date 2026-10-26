@@ -592,7 +592,7 @@ function vTemplates(){
         '<div class="kv"><b>آیکون + نام</b><span>همان‌طور که در منوی ربات دیده می‌شود</span></div>' +
         '<div class="kv"><b>SQLite / MySQL</b><span>نوع دیتابیس قالب</span></div>' +
         '<div class="kv"><b>«نصب نشده»</b><span>پوشهٔ قالب روی سرور نیست</span></div>' +
-        '<div class="kv"><b>«نصب وابستگی»</b><span>پوشهٔ قالب هست ولی vendor/ ندارد؛ با یک کلیک Composer نصبش می‌کند</span></div>' +
+        '<div class="kv"><b>«نصب وابستگی»</b><span>پوشهٔ قالب هست ولی vendor/ ندارد؛ با یک کلیک Composer نصبش می‌کند. اگر پوشه مالک root باشد، درخواست به کرون سپرده می‌شود</span></div>' +
         '<div class="kv"><b>«نصب جداگانه»</b><span>اپ غیر PHP است (مثل PGClockBot) و با این ربات‌ساز ساخته نمی‌شود</span></div>' +
       '</div>';
   }).catch(function(){ err('خطا در دریافت اطلاعات قالب‌ها'); });
@@ -849,6 +849,7 @@ window.MX = {
     toast('در حال نصب وابستگی‌ها… ممکن است چند لحظه طول بکشد');
     call('template_vendor', {method:'POST', data:{type:type}}).then(function(d){
       if (d && d.ok) { ok('وابستگی‌ها نصب شد؛ قالب آماده است ✅'); render(); }
+      else if (d && d.queued) { toast(d.msg || 'درخواست نصب ثبت شد؛ کرون در نوبت بعدی انجام می‌دهد'); render(); }
       else { bad((d && d.msg) || 'نصب وابستگی ناموفق بود'); }
     }).catch(function(){ bad('خطا در نصب وابستگی'); });
   },

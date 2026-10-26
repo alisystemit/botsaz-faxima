@@ -360,6 +360,7 @@ try {
             $res = Manager::ensureTemplateVendor($type, 300);
             out(200, [
                 'ok' => (bool)$res['ok'],
+                'queued' => !empty($res['queued']),
                 'msg' => (string)$res['note'],
                 'output' => (string)$res['output'],
                 'installed' => Manager::templateVendorReady($type),

@@ -137,6 +137,42 @@ if (is_file($_flagT)) {
     @file_put_contents(__DIR__ . '/../data/logs/selfupdate.log', "\n========== pending templates " . date('Y-m-d H:i:s') . " ==========\nrc={$_rc}\n" . $_tail . "\n", FILE_APPEND | LOCK_EX);
 }
 
+// ===== نصب درخواستیِ وابستگی‌های Composer قالب‌ها =====
+// روی سرورهایی که templates/ با کاربر root کلون شده، کاربر وب نمی‌تواند
+// داخل پوشهٔ قالب بنویسد؛ پس دکمهٔ «نصب وابستگی» فقط درخواست را در
+// data/pending_update/vendor.json ثبت می‌کند. اینجا با کاربرِ کرون
+// (همان کاربری که این اسکریپت را اجرا می‌کند) Composer اجرا می‌شود.
+$_flagV = dirname(__DIR__) . '/data/pending_update/vendor.json';
+if (is_file($_flagV)) {
+    $_typesV = [];
+    $_rawV = json_decode((string)@file_get_contents($_flagV), true);
+    if (is_array($_rawV)) {
+        $_listV = $_rawV['types'] ?? $_rawV;
+        if (is_array($_listV)) {
+            foreach ($_listV as $_tV) {
+                $_tV = trim((string)$_tV);
+                if ($_tV !== '') $_typesV[] = $_tV;
+            }
+        }
+    }
+    @unlink($_flagV);
+    $_typesV = array_values(array_unique($_typesV));
+    $_argV = $_typesV === [] ? 'all' : implode(',', $_typesV);
+    $log->info('cron', "running pending vendor install ({$_argV})");
+    $_root = dirname(__DIR__);
+    $_out = [];
+    $_rc = 1;
+    @exec(
+        'cd ' . escapeshellarg($_root) . ' && ' . escapeshellarg(phpBin($cfg))
+        . ' ' . escapeshellarg(__DIR__ . '/ensure_template_vendor.php') . ' ' . escapeshellarg($_argV) . ' 2>&1',
+        $_out,
+        $_rc
+    );
+    $_tail = implode("\n", array_slice($_out, -40));
+    $log->info('cron', "pending vendor install finished rc={$_rc}");
+    @file_put_contents(__DIR__ . '/../data/logs/selfupdate.log', "\n========== pending vendor " . date('Y-m-d H:i:s') . " ==========\nrc={$_rc}\n" . $_tail . "\n", FILE_APPEND | LOCK_EX);
+}
+
 // ===== بررسی تمام ربات‌های فعال =====
 $bots = $store->allBots();
 $activeBots = array_filter($bots, fn($b) => $b['status'] === 'active');

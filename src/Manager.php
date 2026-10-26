@@ -164,6 +164,11 @@ class Manager
                 if (str_starts_with(str_replace('\\', '/', $_need), 'vendor/') && self::templateHasComposer($_tpl)) {
                     $vendor = self::ensureTemplateVendor($_tpl, 300);
                     if (empty($vendor['ok']) || !is_file($_dir . '/' . $_need)) {
+                        if (!empty($vendor['queued'])) {
+                            return "⏳ وابستگی‌های قالب «{$_tpl}» هنوز آماده نیست.\n"
+                                . (string)($vendor['note'] ?? '')
+                                . "\nپس از اجرای کرون (حداکثر ۵ دقیقه) دوباره ساخت ربات را بزنید.";
+                        }
                         return "قالب «{$_tpl}» وابستگی‌های Composer را ندارد و نصب خودکار هم ممکن نشد.\n"
                             . (string)($vendor['note'] ?? '')
                             . (trim((string)($vendor['output'] ?? '')) !== '' ? "\n" . mb_substr(trim((string)$vendor['output']), -600) : '')
@@ -1110,10 +1115,45 @@ public static function validTypes(): array
         return [];
     }
 
+    /** مسیر فایل درخواست نصب وابستگی که کرون (با دسترسی مالک) مصرف می‌کند */
+    public static function vendorPendingFile(): string
+    {
+        return dirname(__DIR__) . '/data/pending_update/vendor.json';
+    }
+
+    /**
+     * ثبت درخواست نصب vendor برای اجرا در نوبت کرون.
+     *
+     * چرا لازم است: روی خیلی از سرورها templates/ با کاربر root کلون شده و
+     * کاربر وب (www-data) اجازهٔ نوشتن ندارد. Composer باید داخل خود پوشهٔ
+     * قالب بنویسد، پس از داخل وب ممکن نیست؛ اما data/ قابل نوشتن است و
+     * کرون دیسپچر با همان کاربری که فایل کرون را اجرا می‌کند (معمولاً root)
+     * این درخواست را انجام می‌دهد.
+     */
+    public static function queueTemplateVendor(string $type): bool
+    {
+        $file = self::vendorPendingFile();
+        $dir = dirname($file);
+        if (!is_dir($dir) && !@mkdir($dir, 0755, true) && !is_dir($dir)) {
+            return false;
+        }
+        $types = [];
+        if (is_file($file)) {
+            $raw = json_decode((string)@file_get_contents($file), true);
+            if (is_array($raw)) {
+                $list = $raw['types'] ?? $raw;
+                if (is_array($list)) $types = array_values(array_filter(array_map('strval', $list)));
+            }
+        }
+        if ($type !== '' && $type !== 'all' && !in_array($type, $types, true)) $types[] = $type;
+        $payload = ['types' => $types, 'at' => date('Y-m-d H:i:s'), 'ts' => time()];
+        return @file_put_contents($file, json_encode($payload, JSON_UNESCAPED_UNICODE), LOCK_EX) !== false;
+    }
+
     /**
      * اجرای composer install برای یک قالب (اگر لازم باشد).
      *
-     * @return array{ok:bool,note:string,output:string}
+     * @return array{ok:bool,note:string,output:string,queued?:bool}
      */
     public static function ensureTemplateVendor(string $type, int $timeoutSec = 240): array
     {
@@ -1125,7 +1165,14 @@ public static function validTypes(): array
         }
         $dir = self::templateDir($type);
         if (!is_writable($dir)) {
-            return ['ok' => false, 'note' => "پوشهٔ قالب برای نوشتن قابل دسترسی نیست: {$dir}", 'output' => ''];
+            $queued = self::queueTemplateVendor($type);
+            $note = $queued
+                ? "پوشهٔ قالب با کاربر وب قابل نوشتن نیست (احتمالاً مالکش root است). درخواست نصب خودکار ثبت شد؛ "
+                  . "اگر کرونِ ربات‌ساز فعال باشد در نوبت بعدی آن را انجام می‌دهد. برای انجام فوری روی سرور اجرا کنید: "
+                  . "php tools/ensure_template_vendor.php {$type}"
+                : "پوشهٔ قالب نه برای کاربر وب قابل نوشتن است و نه ثبت درخواست نصب خودکار ممکن شد. "
+                  . "روی سرور با کاربر مالک اجرا کنید: php tools/ensure_template_vendor.php {$type}";
+            return ['ok' => false, 'queued' => $queued, 'note' => $note, 'output' => ''];
         }
         $composer = self::composerCommand();
         if ($composer === []) {

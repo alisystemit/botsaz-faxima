@@ -3355,9 +3355,50 @@ enforce_wwwdata_ownership() {
         fi
     done
     [ "$_did" = "1" ] && echo "   ✔ data/ and bots/ belong to www-data (recursive)"
+
+    # templates/: the code stays owned by root, but the web user must be able
+    # to write into template folders - Composer builds vendor/ there (mirzapro,
+    # other composer-based templates) and the panel's source sync overwrites
+    # files. Without group write, the panel fails with "template folder is not
+    # writable" and the only way out is running composer as root by hand.
+    # setgid + default ACL (when setfacl exists) keep the permission on files
+    # created by later root updates, whose umask would otherwise drop g+w.
+    local _tpl="$ROOT_DIR/templates" _tpl_did=0
+    if [ -d "$_tpl" ]; then
+        if chgrp -R www-data "$_tpl" 2>/dev/null; then
+            chmod -R g+rwX "$_tpl" 2>/dev/null || true
+            find "$_tpl" -type d -exec chmod g+s {} + 2>/dev/null || true
+            if has_cmd setfacl; then
+                setfacl -R -m g:www-data:rwX "$_tpl" 2>/dev/null || true
+                find "$_tpl" -type d -exec setfacl -m d:g:www-data:rwX {} + 2>/dev/null || true
+            fi
+            _tpl_did=1
+        else
+            echo "   ⚠️  Could not chgrp templates/ - run:"
+            echo "       chgrp -R www-data '$_tpl' && chmod -R g+rwX '$_tpl'"
+        fi
+    fi
+    [ "$_tpl_did" = "1" ] && echo "   ✔ templates/ is writable by www-data (root keeps code ownership)"
+    return 0
+}
+
+# Composer-based templates do not ship vendor/ in git (mirzapro ignores it).
+# Build it now, as root, so the panel never has to write there at all and the
+# new template is selectable immediately after installation.
+prepare_template_dependencies() {
+    [ "$(id -u)" -eq 0 ] || return 0
+    [ -n "${PHP_BIN:-}" ] && [ -x "$PHP_BIN" ] || return 0
+    [ -f "$ROOT_DIR/tools/ensure_template_vendor.php" ] || return 0
+    # umask 002 keeps vendor/ group-writable for the web user (setgid is set above)
+    if ( umask 002; "$PHP_BIN" "$ROOT_DIR/tools/ensure_template_vendor.php" all >/tmp/botsaz-template-vendor.log 2>&1 ); then
+        echo "   ✔ template dependencies ready (vendor/ + compatibility patches)"
+    else
+        echo "   ⚠️  some template dependencies failed - see /tmp/botsaz-template-vendor.log"
+    fi
     return 0
 }
 enforce_wwwdata_ownership
+prepare_template_dependencies
 # ===== FIX: Apache restart =====
 # If the project is under /root, Apache (www-data) needs write access to data/ and bots/
 # and the vhost needs to be properly configured.
