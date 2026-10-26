@@ -8,6 +8,13 @@
 
 set -e
 
+# ===== Composer must never wait for input =====
+# As root, Composer first asks on stdin: "Continue as root/super user [yes]?".
+# A non-interactive installer would sit on that prompt forever, so suppress it
+# globally and detach every probe from the terminal.
+export COMPOSER_ALLOW_SUPERUSER=1
+export COMPOSER_NO_INTERACTION=1
+
 # ===== UTF-8 guard (emoji and box-drawing need it) =====
 # On a non-UTF-8 terminal every multi-byte character is printed as garbage.
 # This message is deliberately ASCII-only so it stays readable even when the
@@ -2369,9 +2376,18 @@ echo "   Extensions ✔ (curl, mbstring, pdo_mysql, mysqli, sqlite3)"
 # the build to cron. Install with apt when possible, then fall back to the
 # bundled phar - this step must never abort the installation.
 echo "✅ Checking Composer..."
+composer_version_line() {
+    # Never touch the terminal: a root prompt would block the installer forever.
+    if has_cmd timeout; then
+        timeout -k 2 10 composer --no-interaction --version < /dev/null 2>/dev/null | head -n1
+    else
+        composer --no-interaction --version < /dev/null 2>/dev/null | head -n1
+    fi
+}
+
 ensure_composer() {
     if has_cmd composer; then
-        echo "   Composer ✔ $(composer --version 2>/dev/null | head -n1)"
+        echo "   Composer ✔ $(composer_version_line)"
         return 0
     fi
     if can_apt && ask_yes "   Install Composer automatically with apt? (needed to build template dependencies)"; then
@@ -2388,7 +2404,7 @@ ensure_composer() {
         fi
         hash -r 2>/dev/null || true
         if [ "$apt_ok" -eq 1 ] && has_cmd composer; then
-            echo "   Composer ✔ $(composer --version 2>/dev/null | head -n1)"
+            echo "   Composer ✔ $(composer_version_line)"
             return 0
         fi
         echo "   ⚠️  apt could not install Composer in time - trying the bundled phar."

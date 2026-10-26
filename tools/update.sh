@@ -50,6 +50,16 @@
 
 set +e
 
+# ===== Composer بدون سؤال تعاملی =====
+# Composer وقتی با root اجرا شود، قبل از هر کاری روی stdin می‌پرسد:
+#   "Do not run Composer as root/super user! ... Continue as root/super user [yes]?"
+# اگر stdin به ترمینال وصل باشد، Step 4b تا ابد منتظر جواب می‌ماند؛ حتی
+# timeout هم اگر prompt پیش از راه‌اندازی کامل باشد کمکی نمی‌کند. این دو
+# متغیر (همان‌هایی که Manager برای اجرای PHP استفاده می‌کند) سؤال را حذف
+# می‌کنند. ورودی همهٔ فراخوانی‌ها هم به /dev/null وصل می‌شود.
+export COMPOSER_ALLOW_SUPERUSER=1
+export COMPOSER_NO_INTERACTION=1
+
 # ===== رنگ‌ها و پیام‌ها =====
 R='\033[0;31m'; G='\033[0;32m'; Y='\033[1;33m'; B='\033[1;34m'; NC='\033[0m'
 ERRORS=0
@@ -334,9 +344,9 @@ ensure_composer() {
     # قفل شبکه یا prompt تعاملی). ۱۰ ثانیه سقف است، بعد phar جایگزین می‌شود.
     local _ver=""
     if command -v timeout >/dev/null 2>&1; then
-      _ver="$(timeout -k 2 10 composer --version 2>/dev/null | head -n1 || true)"
+      _ver="$(timeout -k 2 10 composer --no-interaction --version < /dev/null 2>/dev/null | head -n1 || true)"
     else
-      _ver="$(composer --version 2>/dev/null | head -n1 || true)"
+      _ver="$(composer --no-interaction --version < /dev/null 2>/dev/null | head -n1 || true)"
     fi
     if [ -n "$_ver" ]; then
       info "Composer: $_ver"
@@ -359,7 +369,7 @@ ensure_composer() {
     fi
     info "Verifying bundled Composer: $_cand (max 10s)"
     # shellcheck disable=SC2086
-    if $_phar_to "$PHP_BIN" "$_cand" --version >> "$_phar_log" 2>&1; then
+    if $_phar_to "$PHP_BIN" "$_cand" --no-interaction --version < /dev/null >> "$_phar_log" 2>&1; then
       _phar="$_cand"
       break
     fi
