@@ -157,9 +157,23 @@ class Manager
             }
             $_need = (string)($_spec['autoload'] ?? 'vendor/autoload.php');
             if (!is_file($_dir . '/' . $_need)) {
-                return "قالب «{$_tpl}» ناقص است ({$_dir}/{$_need} پیدا نشد)"
-                    . "\nحل: git pull کنید - نه composer install"
-                    . "\n(ریشهٔ پروژه اصلاً composer.json ندارد، پس آن کار نمی‌کند)";
+                // قالب‌هایی مثل میرزا بات پرو vendor/ را در گیت ندارند. قبلاً
+                // ساخت با پیام «git pull کنید» رد می‌شد که غلط بود؛ وابستگی‌ها
+                // با Composer ساخته می‌شوند. یک بار خودکار تلاش می‌کنیم تا
+                // کاربر مجبور به دستور دستی روی سرور نباشد.
+                if (str_starts_with(str_replace('\\', '/', $_need), 'vendor/') && self::templateHasComposer($_tpl)) {
+                    $vendor = self::ensureTemplateVendor($_tpl, 300);
+                    if (empty($vendor['ok']) || !is_file($_dir . '/' . $_need)) {
+                        return "قالب «{$_tpl}» وابستگی‌های Composer را ندارد و نصب خودکار هم ممکن نشد.\n"
+                            . (string)($vendor['note'] ?? '')
+                            . (trim((string)($vendor['output'] ?? '')) !== '' ? "\n" . mb_substr(trim((string)$vendor['output']), -600) : '')
+                            . "\nحل: composer install --no-dev را داخل {$_dir} اجرا کنید یا vendor/ را از نسخهٔ سالم کپی کنید.";
+                    }
+                } else {
+                    return "قالب «{$_tpl}» ناقص است ({$_dir}/{$_need} پیدا نشد)"
+                        . "\nحل: git pull کنید - نه composer install"
+                        . "\n(ریشهٔ پروژه اصلاً composer.json ندارد، پس آن کار نمی‌کند)";
+                }
             }
             // قالب SQLite به MySQL نیاز ندارد؛ برعکس، قالب MySQL بدون سرور MySQL بی‌معنی است
             if (self::templateDb($_tpl) === 'sqlite') {
@@ -1030,6 +1044,231 @@ public static function validTypes(): array
         } catch (Throwable $e) {
             return '';
         }
+    }
+
+    // =================================================================
+    // وابستگی‌های Composer قالب‌ها
+    //
+    // بعضی قالب‌ها (مثل میرزا بات پرو) vendor/ را همراه سورس گیت‌هاب نمی‌آورند
+    // (upstream آن را در .gitignore دارد). بدون vendor/autoload.php هم
+    // availableTypes() قالب را «نصب‌شده» نمی‌داند و هم index.php ربات با
+    // fatal error می‌میرد. قبلاً تنها راه، اجرای دستی composer install روی
+    // سرور بود؛ یعنی قالب در پنل «نصب نشده» می‌ماند و کاربر نمی‌توانست
+    // انتخابش کند. این بخش همان کار را خودکار انجام می‌دهد.
+    // =================================================================
+
+    /** آیا فایل autoload ثبت‌شده در رجیستری واقعاً روی دیسک هست؟ */
+    public static function templateVendorReady(string $type): bool
+    {
+        $spec = self::templateSpec($type);
+        if ($spec === null) return false;
+        $dir = self::templateDir($type);
+        $need = (string)($spec['autoload'] ?? 'vendor/autoload.php');
+        return is_dir($dir) && $need !== '' && is_file($dir . '/' . $need);
+    }
+
+    /** آیا خود قالب composer.json دارد (یعنی vendor را Composer می‌سازد)؟ */
+    public static function templateHasComposer(string $type): bool
+    {
+        $spec = self::templateSpec($type);
+        if ($spec === null) return false;
+        $dir = self::templateDir($type);
+        return is_dir($dir) && is_file($dir . '/composer.json');
+    }
+
+    /** قالب روی دیسک هست، composer.json دارد، ولی وابستگی‌هایش نصب نیستند */
+    public static function templateVendorNeeded(string $type): bool
+    {
+        if (!self::isBuildable($type)) return false;
+        $dir = self::templateDir($type);
+        if (!is_dir($dir)) return false;
+        return !self::templateVendorReady($type) && self::templateHasComposer($type);
+    }
+
+    /**
+     * دستور پایهٔ Composer — composer.phar داخل پروژه مقدم است چون روی
+     * هاست‌های اشتراکی معمولاً composer سراسری نصب نیست.
+     *
+     * @return string[] آرگومان‌های پایه؛ آرایهٔ خالی یعنی پیدا نشد
+     */
+    public static function composerCommand(): array
+    {
+        $root = dirname(__DIR__);
+        foreach ([$root . '/composer.phar', $root . '/tools/composer.phar', $root . '/data/composer.phar'] as $phar) {
+            if (is_file($phar)) return [self::phpBinary(), $phar];
+        }
+        if (!function_exists('shell_exec')) return [];
+        $find = DIRECTORY_SEPARATOR === '\\' ? 'where composer 2>NUL' : 'command -v composer 2>/dev/null';
+        $out = @shell_exec($find);
+        if (!is_string($out)) return [];
+        foreach (preg_split('/\r\n|\r|\n/', trim($out)) ?: [] as $line) {
+            $line = trim($line);
+            if ($line !== '' && (is_file($line) || $line === 'composer' || @is_executable($line))) {
+                return [$line];
+            }
+        }
+        return [];
+    }
+
+    /**
+     * اجرای composer install برای یک قالب (اگر لازم باشد).
+     *
+     * @return array{ok:bool,note:string,output:string}
+     */
+    public static function ensureTemplateVendor(string $type, int $timeoutSec = 240): array
+    {
+        if (self::templateVendorReady($type)) {
+            return ['ok' => true, 'note' => 'وابستگی‌های Composer از قبل نصب‌اند.', 'output' => ''];
+        }
+        if (!self::templateHasComposer($type)) {
+            return ['ok' => false, 'note' => 'این قالب composer.json ندارد؛ vendor باید همراه سورس باشد.', 'output' => ''];
+        }
+        $dir = self::templateDir($type);
+        if (!is_writable($dir)) {
+            return ['ok' => false, 'note' => "پوشهٔ قالب برای نوشتن قابل دسترسی نیست: {$dir}", 'output' => ''];
+        }
+        $composer = self::composerCommand();
+        if ($composer === []) {
+            return [
+                'ok' => false,
+                'note' => 'Composer روی سرور پیدا نشد. فایل composer.phar را در ریشهٔ ربات‌ساز بگذارید یا composer را نصب کنید (apt install composer).',
+                'output' => '',
+            ];
+        }
+
+        // دو ساخت هم‌زمان نباید یک vendor را هم‌زمان بسازند.
+        $lockPath = dirname(__DIR__) . '/data/template_vendor.lock';
+        @mkdir(dirname($lockPath), 0755, true);
+        $lock = @fopen($lockPath, 'c');
+        if ($lock === false) {
+            return ['ok' => false, 'note' => 'قفل نصب وابستگی ساخته نشد (مجوز نوشتن data/؟)', 'output' => ''];
+        }
+        if (!@flock($lock, LOCK_EX | LOCK_NB)) {
+            @fclose($lock);
+            return ['ok' => false, 'note' => 'نصب وابستگی همین حالا توسط درخواست دیگری در حال اجراست؛ چند لحظه بعد دوباره تلاش کنید.', 'output' => ''];
+        }
+
+        try {
+            $cmd = array_merge($composer, [
+                'install', '--no-dev', '--no-interaction', '--no-progress',
+                '--prefer-dist', '--no-scripts', '--optimize-autoloader',
+            ]);
+            $env = getenv();
+            if (!is_array($env)) $env = [];
+            $env['COMPOSER_HOME'] = dirname(__DIR__) . '/data/composer';
+            $env['COMPOSER_ALLOW_SUPERUSER'] = '1';
+            $env['COMPOSER_NO_INTERACTION'] = '1';
+            @mkdir($env['COMPOSER_HOME'], 0755, true);
+
+            $run = self::runProcess($cmd, $dir, $env, $timeoutSec);
+            $output = self::sanitizeDbError(mb_substr($run['out'] . "\n" . $run['err'], -4000));
+            if (self::templateVendorReady($type)) {
+                return ['ok' => true, 'note' => 'وابستگی‌های Composer با موفقیت نصب شدند.', 'output' => $output];
+            }
+            $note = !empty($run['timeout'])
+                ? "نصب وابستگی بیش از {$timeoutSec} ثانیه طول کشید و متوقف شد."
+                : 'composer install ناموفق بود (کد ' . (int)$run['rc'] . '). خروجی را ببینید.';
+            return ['ok' => false, 'note' => $note, 'output' => $output];
+        } finally {
+            @flock($lock, LOCK_UN);
+            @fclose($lock);
+        }
+    }
+
+    /**
+     * اجرای یک فرمان بدون shell (آرگومان‌ها جدا) با محدودیت زمان.
+     * روی ویندوز آرایهٔ فرمان از PHP 7.4 پشتیبانی می‌شود.
+     *
+     * @return array{rc:int,out:string,err:string,timeout:bool}
+     */
+    private static function runProcess(array $cmd, string $cwd, array $env, int $timeoutSec): array
+    {
+        if (!function_exists('proc_open')) {
+            return ['rc' => -1, 'out' => '', 'err' => 'تابع proc_open غیرفعال است', 'timeout' => false];
+        }
+        $desc = [1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
+        $proc = @proc_open($cmd, $desc, $pipes, $cwd, $env);
+        if (!is_resource($proc)) {
+            return ['rc' => -1, 'out' => '', 'err' => 'اجرای فرمان ممکن نشد (proc_open)', 'timeout' => false];
+        }
+        stream_set_blocking($pipes[1], false);
+        stream_set_blocking($pipes[2], false);
+        $out = '';
+        $err = '';
+        $timedOut = false;
+        $started = microtime(true);
+        while (true) {
+            $out .= (string)stream_get_contents($pipes[1]);
+            $err .= (string)stream_get_contents($pipes[2]);
+            $st = proc_get_status($proc);
+            if (!$st['running']) break;
+            if ((microtime(true) - $started) > $timeoutSec) {
+                $timedOut = true;
+                @proc_terminate($proc, 9);
+                break;
+            }
+            usleep(100000);
+        }
+        $out .= (string)stream_get_contents($pipes[1]);
+        $err .= (string)stream_get_contents($pipes[2]);
+        @fclose($pipes[1]);
+        @fclose($pipes[2]);
+        $rc = (int)@proc_close($proc);
+        if ($timedOut) $rc = -1;
+        return ['rc' => $rc, 'out' => $out, 'err' => $err, 'timeout' => $timedOut];
+    }
+
+    /**
+     * پچ‌های سازگاری که باید روی سورسِ کپی‌شده (و بعد از سینک گیت) اعمال شوند.
+     *
+     * چرا اینجا و نه فقط در فایل قالب؟ چون دکمهٔ «دریافت سورس بروز» فایل‌های
+     * تفاوت‌دار را از گیت‌هاب بازنویسی می‌کند؛ اگر پچ فقط در فایل باشد، اولین
+     * سینک آن را برمی‌گرداند و ربات دوباره روی PHP 8.3 هر پیام را رد می‌کند.
+     * این متد idempotent است: اگر پچ از قبل هست، کاری نمی‌کند.
+     *
+     * @return string[] فهرست پچ‌های اعمال‌شده (برای لاگ)
+     */
+    public static function applyTemplateCompatPatches(string $dir, string $type): array
+    {
+        $applied = [];
+        if ($type !== 'mirzapro') return $applied;
+
+        // upstream حداقل PHP را 8.5.12 گذاشته ولی composer.json خودش >=8.2
+        // می‌خواهد؛ روی 8.2/8.3 ربات ساخته می‌شد و بعد هر پیام را رد می‌کرد.
+        $file = $dir . '/function.php';
+        $raw = is_file($file) ? @file_get_contents($file) : false;
+        if ($raw !== false) {
+            $new = preg_replace(
+                "/const\\s+MIN_PHP_VERSION\\s*=\\s*(['\"])[^'\"]*\\1\\s*;/",
+                "const MIN_PHP_VERSION = '8.2.0';",
+                $raw,
+                1,
+                $count
+            );
+            if (is_string($new) && $count > 0 && $new !== $raw) {
+                $tmp = $file . '.botsaztmp-' . bin2hex(random_bytes(3));
+                if (@file_put_contents($tmp, $new) !== false && self::lintPhpFile($tmp) && @rename($tmp, $file)) {
+                    $applied[] = 'MIN_PHP_VERSION → 8.2.0';
+                } else {
+                    @unlink($tmp);
+                }
+            }
+        }
+        return $applied;
+    }
+
+    /**
+     * آیا نسخهٔ PHP فعلی از گاردِ خودِ ربات (MIN_PHP_VERSION) رد می‌شود؟
+     * اگر قالب چنین ثابتی نداشته باشد، چیزی برای بررسی نیست ⇒ true.
+     */
+    public static function templateRuntimeOk(string $dir, string $type): bool
+    {
+        if ($type !== 'mirzapro') return true;
+        $file = $dir . '/function.php';
+        $raw = is_file($file) ? @file_get_contents($file) : false;
+        if ($raw === false) return false;
+        if (!preg_match("/const\\s+MIN_PHP_VERSION\\s*=\\s*['\"]([^'\"]+)['\"]/", $raw, $m)) return true;
+        return version_compare(PHP_VERSION, $m[1], '>=');
     }
 
     /** رمزگشایی توکن ذخیره‌شده ربات فرزند (سازگار با توکن‌های ساده قدیمی و کلید قدیمی) */

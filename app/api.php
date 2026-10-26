@@ -351,6 +351,21 @@ try {
             out(200, ['ok' => true]);
         }
 
+        case 'template_vendor': {
+            // نصب خودکار وابستگی‌های Composer یک قالب (مثل میرزا بات پرو).
+            // idempotent است: اگر vendor آماده باشد فوراً ok برمی‌گردد.
+            $type = (string)($_POST['type'] ?? $_REQUEST['type'] ?? '');
+            if (Manager::templateSpec($type) === null) out(400, ['ok' => false, 'msg' => 'قالب نامعتبر']);
+            @set_time_limit(0);
+            $res = Manager::ensureTemplateVendor($type, 300);
+            out(200, [
+                'ok' => (bool)$res['ok'],
+                'msg' => (string)$res['note'],
+                'output' => (string)$res['output'],
+                'installed' => Manager::templateVendorReady($type),
+            ]);
+        }
+
         case 'templates': {
             // نکته: Manager::templates() یک آرایهٔ «کلید ⇒ مشخصات» است، نه لیست.
             // قبلاً همین ساختار خام به کلاینت می‌رفت و JS با ‎.map‎ روی آبجکت
@@ -375,6 +390,10 @@ try {
                     'repo'      => (string)($spec['repo'] ?? ''),
                     'min_php'   => $minPhp[$type] ?? null,
                     'installed' => isset($installed[$type]),
+                    // قالب روی دیسک هست ولی vendor/ (وابستگی Composer) ندارد:
+                    // «نصب نشده»ی ساده گمراه‌کننده است؛ UI دکمهٔ نصب خودکار می‌دهد.
+                    'vendor_ready' => Manager::templateVendorReady($type),
+                    'needs_vendor' => Manager::templateVendorNeeded($type),
                     // قالب غیر PHP (PGClockBot) نه ساختنی است نه «نصب‌نشدهٔ معیوب»؛
                     // UI باید «نصب جداگانه» نشان دهد، نه دکمهٔ نصب/آماده.
                     'buildable' => Manager::isBuildable($type),

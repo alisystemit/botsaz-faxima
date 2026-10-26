@@ -2841,6 +2841,19 @@ function buildBot(array $cfg, Store $store, string $TOKEN, int $owner, string $t
         $exclude = Manager::copyExcludes($type);
         Manager::copyDir($tplDir, $botDir, $exclude);
 
+        // ===== ۱ب) پچ‌های سازگاری روی نسخهٔ کپی‌شده =====
+        // عمداً روی نسخهٔ داخل bots/ هم اعمال می‌شود (نه فقط قالب): اگر قالب
+        // با «دریافت سورس بروز» از گیت‌هاب بازنویسی شده باشد، پچ قالب از بین
+        // رفته است. بدون این، رباتی ساخته می‌شود که روی PHP 8.3 هر پیام را
+        // با «نسخه PHP کافی نیست» رد می‌کند.
+        $tplPatches = Manager::applyTemplateCompatPatches($botDir, $type);
+        if ($type === 'mirzapro' && !Manager::templateRuntimeOk($botDir, $type)) {
+            throw new Exception(
+                "نسخه PHP این سرور (" . PHP_VERSION . ") برای قالب «{$type}» کافی نیست و پچ سازگاری هم اعمال نشد. "
+                . "فایل function.php ربات را بررسی کنید (MIN_PHP_VERSION)."
+            );
+        }
+
         // ===== ۲) دیتابیس =====
         $parts = parse_url(rtrim($cfg['base_url'] ?? '', '/'));
         $domainPath = ($parts['host'] ?? '') . ($parts['path'] ?? '') . '/bots/' . $slug;

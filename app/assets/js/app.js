@@ -563,6 +563,9 @@ function vTemplates(){
       // قالب فهرست‌فقط (PGClockBot): آماده/نصب‌نشده معنا ندارد؛ جداگانه نصب می‌شود
       var buildable = t.buildable !== false;
       var okk = buildable && t.installed !== false;
+      // پوشه هست ولی vendor/ ندارد (مثل میرزا بات پرو که vendor را در گیت
+      // ندارد) — این «نصب نشده»ی ساده نیست؛ یک کلیک نصب خودکار کافی است.
+      var needVendor = buildable && !okk && t.needs_vendor === true;
       if (okk) ready++;
       return '<div class="tpl"><div class="avatar">' + esc(t.icon || '🧩') + '</div>' +
         '<div style="flex:1;min-width:0"><b>' + esc(t.label || t.type) + '</b>' +
@@ -574,7 +577,11 @@ function vTemplates(){
           (t.cron ? ' • کرون' : '') +
         '</div></div>' +
         (buildable
-          ? '<span class="badge ' + (okk ? 'b-ok' : 'b-bad') + '">' + (okk ? 'آماده' : 'نصب نشده') + '</span>'
+          ? (okk
+              ? '<span class="badge b-ok">آماده</span>'
+              : (needVendor
+                  ? '<button class="btn btn-acc btn-sm" onclick="MX.tplVendor(\'' + esc(t.type) + '\')">🔧 نصب وابستگی</button>'
+                  : '<span class="badge b-bad">نصب نشده</span>'))
           : '<span class="badge b-bad">نصب جداگانه</span>') +
         '</div>';
     }).join('');
@@ -585,6 +592,7 @@ function vTemplates(){
         '<div class="kv"><b>آیکون + نام</b><span>همان‌طور که در منوی ربات دیده می‌شود</span></div>' +
         '<div class="kv"><b>SQLite / MySQL</b><span>نوع دیتابیس قالب</span></div>' +
         '<div class="kv"><b>«نصب نشده»</b><span>پوشهٔ قالب روی سرور نیست</span></div>' +
+        '<div class="kv"><b>«نصب وابستگی»</b><span>پوشهٔ قالب هست ولی vendor/ ندارد؛ با یک کلیک Composer نصبش می‌کند</span></div>' +
         '<div class="kv"><b>«نصب جداگانه»</b><span>اپ غیر PHP است (مثل PGClockBot) و با این ربات‌ساز ساخته نمی‌شود</span></div>' +
       '</div>';
   }).catch(function(){ err('خطا در دریافت اطلاعات قالب‌ها'); });
@@ -837,6 +845,13 @@ function logInit(){
 
 /* ---------- اکشن‌ها ---------- */
 window.MX = {
+  tplVendor: function(type){
+    toast('در حال نصب وابستگی‌ها… ممکن است چند لحظه طول بکشد');
+    call('template_vendor', {method:'POST', data:{type:type}}).then(function(d){
+      if (d && d.ok) { ok('وابستگی‌ها نصب شد؛ قالب آماده است ✅'); render(); }
+      else { bad((d && d.msg) || 'نصب وابستگی ناموفق بود'); }
+    }).catch(function(){ bad('خطا در نصب وابستگی'); });
+  },
   setStatus: function(id, s){ call('bot_status', {method:'POST', data:{id:id,status:s}}).then(function(d){ toast(d.ok?'انجام شد ✅':(d.msg||'خطا')); haptic(); render(); }); },
   delBot: function(id){
     askConfirm('حذف ربات؟', 'این عملیات پوشه و دیتابیس ربات را برای همیشه پاک می‌کند و قابل بازگشت نیست.', function(){

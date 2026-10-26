@@ -716,6 +716,32 @@ class SelfUpdate
             unset($state['_remote'][$key]);
             $out['results'][$key] = ['ok' => true, 'skipped' => false, 'applied' => count($applied), 'files' => $applied];
         }
+
+        // ===== بعد از سینک: ترمیم چیزهایی که سورس گیت ندارد =====
+        // سینک، فایل‌های تفاوت‌دار را از گیت‌هاب بازنویسی می‌کند؛ پچ‌های
+        // سازگاری ما را برمی‌گرداند و vendor/ هم در گیت نیست. هر دو اینجا
+        // دوباره اعمال می‌شوند تا قالب بعد از هر بروزرسانی «آماده» بماند و
+        // کاربر لازم نباشد دستی composer install بزند.
+        foreach (Manager::templates() as $key => $spec) {
+            if (!Manager::isBuildable($key)) continue;
+            $dir = Manager::templateDir($key);
+            if (!is_dir($dir)) continue;
+            try {
+                $patches = Manager::applyTemplateCompatPatches($dir, $key);
+                if ($patches !== []) {
+                    $out['results'][$key]['patches'] = $patches;
+                }
+            } catch (Throwable $e) {
+                $out['results'][$key]['patches_error'] = $e->getMessage();
+            }
+            if (Manager::templateVendorNeeded($key)) {
+                $v = Manager::ensureTemplateVendor($key, 300);
+                $out['results'][$key]['vendor'] = (string)$v['note'];
+                $out['results'][$key]['vendor_ok'] = (bool)$v['ok'];
+                if (!$v['ok']) $out['ok'] = false;
+            }
+        }
+
         self::saveTemplateSourceState($state);
         return $out;
     }

@@ -54,6 +54,15 @@ foreach ((array)($run['results'] ?? []) as $key => $res) {
     } else {
         echo "✔ {$key}: " . (int)($res['applied'] ?? 0) . " فایل\n";
     }
+    if (!empty($res['patches']) && is_array($res['patches'])) {
+        echo "  ↳ پچ سازگاری: " . implode('، ', $res['patches']) . "\n";
+    }
+    if (!empty($res['patches_error'])) {
+        echo "  ⚠️ پچ سازگاری اعمال نشد: " . (string)$res['patches_error'] . "\n";
+    }
+    if (array_key_exists('vendor_ok', $res)) {
+        echo ($res['vendor_ok'] ? "  ↳ وابستگی‌ها: " : "  ✘ وابستگی‌ها: ") . (string)($res['vendor'] ?? '') . "\n";
+    }
 }
 
 if (!empty($run['queued'])) {
