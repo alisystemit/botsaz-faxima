@@ -321,6 +321,10 @@ grant_templates_write() {
 # apt با سقف زمانی سخت اجرا می‌شود و در هر حالتی آپدیت ادامه پیدا می‌کند.
 # برای اجبار به نصب سیستمی: BOTSAZ_FORCE_APT_COMPOSER=1
 ensure_composer() {
+  if [ "${BOTSAZ_SKIP_COMPOSER:-0}" = "1" ]; then
+    warn "BOTSAZ_SKIP_COMPOSER=1 — Composer check skipped; template vendors fall back to the bundled cache"
+    return 0
+  fi
   if [ "$DRY_RUN" -eq 1 ]; then
     info "DRY-RUN: would ensure Composer is installed (bundled phar first, bounded apt fallback)"
     return 0
@@ -342,13 +346,24 @@ ensure_composer() {
   fi
 
   # ۱) composer.phar همراه پروژه — آفلاین، سریع و بدون apt
-  local _phar="" _cand
+  # خودِ بررسی phar هم باید سقف زمانی داشته باشد: اگر PHP/فار یک بار دیگر
+  # بی‌حرکت بماند، Step 4b نباید کل آپدیت را قفل کند.
+  local _phar="" _cand _phar_log="$BACKUP_DIR/composer_phar.log" _phar_to=""
+  command -v timeout >/dev/null 2>&1 && _phar_to="timeout -k 2 10"
+  : > "$_phar_log" 2>/dev/null || true
   for _cand in "$LIVE_DIR/tools/composer.phar" "$SRC_DIR/tools/composer.phar"; do
     [ -f "$_cand" ] || continue
-    if [ -n "${PHP_BIN:-}" ] && "$PHP_BIN" "$_cand" --version >/dev/null 2>&1; then
+    if [ -z "${PHP_BIN:-}" ]; then
+      warn "PHP CLI unknown — cannot verify $_cand"
+      continue
+    fi
+    info "Verifying bundled Composer: $_cand (max 10s)"
+    # shellcheck disable=SC2086
+    if $_phar_to "$PHP_BIN" "$_cand" --version >> "$_phar_log" 2>&1; then
       _phar="$_cand"
       break
     fi
+    warn "Bundled Composer at $_cand did not respond — see $_phar_log"
   done
   if [ -n "$_phar" ] && [ "${BOTSAZ_FORCE_APT_COMPOSER:-0}" != "1" ]; then
     ok "Composer via bundled tools/composer.phar — apt skipped (prevents the Step 4b hang)"
